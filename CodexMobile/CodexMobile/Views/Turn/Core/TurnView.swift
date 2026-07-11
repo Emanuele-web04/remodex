@@ -18,8 +18,8 @@ private enum TurnWorktreeOverlayRoute: Equatable {
 struct TurnView: View {
     let thread: CodexThread
     let isWakingMacDisplayRecovery: Bool
-    private let initialShouldAnchorToAssistantResponse: Bool
-    private let onInitialAssistantAnchorConsumed: (() -> Void)?
+    private let initiallyAwaitingAssistantResponse: Bool
+    private let onInitialAssistantResponseTrackingConsumed: (() -> Void)?
     var onOpenTerminal: ((String?) -> Void)? = nil
 
     @Environment(CodexService.self) private var codex
@@ -45,23 +45,23 @@ struct TurnView: View {
     @State private var isForkingThread = false
     @State private var checkedOutElsewhereAlert: CheckedOutElsewhereAlert?
     @StateObject private var voiceInput = VoiceInputCoordinator()
-    @State private var hasConsumedInitialAssistantAnchor = false
+    @State private var hasConsumedInitialAssistantResponseTracking = false
     @State private var workspaceFilePreviewRequest: WorkspaceFilePreviewRequest?
 
     init(
         thread: CodexThread,
         isWakingMacDisplayRecovery: Bool,
-        initialShouldAnchorToAssistantResponse: Bool = false,
-        onInitialAssistantAnchorConsumed: (() -> Void)? = nil,
+        initiallyAwaitingAssistantResponse: Bool = false,
+        onInitialAssistantResponseTrackingConsumed: (() -> Void)? = nil,
         onOpenTerminal: ((String?) -> Void)? = nil
     ) {
         self.thread = thread
         self.isWakingMacDisplayRecovery = isWakingMacDisplayRecovery
-        self.initialShouldAnchorToAssistantResponse = initialShouldAnchorToAssistantResponse
-        self.onInitialAssistantAnchorConsumed = onInitialAssistantAnchorConsumed
+        self.initiallyAwaitingAssistantResponse = initiallyAwaitingAssistantResponse
+        self.onInitialAssistantResponseTrackingConsumed = onInitialAssistantResponseTrackingConsumed
         self.onOpenTerminal = onOpenTerminal
         _viewModel = State(initialValue: TurnViewModel(
-            shouldAnchorToAssistantResponse: initialShouldAnchorToAssistantResponse
+            isAwaitingAssistantResponse: initiallyAwaitingAssistantResponse
         ))
     }
 
@@ -163,7 +163,7 @@ struct TurnView: View {
                 initialTurnsLoaded: renderSnapshot.initialTurnsLoaded,
                 isLoadingRemoteEarlierMessages: renderSnapshot.isLoadingOlderHistory,
                 olderHistoryLoadErrorMessage: renderSnapshot.olderHistoryLoadErrorMessage,
-                shouldAnchorToAssistantResponse: shouldAnchorToAssistantResponseBinding,
+                isAwaitingAssistantResponse: isAwaitingAssistantResponseBinding,
                 isComposerFocused: isInputFocused,
                 isComposerAutocompletePresented: isComposerAutocompletePresented,
                 emptyState: resolvedEmptyConversationState,
@@ -654,10 +654,10 @@ struct TurnView: View {
 
     // MARK: - Bindings
 
-    private var shouldAnchorToAssistantResponseBinding: Binding<Bool> {
+    private var isAwaitingAssistantResponseBinding: Binding<Bool> {
         Binding(
-            get: { viewModel.shouldAnchorToAssistantResponse },
-            set: { viewModel.shouldAnchorToAssistantResponse = $0 }
+            get: { viewModel.isAwaitingAssistantResponse },
+            set: { viewModel.isAwaitingAssistantResponse = $0 }
         )
     }
 
@@ -988,10 +988,10 @@ struct TurnView: View {
 
     private func handleInitialAppear(activeTurnID: String?) {
         syncApprovalAlertPresentation()
-        if initialShouldAnchorToAssistantResponse && !hasConsumedInitialAssistantAnchor {
-            hasConsumedInitialAssistantAnchor = true
-            viewModel.shouldAnchorToAssistantResponse = true
-            onInitialAssistantAnchorConsumed?()
+        if initiallyAwaitingAssistantResponse && !hasConsumedInitialAssistantResponseTracking {
+            hasConsumedInitialAssistantResponseTracking = true
+            viewModel.isAwaitingAssistantResponse = true
+            onInitialAssistantResponseTrackingConsumed?()
         }
         if let pendingComposerAction = codex.consumePendingComposerAction(for: thread.id) {
             viewModel.applyPendingComposerAction(pendingComposerAction)

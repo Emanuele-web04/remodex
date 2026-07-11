@@ -52,6 +52,7 @@ struct PlanAccessorySnapshot: Equatable {
     let completedStepCount: Int
     let totalStepCount: Int
     let isStreaming: Bool
+    let currentStepNumber: Int
 
     init(
         title: String = "Plan",
@@ -59,7 +60,8 @@ struct PlanAccessorySnapshot: Equatable {
         status: PlanAccessoryStatus,
         completedStepCount: Int,
         totalStepCount: Int,
-        isStreaming: Bool = false
+        isStreaming: Bool = false,
+        currentStepNumber: Int? = nil
     ) {
         self.title = title
         self.summary = summary
@@ -67,6 +69,10 @@ struct PlanAccessorySnapshot: Equatable {
         self.completedStepCount = completedStepCount
         self.totalStepCount = totalStepCount
         self.isStreaming = isStreaming
+        let fallbackStepNumber = min(completedStepCount + 1, totalStepCount)
+        self.currentStepNumber = totalStepCount > 0
+            ? min(max(currentStepNumber ?? fallbackStepNumber, 1), totalStepCount)
+            : 0
     }
 
     init(message: CodexMessage) {
@@ -74,23 +80,19 @@ struct PlanAccessorySnapshot: Equatable {
         let completedStepCount = steps.filter { $0.status == .completed }.count
         let totalStepCount = steps.count
         let status = Self.resolveStatus(from: steps, completedStepCount: completedStepCount)
+        let highlightedStepIndex = Self.highlightedStepIndex(in: steps)
 
         self.init(
             summary: Self.resolveSummary(from: message, steps: steps),
             status: status,
             completedStepCount: completedStepCount,
             totalStepCount: totalStepCount,
-            isStreaming: message.isStreaming
+            isStreaming: message.isStreaming,
+            currentStepNumber: highlightedStepIndex.map { $0 + 1 }
         )
     }
 
     /// 1-based index of the step currently being worked on, capped at the total.
-    /// Sits one past the completed steps so it reads as "the step in flight".
-    var currentStepNumber: Int {
-        guard totalStepCount > 0 else { return 0 }
-        return min(completedStepCount + 1, totalStepCount)
-    }
-
     var stepProgressText: String? {
         guard totalStepCount > 0 else { return nil }
         return "Step \(currentStepNumber) / \(totalStepCount)"
@@ -115,10 +117,8 @@ struct PlanAccessorySnapshot: Equatable {
     }
 
     private static func resolveSummary(from message: CodexMessage, steps: [CodexPlanStep]) -> String {
-        if let highlightedStep = steps.first(where: { $0.status == .inProgress })
-            ?? steps.first(where: { $0.status == .pending })
-            ?? steps.last {
-            return highlightedStep.step
+        if let highlightedStepIndex = highlightedStepIndex(in: steps) {
+            return steps[highlightedStepIndex].step
         }
 
         let explanation = normalizedPlanText(message.planState?.explanation)
@@ -128,6 +128,12 @@ struct PlanAccessorySnapshot: Equatable {
 
         let body = normalizedPlanText(message.text)
         return body ?? "Open plan details"
+    }
+
+    private static func highlightedStepIndex(in steps: [CodexPlanStep]) -> Int? {
+        steps.firstIndex(where: { $0.status == .inProgress })
+            ?? steps.firstIndex(where: { $0.status == .pending })
+            ?? steps.indices.last
     }
 
     // Filters placeholder copy so the compact UI only surfaces useful context.

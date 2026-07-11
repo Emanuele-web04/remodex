@@ -71,20 +71,20 @@ enum TurnTimelinePendingAssistantState {
     // The optimistic user row appears before the first assistant row; keep both
     // the thinking indicator and bottom anchor active during that short gap.
     static func isWaitingForAssistantResponse(
-        shouldAnchorToAssistantResponse: Bool,
+        isAwaitingAssistantResponse: Bool,
         messages: [CodexMessage]
     ) -> Bool {
-        shouldAnchorToAssistantResponse
+        isAwaitingAssistantResponse
             && messages.last?.role == .user
     }
 
     static func shouldTrackScrollGeometry(
-        shouldAnchorToAssistantResponse: Bool,
+        isAwaitingAssistantResponse: Bool,
         autoScrollMode: TurnScrollOwnership,
         isWaitingForAssistantResponse: Bool
     ) -> Bool {
-        !shouldAnchorToAssistantResponse
-            && autoScrollMode != .anchorAssistantResponse
+        !isAwaitingAssistantResponse
+            && autoScrollMode != .awaitingAssistantResponse
             && !isWaitingForAssistantResponse
     }
 
@@ -164,6 +164,7 @@ final class ScrollGeometryCoalescer {
     private var followBottomTask: Task<Void, Never>?
     private var followBottomGeneration = 0
     private var isFollowBottomCorrectionAnimating = false
+    private var pendingFollowBottomRequest: (@MainActor () -> Void)?
 
     func record(old: ScrollBottomState, new: ScrollBottomState) {
         if let pending {
@@ -206,7 +207,13 @@ final class ScrollGeometryCoalescer {
         after nanoseconds: UInt64,
         action: @escaping @MainActor (@escaping @MainActor () -> Void) -> Void
     ) {
-        guard followBottomTask == nil, !isFollowBottomCorrectionAnimating else { return }
+        guard followBottomTask == nil else { return }
+        if isFollowBottomCorrectionAnimating {
+            pendingFollowBottomRequest = { [weak self] in
+                self?.scheduleFollowBottom(after: nanoseconds, action: action)
+            }
+            return
+        }
         followBottomGeneration &+= 1
         let expectedGeneration = followBottomGeneration
         followBottomTask = Task { @MainActor [weak self] in
@@ -219,13 +226,19 @@ final class ScrollGeometryCoalescer {
             followBottomTask = nil
             isFollowBottomCorrectionAnimating = true
             action { [weak self] in
-                guard let self,
-                      followBottomGeneration == expectedGeneration else {
-                    return
-                }
-                isFollowBottomCorrectionAnimating = false
+                self?.completeFollowBottom(generation: expectedGeneration)
             }
         }
+    }
+
+    private func completeFollowBottom(generation: Int) {
+        guard followBottomGeneration == generation else { return }
+        isFollowBottomCorrectionAnimating = false
+
+        let pendingRequest = pendingFollowBottomRequest
+        pendingFollowBottomRequest = nil
+        guard latestObservedIsAtBottom == false else { return }
+        pendingRequest?()
     }
 
     func cancelFollowBottom() {
@@ -233,6 +246,7 @@ final class ScrollGeometryCoalescer {
         followBottomTask?.cancel()
         followBottomTask = nil
         isFollowBottomCorrectionAnimating = false
+        pendingFollowBottomRequest = nil
     }
 
     func cancel() {

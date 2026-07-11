@@ -47,7 +47,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     let isLoadingRemoteEarlierMessages: Bool
     let olderHistoryLoadErrorMessage: String?
 
-    @Binding var shouldAnchorToAssistantResponse: Bool
+    @Binding var isAwaitingAssistantResponse: Bool
     let isComposerFocused: Bool
     let isComposerAutocompletePresented: Bool
 
@@ -576,7 +576,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
 
     private var shouldShowPendingAssistantResponse: Bool {
         TurnTimelinePendingAssistantState.isWaitingForAssistantResponse(
-            shouldAnchorToAssistantResponse: shouldAnchorToAssistantResponse,
+            isAwaitingAssistantResponse: isAwaitingAssistantResponse,
             messages: messages
         )
     }
@@ -589,10 +589,10 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         )
     }
 
-    // Scroll geometry resumes after the optimistic send gap and assistant anchor settle.
+    // Scroll geometry resumes after the optimistic send gap resolves to a real assistant row.
     private var shouldTrackScrollGeometry: Bool {
         TurnTimelinePendingAssistantState.shouldTrackScrollGeometry(
-            shouldAnchorToAssistantResponse: shouldAnchorToAssistantResponse,
+            isAwaitingAssistantResponse: isAwaitingAssistantResponse,
             autoScrollMode: autoScrollMode,
             isWaitingForAssistantResponse: shouldShowPendingAssistantResponse
         )
@@ -604,7 +604,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         }
 
         // Loading older history is explicit user ownership of the viewport.
-        shouldAnchorToAssistantResponse = false
+        isAwaitingAssistantResponse = false
         transitionScrollOwnership(.loadEarlier)
         progressiveTailRevealTask?.cancel()
         progressiveTailRevealTask = nil
@@ -663,7 +663,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
 
     private func handleScrollToLatestButtonTap(using proxy: ScrollViewProxy) {
         HapticFeedback.shared.triggerImpactFeedback(style: .light)
-        shouldAnchorToAssistantResponse = false
+        isAwaitingAssistantResponse = false
         transitionScrollOwnership(.jumpToLatest)
         isUserTouchingScroll = false
         // Drop a queued pre-tap geometry commit and let app ownership maintain
@@ -704,7 +704,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         localEarlierRevealTask?.cancel()
         localEarlierRevealTask = nil
         transitionScrollOwnership(
-            .conversationOpened(shouldAnchorAssistantResponse: shouldAnchorToAssistantResponse)
+            .conversationOpened(isAwaitingAssistantResponse: isAwaitingAssistantResponse)
         )
         isProgressivelyRevealingRecentTail = shouldStageHeavyThreadOpen
     }
@@ -742,7 +742,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         pendingRemoteEarlierLoadMessageCount = nil
     }
 
-    // Timeline mutations still drive block-info refresh and assistant anchoring,
+    // Timeline mutations still drive block-info refresh and pending-response resolution,
     // but geometry decides when follow-bottom should actually fire.
     private func timelineHistoryChangeHandlers(using proxy: ScrollViewProxy) -> TurnTimelineHistoryChangeHandlersModifier {
         TurnTimelineHistoryChangeHandlersModifier(
@@ -772,7 +772,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             completedTurnIDs: completedTurnIDs,
             stoppedTurnIDs: stoppedTurnIDs,
             visibleTailCount: visibleTailCount,
-            shouldAnchorToAssistantResponse: shouldAnchorToAssistantResponse,
+            isAwaitingAssistantResponse: isAwaitingAssistantResponse,
             onThreadRunningChange: { handleThreadRunningChange(using: proxy) },
             onSendInFlightChange: { handleSendInFlightChange(using: proxy) },
             onThreadIDChange: { handleThreadIDChange(using: proxy) },
@@ -782,7 +782,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             onCompletedTurnIDsChange: { handleCompletedTurnIDsChange(using: proxy) },
             onStoppedTurnIDsChange: { handleStoppedTurnIDsChange(using: proxy) },
             onVisibleTailCountChange: handleVisibleTailCountChange,
-            onAssistantAnchorChange: { handleAssistantAnchorChange($0, using: proxy) }
+            onAwaitingAssistantResponseChange: { handleAwaitingAssistantResponseChange($0, using: proxy) }
         )
     }
 
@@ -829,10 +829,10 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         debugTimelineLog("isSendInFlight changed value=\(isSendInFlight)")
         if isSendInFlight {
             transitionScrollOwnership(
-                .sendBegan(shouldAnchorAssistantResponse: shouldAnchorToAssistantResponse)
+                .sendBegan(isAwaitingAssistantResponse: isAwaitingAssistantResponse)
             )
             isScrolledToBottom = true
-            if !shouldAnchorToAssistantResponse {
+            if !isAwaitingAssistantResponse {
                 scrollToBottom(using: proxy)
             }
         }
@@ -882,17 +882,17 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         recomputeRenderItemsAndBlockInfoIfNeeded()
     }
 
-    private func handleAssistantAnchorChange(_ newValue: Bool, using proxy: ScrollViewProxy) {
+    private func handleAwaitingAssistantResponseChange(_ newValue: Bool, using proxy: ScrollViewProxy) {
         if newValue {
-            transitionScrollOwnership(.assistantAnchorRequested)
+            transitionScrollOwnership(.assistantResponseRequested)
             handleTimelineMutation(using: proxy)
-        } else if autoScrollMode == .anchorAssistantResponse {
+        } else if autoScrollMode == .awaitingAssistantResponse {
             let effectiveBottom = TurnScrollStateTracker.effectiveBottomState(
                 committedIsAtBottom: isScrolledToBottom,
                 latestObservedIsAtBottom: scrollGeometryCoalescer.latestObservedIsAtBottom
             )
             isScrolledToBottom = effectiveBottom
-            transitionScrollOwnership(.assistantAnchorCleared(isAtBottom: effectiveBottom))
+            transitionScrollOwnership(.assistantResponseCleared(isAtBottom: effectiveBottom))
         }
     }
 
@@ -901,7 +901,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     private func handleInitialHistoryLoaded(using proxy: ScrollViewProxy) {
         guard scrollSessionThreadID == threadID,
               !messages.isEmpty,
-              !shouldAnchorToAssistantResponse,
+              !isAwaitingAssistantResponse,
               !shouldPauseAutomaticScrolling else {
             return
         }
@@ -992,8 +992,8 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         new: ScrollBottomState,
         using proxy: ScrollViewProxy
     ) {
-        // Physical observation is always current, even while anchor settling
-        // suppresses SwiftUI commits. Geometry never transfers ownership.
+        // Physical observation stays current even while the first response is pending.
+        // The gate below suppresses SwiftUI commits; geometry never transfers ownership.
         scrollGeometryCoalescer.observe(new)
         guard shouldTrackScrollGeometry else { return }
 
@@ -1031,7 +1031,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
 
     private func handleUserScrollInteractionBegan() {
         isUserTouchingScroll = true
-        shouldAnchorToAssistantResponse = false
+        isAwaitingAssistantResponse = false
         scrollGeometryCoalescer.cancelFollowBottom()
         progressiveTailRevealTask?.cancel()
         progressiveTailRevealTask = nil
@@ -1101,43 +1101,33 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         }
     }
 
-    private func anchorToAssistantResponseIfNeeded(using proxy: ScrollViewProxy) -> Bool {
-        guard shouldAnchorToAssistantResponse,
-              let assistantMessageID = TurnTimelineReducer.assistantResponseAnchorMessageID(
+    private func resolveAssistantResponseIfNeeded(using proxy: ScrollViewProxy) -> Bool {
+        guard isAwaitingAssistantResponse,
+              TurnTimelineReducer.assistantResponseMessageID(
                 in: Array(visibleMessages),
                 activeTurnID: activeTurnID
-              ) else {
+              ) != nil else {
             return false
         }
 
         let expectedThreadID = threadID
-        // A fast first response can arrive while the optimistic pending-row correction is
-        // still queued. Supersede it so the two programmatic targets cannot race.
-        scrollGeometryCoalescer.cancelFollowBottom()
-        withAnimation(
-            .easeInOut(duration: 0.2),
-            completionCriteria: .logicallyComplete
-        ) {
-            proxy.scrollTo(assistantMessageID, anchor: .top)
-        } completion: {
-            // The response may already be complete by the time this one-shot anchor settles.
-            // Restore bottom ownership explicitly so short and long streams behave identically.
+        // The assistant row only resolves the pending-send state. It never becomes a top
+        // scroll target: the whole live turn remains bottom-owned from send through completion.
+        transitionScrollOwnership(.assistantResponseResolved)
+        let effectiveBottom = TurnScrollStateTracker.effectiveBottomState(
+            committedIsAtBottom: isScrolledToBottom,
+            latestObservedIsAtBottom: scrollGeometryCoalescer.latestObservedIsAtBottom
+        )
+        isScrolledToBottom = effectiveBottom
+        if !effectiveBottom {
+            scheduleFollowBottomScroll(using: proxy)
+        }
+        // Defer the parent binding write to avoid mutating the observation graph
+        // from inside the timeline-change callback that discovered the row.
+        DispatchQueue.main.async {
             guard scrollSessionThreadID == expectedThreadID,
-                  autoScrollMode == .anchorAssistantResponse else {
-                return
-            }
-
-            shouldAnchorToAssistantResponse = false
-            transitionScrollOwnership(.assistantAnchorResolved)
-
-            let effectiveBottom = TurnScrollStateTracker.effectiveBottomState(
-                committedIsAtBottom: isScrolledToBottom,
-                latestObservedIsAtBottom: scrollGeometryCoalescer.latestObservedIsAtBottom
-            )
-            isScrolledToBottom = effectiveBottom
-            if !effectiveBottom {
-                scheduleFollowBottomScroll(using: proxy)
-            }
+                  autoScrollMode == .followBottom else { return }
+            isAwaitingAssistantResponse = false
         }
         return true
     }
@@ -1146,8 +1136,8 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     private func handleTimelineMutation(using proxy: ScrollViewProxy) {
         guard !shouldPauseAutomaticScrolling else { return }
 
-        if autoScrollMode == .anchorAssistantResponse {
-            if !anchorToAssistantResponseIfNeeded(using: proxy),
+        if autoScrollMode == .awaitingAssistantResponse {
+            if !resolveAssistantResponseIfNeeded(using: proxy),
                shouldShowPendingAssistantResponse {
                 // Until the response row exists, the optimistic user row and
                 // thinking indicator are the current app-owned bottom target.
@@ -1192,13 +1182,12 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         isUserTouchingScroll
     }
 
-    // Follow-bottom owns bottom pinning; assistant anchoring waits for a real assistant row
-    // so a new chat's first user bubble is not snapped around by geometry changes.
+    // Both live-follow states own bottom pinning; the pending-response state only waits
+    // for a real assistant row and never introduces a second scroll target.
     private var shouldPinTimelineToBottomDuringGeometryChange: Bool {
         TurnScrollStateTracker.shouldPinDuringGeometryChange(
             ownership: autoScrollMode,
-            isAutomaticScrollingPaused: shouldPauseAutomaticScrolling,
-            isWaitingForAssistantResponse: shouldShowPendingAssistantResponse
+            isAutomaticScrollingPaused: shouldPauseAutomaticScrolling
         )
     }
 
@@ -1367,7 +1356,7 @@ private struct TurnTimelineRenderChangeHandlersModifier: ViewModifier {
     let completedTurnIDs: Set<String>
     let stoppedTurnIDs: Set<String>
     let visibleTailCount: Int
-    let shouldAnchorToAssistantResponse: Bool
+    let isAwaitingAssistantResponse: Bool
 
     let onThreadRunningChange: () -> Void
     let onSendInFlightChange: () -> Void
@@ -1378,7 +1367,7 @@ private struct TurnTimelineRenderChangeHandlersModifier: ViewModifier {
     let onCompletedTurnIDsChange: () -> Void
     let onStoppedTurnIDsChange: () -> Void
     let onVisibleTailCountChange: () -> Void
-    let onAssistantAnchorChange: (Bool) -> Void
+    let onAwaitingAssistantResponseChange: (Bool) -> Void
 
     func body(content: Content) -> some View {
         content
@@ -1409,9 +1398,9 @@ private struct TurnTimelineRenderChangeHandlersModifier: ViewModifier {
             .onChange(of: visibleTailCount) { _, _ in
                 performAfterSwiftUIUpdate(onVisibleTailCountChange)
             }
-            .onChange(of: shouldAnchorToAssistantResponse) { _, newValue in
+            .onChange(of: isAwaitingAssistantResponse) { _, newValue in
                 performAfterSwiftUIUpdate {
-                    onAssistantAnchorChange(newValue)
+                    onAwaitingAssistantResponseChange(newValue)
                 }
             }
     }

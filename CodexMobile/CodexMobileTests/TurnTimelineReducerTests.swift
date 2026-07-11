@@ -3379,7 +3379,7 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(deduped.map(\.id), ["diff-1", "diff-2"])
     }
 
-    func testAssistantAnchorPrefersActiveTurnThenStreamingFallback() {
+    func testAssistantResponseLookupPrefersActiveTurnThenStreamingFallback() {
         let now = Date()
         let messages = [
             makeMessage(
@@ -3403,17 +3403,17 @@ final class TurnTimelineReducerTests: XCTestCase {
             ),
         ]
 
-        let activeAnchor = TurnTimelineReducer.assistantResponseAnchorMessageID(
+        let activeResponseID = TurnTimelineReducer.assistantResponseMessageID(
             in: messages,
             activeTurnID: "turn-active"
         )
-        XCTAssertEqual(activeAnchor, "assistant-2")
+        XCTAssertEqual(activeResponseID, "assistant-2")
 
-        let fallbackAnchor = TurnTimelineReducer.assistantResponseAnchorMessageID(
+        let fallbackResponseID = TurnTimelineReducer.assistantResponseMessageID(
             in: messages,
             activeTurnID: nil
         )
-        XCTAssertEqual(fallbackAnchor, "assistant-2")
+        XCTAssertEqual(fallbackResponseID, "assistant-2")
     }
 
     func testRenderItemsCacheReusesProjectionForSameSignature() {
@@ -5630,42 +5630,6 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(blockInfo[2]?.blockDiffEntries?.first?.deletions, 1)
     }
 
-    func testScrollTrackerPausesAutomaticScrollingDuringUserDrag() {
-        XCTAssertTrue(
-            TurnScrollStateTracker.isAutomaticScrollingPaused(
-                isUserDragging: true,
-                cooldownUntil: nil,
-                now: Date()
-            )
-        )
-    }
-
-    func testScrollTrackerPausesAutomaticScrollingDuringCooldown() {
-        let now = Date()
-
-        XCTAssertTrue(
-            TurnScrollStateTracker.isAutomaticScrollingPaused(
-                isUserDragging: false,
-                cooldownUntil: now.addingTimeInterval(0.1),
-                now: now
-            )
-        )
-        XCTAssertFalse(
-            TurnScrollStateTracker.isAutomaticScrollingPaused(
-                isUserDragging: false,
-                cooldownUntil: now.addingTimeInterval(-0.1),
-                now: now
-            )
-        )
-    }
-
-    func testScrollTrackerBuildsCooldownDeadlineInFuture() {
-        let now = Date()
-        let deadline = TurnScrollStateTracker.cooldownDeadline(after: now)
-
-        XCTAssertGreaterThan(deadline.timeIntervalSince(now), 0)
-    }
-
     // Builds compact fixtures for reducer invariants.
     private func makeMessage(
         id: String,
@@ -5703,6 +5667,7 @@ final class TurnTimelineReducerTests: XCTestCase {
     }
 }
 
+@MainActor
 final class TurnScrollStateTrackerTests: XCTestCase {
     func testOnlyALocalSendOpensAtLiveTail() {
         XCTAssertTrue(
@@ -5737,7 +5702,7 @@ final class TurnScrollStateTrackerTests: XCTestCase {
     func testConversationOpenAlwaysGivesTheAppBottomOwnership() {
         XCTAssertEqual(
             TurnScrollStateTracker.ownership(
-                after: .conversationOpened(shouldAnchorAssistantResponse: false),
+                after: .conversationOpened(isAwaitingAssistantResponse: false),
                 current: .user
             ),
             .followBottom
@@ -5747,24 +5712,24 @@ final class TurnScrollStateTrackerTests: XCTestCase {
     func testSendSelectsTheRequestedAppTarget() {
         XCTAssertEqual(
             TurnScrollStateTracker.ownership(
-                after: .sendBegan(shouldAnchorAssistantResponse: false),
+                after: .sendBegan(isAwaitingAssistantResponse: false),
                 current: .user
             ),
             .followBottom
         )
         XCTAssertEqual(
             TurnScrollStateTracker.ownership(
-                after: .sendBegan(shouldAnchorAssistantResponse: true),
+                after: .sendBegan(isAwaitingAssistantResponse: true),
                 current: .user
             ),
-            .anchorAssistantResponse
+            .awaitingAssistantResponse
         )
     }
 
-    func testResolvedAssistantAnchorRestoresBottomFollow() {
+    func testResolvedAssistantResponseRestoresBottomFollow() {
         let resolved = TurnScrollStateTracker.ownership(
-            after: .assistantAnchorResolved,
-            current: .anchorAssistantResponse
+            after: .assistantResponseResolved,
+            current: .awaitingAssistantResponse
         )
 
         XCTAssertEqual(resolved, .followBottom)
@@ -5776,10 +5741,10 @@ final class TurnScrollStateTrackerTests: XCTestCase {
         )
     }
 
-    func testResolvingAssistantAnchorDoesNotOverrideUserOwnership() {
+    func testResolvingAssistantResponseDoesNotOverrideUserOwnership() {
         XCTAssertEqual(
             TurnScrollStateTracker.ownership(
-                after: .assistantAnchorResolved,
+                after: .assistantResponseResolved,
                 current: .user
             ),
             .user
@@ -5788,14 +5753,14 @@ final class TurnScrollStateTrackerTests: XCTestCase {
 
     func testAppOwnedScrollingPreservesStreamingAnimations() {
         XCTAssertTrue(TurnScrollOwnership.followBottom.allowsStreamingAnimations)
-        XCTAssertTrue(TurnScrollOwnership.anchorAssistantResponse.allowsStreamingAnimations)
+        XCTAssertTrue(TurnScrollOwnership.awaitingAssistantResponse.allowsStreamingAnimations)
         XCTAssertFalse(TurnScrollOwnership.user.allowsStreamingAnimations)
     }
 
     func testFollowBottomTracksScrollGeometry() {
         XCTAssertTrue(
             TurnTimelinePendingAssistantState.shouldTrackScrollGeometry(
-                shouldAnchorToAssistantResponse: false,
+                isAwaitingAssistantResponse: false,
                 autoScrollMode: .followBottom,
                 isWaitingForAssistantResponse: false
             )
@@ -5806,7 +5771,7 @@ final class TurnScrollStateTrackerTests: XCTestCase {
         XCTAssertEqual(
             TurnScrollStateTracker.ownership(
                 after: .userInteractionBegan,
-                current: .anchorAssistantResponse
+                current: .awaitingAssistantResponse
             ),
             .user
         )
@@ -5836,9 +5801,9 @@ final class TurnScrollStateTrackerTests: XCTestCase {
         XCTAssertEqual(
             TurnScrollStateTracker.ownership(
                 after: .userInteractionEnded(isAtBottom: false),
-                current: .anchorAssistantResponse
+                current: .awaitingAssistantResponse
             ),
-            .anchorAssistantResponse
+            .awaitingAssistantResponse
         )
     }
 
@@ -5902,7 +5867,7 @@ final class TurnScrollStateTrackerTests: XCTestCase {
 
     func testGeometryCannotTransferAppOwnershipToTheUser() {
         let ownership = TurnScrollStateTracker.ownership(
-            after: .conversationOpened(shouldAnchorAssistantResponse: false),
+            after: .conversationOpened(isAwaitingAssistantResponse: false),
             current: .user
         )
         XCTAssertEqual(
@@ -5944,34 +5909,27 @@ final class TurnScrollStateTrackerTests: XCTestCase {
         )
     }
 
-    func testAssistantAnchorDoesNotBottomPinWhileWaitingForAssistantTarget() {
-        XCTAssertFalse(
+    func testPendingAssistantTargetKeepsBottomPinUntilResolved() {
+        XCTAssertTrue(
             TurnScrollStateTracker.shouldPinDuringGeometryChange(
-                ownership: .anchorAssistantResponse,
+                ownership: .awaitingAssistantResponse,
                 isAutomaticScrollingPaused: false
             )
         )
 
         XCTAssertFalse(
             TurnScrollStateTracker.shouldPinDuringGeometryChange(
-                ownership: .anchorAssistantResponse,
+                ownership: .awaitingAssistantResponse,
                 isAutomaticScrollingPaused: true
             )
         )
     }
 
-    func testPendingAssistantTargetPinsThroughSizeChangePolicyNotGeometryDrift() {
+    func testPendingAssistantTargetCorrectsBottomDriftWhileAppOwned() {
         XCTAssertTrue(
-            TurnScrollStateTracker.shouldPinDuringGeometryChange(
-                ownership: .anchorAssistantResponse,
-                isAutomaticScrollingPaused: false,
-                isWaitingForAssistantResponse: true
-            )
-        )
-        XCTAssertFalse(
             TurnScrollStateTracker.shouldCorrectObservedBottomDrift(
                 observedIsAtBottom: false,
-                ownership: .anchorAssistantResponse,
+                ownership: .awaitingAssistantResponse,
                 isAutomaticScrollingPaused: false
             )
         )
@@ -5996,7 +5954,132 @@ final class TurnScrollStateTrackerTests: XCTestCase {
             TurnScrollStateTracker.shouldShowScrollToLatestButton(
                 messageCount: 10,
                 isScrolledToBottom: false,
-                ownership: .anchorAssistantResponse
+                ownership: .awaitingAssistantResponse
+            )
+        )
+    }
+}
+
+final class ScrollGeometryCoalescerTests: XCTestCase {
+    @MainActor
+    func testFollowBottomRetriesOneRequestQueuedDuringAnimation() async {
+        let coalescer = ScrollGeometryCoalescer()
+        coalescer.observe(ScrollBottomState(isAtBottom: false))
+        var actionCount = 0
+        var firstCompletion: (@MainActor () -> Void)?
+        var retryCompletion: (@MainActor () -> Void)?
+        let firstActionStarted = expectation(description: "First follow-bottom action started")
+        let retryActionStarted = expectation(description: "Queued follow-bottom retry started")
+
+        coalescer.scheduleFollowBottom(after: 0) { completion in
+            actionCount += 1
+            firstCompletion = completion
+            firstActionStarted.fulfill()
+        }
+        await fulfillment(of: [firstActionStarted], timeout: 1)
+        XCTAssertEqual(actionCount, 1)
+
+        coalescer.scheduleFollowBottom(after: 0) { completion in
+            actionCount += 1
+            retryCompletion = completion
+            retryActionStarted.fulfill()
+        }
+        XCTAssertEqual(actionCount, 1)
+
+        firstCompletion?()
+        await fulfillment(of: [retryActionStarted], timeout: 1)
+        XCTAssertEqual(actionCount, 2)
+        retryCompletion?()
+    }
+
+    @MainActor
+    func testFollowBottomDropsQueuedRetryAfterReachingBottom() async {
+        let coalescer = ScrollGeometryCoalescer()
+        coalescer.observe(ScrollBottomState(isAtBottom: false))
+        var firstCompletion: (@MainActor () -> Void)?
+        let firstActionStarted = expectation(description: "First follow-bottom action started")
+        let retryActionStarted = expectation(description: "Queued retry must not start")
+        retryActionStarted.isInverted = true
+
+        coalescer.scheduleFollowBottom(after: 0) { completion in
+            firstCompletion = completion
+            firstActionStarted.fulfill()
+        }
+        await fulfillment(of: [firstActionStarted], timeout: 1)
+        coalescer.scheduleFollowBottom(after: 0) { _ in
+            retryActionStarted.fulfill()
+        }
+
+        coalescer.observe(ScrollBottomState(isAtBottom: true))
+        firstCompletion?()
+        await fulfillment(of: [retryActionStarted], timeout: 0.1)
+    }
+
+    @MainActor
+    func testCancellingFollowBottomClearsQueuedRetry() async {
+        let coalescer = ScrollGeometryCoalescer()
+        coalescer.observe(ScrollBottomState(isAtBottom: false))
+        var firstCompletion: (@MainActor () -> Void)?
+        let firstActionStarted = expectation(description: "First follow-bottom action started")
+        let retryActionStarted = expectation(description: "Cancelled retry must not start")
+        retryActionStarted.isInverted = true
+
+        coalescer.scheduleFollowBottom(after: 0) { completion in
+            firstCompletion = completion
+            firstActionStarted.fulfill()
+        }
+        await fulfillment(of: [firstActionStarted], timeout: 1)
+        coalescer.scheduleFollowBottom(after: 0) { _ in
+            retryActionStarted.fulfill()
+        }
+
+        coalescer.cancelFollowBottom()
+        firstCompletion?()
+        await fulfillment(of: [retryActionStarted], timeout: 0.1)
+    }
+}
+
+final class PlanAccessorySnapshotTests: XCTestCase {
+    func testCurrentStepUsesActualInProgressIndex() {
+        let snapshot = makeSnapshot([
+            CodexPlanStep(step: "First", status: .completed),
+            CodexPlanStep(step: "Second", status: .pending),
+            CodexPlanStep(step: "Third", status: .inProgress),
+        ])
+
+        XCTAssertEqual(snapshot.currentStepNumber, 3)
+        XCTAssertEqual(snapshot.summary, "Third")
+    }
+
+    func testCurrentStepUsesFirstPendingIndexWithoutInProgressStep() {
+        let snapshot = makeSnapshot([
+            CodexPlanStep(step: "First", status: .completed),
+            CodexPlanStep(step: "Second", status: .pending),
+            CodexPlanStep(step: "Third", status: .completed),
+        ])
+
+        XCTAssertEqual(snapshot.currentStepNumber, 2)
+        XCTAssertEqual(snapshot.summary, "Second")
+    }
+
+    func testCompletedPlanUsesFinalStepNumber() {
+        let snapshot = makeSnapshot([
+            CodexPlanStep(step: "First", status: .completed),
+            CodexPlanStep(step: "Second", status: .completed),
+        ])
+
+        XCTAssertEqual(snapshot.currentStepNumber, 2)
+        XCTAssertEqual(snapshot.stepProgressText, "Step 2 / 2")
+    }
+
+    private func makeSnapshot(_ steps: [CodexPlanStep]) -> PlanAccessorySnapshot {
+        PlanAccessorySnapshot(
+            message: CodexMessage(
+                threadId: "plan-snapshot-test",
+                role: .system,
+                kind: .plan,
+                text: "",
+                planState: CodexPlanState(steps: steps)
             )
         )
     }

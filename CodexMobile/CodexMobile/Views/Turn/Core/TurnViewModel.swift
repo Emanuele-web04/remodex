@@ -199,8 +199,8 @@ final class TurnViewModel {
         pattern: #"[A-Z]+(?=$|[A-Z][a-z]|\d)|[A-Z]?[a-z]+|\d+"#
     )
 
-    init(shouldAnchorToAssistantResponse: Bool = false) {
-        self.shouldAnchorToAssistantResponse = shouldAnchorToAssistantResponse
+    init(isAwaitingAssistantResponse: Bool = false) {
+        self.isAwaitingAssistantResponse = isAwaitingAssistantResponse
     }
 
     var input = ""
@@ -208,7 +208,7 @@ final class TurnViewModel {
     var isHandlingApproval = false
     var isPlanModeArmed = false
     var steeringDraftID: String?
-    var shouldAnchorToAssistantResponse = false
+    var isAwaitingAssistantResponse = false
     var isPhotoPickerPresented = false
     var isCameraPresented = false
     var photoPickerItems: [PhotosPickerItem] = []
@@ -557,7 +557,7 @@ final class TurnViewModel {
         setQueuedDrafts(drafts, codex: codex, threadID: threadID)
         restoreComposerState(from: draft)
         clearComposerAutocomplete()
-        shouldAnchorToAssistantResponse = false
+        isAwaitingAssistantResponse = false
     }
 
     func isSteeringQueuedDraft(_ draftID: String) -> Bool {
@@ -1676,7 +1676,7 @@ final class TurnViewModel {
         subscriptions?.consumeFreeSendAttemptIfNeeded()
         isSending = true
         isPlanModeArmed = false
-        shouldAnchorToAssistantResponse = true
+        isAwaitingAssistantResponse = true
         clearComposer()
 
         Task { @MainActor in
@@ -1729,7 +1729,7 @@ final class TurnViewModel {
         subscriptions?.consumeFreeSendAttemptIfNeeded()
         isSending = true
         isPlanModeArmed = false
-        shouldAnchorToAssistantResponse = true
+        isAwaitingAssistantResponse = true
         let draftPreAppendedMessage = preAppendNewThreadUserMessageIfNeeded(
             pendingSend,
             codex: codex,
@@ -1957,7 +1957,7 @@ final class TurnViewModel {
         codex: CodexService,
         draftThreadID: String
     ) {
-        shouldAnchorToAssistantResponse = false
+        isAwaitingAssistantResponse = false
         restoreComposerState(from: pendingSend)
         saveLocalDraft(codex: codex, threadID: draftThreadID, persistToDisk: true)
         if pendingSend.collaborationMode == .plan,
@@ -1985,7 +1985,7 @@ final class TurnViewModel {
             return
         }
         isSending = true
-        shouldAnchorToAssistantResponse = true
+        isAwaitingAssistantResponse = true
 
         Task { @MainActor in
             defer { isSending = false }
@@ -2002,7 +2002,7 @@ final class TurnViewModel {
                 )
                 codex.lastErrorMessage = nil
             } catch {
-                shouldAnchorToAssistantResponse = false
+                isAwaitingAssistantResponse = false
                 prependQueuedDraft(nextDraft, codex: codex, threadID: threadID)
                 let queueErrorMessage = codex.userFacingTurnErrorMessage(from: error)
                 setQueuePauseState(.paused(errorMessage: queueErrorMessage), codex: codex, threadID: threadID)
@@ -2037,7 +2037,7 @@ final class TurnViewModel {
         }
 
         steeringDraftID = id
-        shouldAnchorToAssistantResponse = true
+        isAwaitingAssistantResponse = true
 
         Task { @MainActor in
             defer { steeringDraftID = nil }
@@ -2074,7 +2074,7 @@ final class TurnViewModel {
                 )
                 removeQueuedDraft(id: id, codex: codex, threadID: threadID)
             } catch {
-                shouldAnchorToAssistantResponse = false
+                isAwaitingAssistantResponse = false
                 codex.removeLatestFailedUserMessage(
                     threadId: threadID,
                     matchingText: draft.text,
@@ -2855,19 +2855,19 @@ final class TurnViewModel {
     ) async {
         if pendingSend.rawReviewSelection != nil {
             restoreComposerState(from: pendingSend)
-            shouldAnchorToAssistantResponse = false
+            isAwaitingAssistantResponse = false
             codex.lastErrorMessage = "Wait for the current run to finish before starting a code review."
             return
         }
 
         guard let queuedDraft else {
             restoreComposerState(from: pendingSend)
-            shouldAnchorToAssistantResponse = false
+            isAwaitingAssistantResponse = false
             return
         }
 
         isPlanModeArmed = false
-        shouldAnchorToAssistantResponse = true
+        isAwaitingAssistantResponse = true
         appendQueuedDraft(queuedDraft, codex: codex, threadID: threadID)
         clearLocalDraft(codex: codex, threadID: threadID, persistToDisk: true)
     }

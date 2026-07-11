@@ -32,7 +32,7 @@ struct TurnConversationContainerView: View {
     let initialTurnsLoaded: Bool
     let isLoadingRemoteEarlierMessages: Bool
     let olderHistoryLoadErrorMessage: String?
-    let shouldAnchorToAssistantResponse: Binding<Bool>
+    let isAwaitingAssistantResponse: Binding<Bool>
     let isComposerFocused: Bool
     let isComposerAutocompletePresented: Bool
     let emptyState: AnyView
@@ -116,7 +116,7 @@ struct TurnConversationContainerView: View {
                 initialTurnsLoaded: initialTurnsLoaded,
                 isLoadingRemoteEarlierMessages: isLoadingRemoteEarlierMessages,
                 olderHistoryLoadErrorMessage: olderHistoryLoadErrorMessage,
-                shouldAnchorToAssistantResponse: shouldAnchorToAssistantResponse,
+                isAwaitingAssistantResponse: isAwaitingAssistantResponse,
                 isComposerFocused: isComposerFocused,
                 isComposerAutocompletePresented: isComposerAutocompletePresented,
                 onRetryUserMessage: onRetryUserMessage,

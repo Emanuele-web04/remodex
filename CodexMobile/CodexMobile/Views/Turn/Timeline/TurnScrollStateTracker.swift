@@ -10,14 +10,14 @@ import Foundation
 enum TurnScrollOwnership: Equatable {
     enum AppTarget: Equatable {
         case bottom
-        case assistantResponse
+        case pendingAssistantResponse
     }
 
     case app(AppTarget)
     case user
 
     static var followBottom: Self { .app(.bottom) }
-    static var anchorAssistantResponse: Self { .app(.assistantResponse) }
+    static var awaitingAssistantResponse: Self { .app(.pendingAssistantResponse) }
     static var manual: Self { .user }
 
     var allowsStreamingAnimations: Bool {
@@ -30,13 +30,13 @@ enum TurnScrollOwnership: Equatable {
 }
 
 enum TurnScrollEvent: Equatable {
-    case conversationOpened(shouldAnchorAssistantResponse: Bool)
+    case conversationOpened(isAwaitingAssistantResponse: Bool)
     case loadEarlier
     case jumpToLatest
-    case sendBegan(shouldAnchorAssistantResponse: Bool)
-    case assistantAnchorRequested
-    case assistantAnchorResolved
-    case assistantAnchorCleared(isAtBottom: Bool)
+    case sendBegan(isAwaitingAssistantResponse: Bool)
+    case assistantResponseRequested
+    case assistantResponseResolved
+    case assistantResponseCleared(isAtBottom: Bool)
     case userInteractionBegan
     case userInteractionEnded(isAtBottom: Bool)
 }
@@ -60,19 +60,19 @@ struct TurnScrollStateTracker {
         current: TurnScrollOwnership
     ) -> TurnScrollOwnership {
         switch event {
-        case .conversationOpened(let shouldAnchor), .sendBegan(let shouldAnchor):
-            return shouldAnchor ? .anchorAssistantResponse : .followBottom
+        case .conversationOpened(let isAwaiting), .sendBegan(let isAwaiting):
+            return isAwaiting ? .awaitingAssistantResponse : .followBottom
         case .loadEarlier, .userInteractionBegan:
             return .user
         case .jumpToLatest:
             return .followBottom
-        case .assistantAnchorRequested:
-            return .anchorAssistantResponse
-        case .assistantAnchorResolved:
-            guard current == .anchorAssistantResponse else { return current }
+        case .assistantResponseRequested:
+            return .awaitingAssistantResponse
+        case .assistantResponseResolved:
+            guard current == .awaitingAssistantResponse else { return current }
             return .followBottom
-        case .assistantAnchorCleared(let isAtBottom):
-            guard current == .anchorAssistantResponse else { return current }
+        case .assistantResponseCleared(let isAtBottom):
+            guard current == .awaitingAssistantResponse else { return current }
             return isAtBottom ? .followBottom : .user
         case .userInteractionEnded(let isAtBottom):
             guard current == .user else { return current }
@@ -104,14 +104,13 @@ struct TurnScrollStateTracker {
     // is handled separately until its renderable row exists.
     static func shouldPinDuringGeometryChange(
         ownership: TurnScrollOwnership,
-        isAutomaticScrollingPaused: Bool,
-        isWaitingForAssistantResponse: Bool = false
+        isAutomaticScrollingPaused: Bool
     ) -> Bool {
         guard !isAutomaticScrollingPaused else {
             return false
         }
         return ownership == .followBottom
-            || (ownership == .anchorAssistantResponse && isWaitingForAssistantResponse)
+            || ownership == .awaitingAssistantResponse
     }
 
     static func shouldCorrectObservedBottomDrift(

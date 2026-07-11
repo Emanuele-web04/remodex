@@ -33,8 +33,8 @@ enum TurnTimelineReducer {
         return TurnTimelineProjection(messages: dedupedAssistant)
     }
 
-    // Resolves where the viewport should anchor when assistant output starts streaming.
-    static func assistantResponseAnchorMessageID(
+    // Resolves whether the active assistant response has entered the timeline.
+    static func assistantResponseMessageID(
         in messages: [CodexMessage],
         activeTurnID: String?
     ) -> String? {
