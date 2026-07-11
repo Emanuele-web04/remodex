@@ -42,7 +42,8 @@ struct SubagentActionCard: View {
                 title: title,
                 accentColor: SubagentLabelParser.nicknameColor(for: title),
                 statusText: readableStatus(resolvedStatus(for: resolved).label),
-                modelTitle: resolved.modelIsRequestedHint ? "Requested model" : "Model",
+                modelTitle: (resolved.modelIsRequestedHint ? "Requested model" : "Model")
+                    .remodexLocalizedWorkflowText(),
                 modelLabel: resolvedModelLabel(for: resolved, prefixRequested: false),
                 instructionText: trimmedValue(resolved.prompt) ?? trimmedValue(action.prompt),
                 latestUpdateText: trimmedValue(resolved.fallbackMessage),
@@ -64,7 +65,7 @@ struct SubagentActionCard: View {
             RemodexIcon.image(systemName: "remodex.agent", size: 14, relativeTo: .caption)
                 .foregroundStyle(.secondary)
 
-            Text(action.summaryText)
+            Text(action.summaryText.remodexLocalizedWorkflowText())
                 .font(AppFont.caption())
                 .foregroundStyle(.secondary)
 
@@ -127,8 +128,9 @@ struct SubagentActionCard: View {
     }
 
     private func resolvedAgentTitle(for agent: CodexSubagentThreadPresentation) -> String {
-        codex.resolvedSubagentDisplayLabel(threadId: agent.threadId, agentId: agent.agentId)
+        let title = codex.resolvedSubagentDisplayLabel(threadId: agent.threadId, agentId: agent.agentId)
             ?? agent.displayLabel
+        return title.remodexLocalizedWorkflowText()
     }
 
     private func resolvedModelLabel(
@@ -136,7 +138,9 @@ struct SubagentActionCard: View {
         prefixRequested: Bool = true
     ) -> String? {
         if let model = sanitizedSubagentModelLabel(agent.model) {
-            return agent.modelIsRequestedHint && prefixRequested ? "requested: \(model)" : model
+            return agent.modelIsRequestedHint && prefixRequested
+                ? "requested: \(model)".remodexLocalizedWorkflowText()
+                : model
         }
 
         guard let thread = observedThread(for: agent) else { return nil }
@@ -235,7 +239,11 @@ struct SubagentActionCard: View {
         }
         if let statusMessage = trimmedValue(agent.fallbackMessage),
            !sections.contains(statusMessage) {
-            sections.append(sections.isEmpty ? statusMessage : "Latest update: \(statusMessage)")
+            sections.append(
+                sections.isEmpty
+                    ? statusMessage
+                    : "Latest update: \(statusMessage)".remodexLocalizedWorkflowText()
+            )
         }
         return sections.isEmpty ? nil : sections.joined(separator: "\n\n")
     }
@@ -322,7 +330,7 @@ private struct SubagentAgentRowView: View {
     private var labelText: some View {
         (
             SubagentLabelParser.styledText(for: title, roleSuffixColor: .primary)
-            + Text(" \(statusText)")
+            + Text(" \(statusText.remodexLocalizedWorkflowText())")
                 .foregroundColor(.secondary)
         )
         .font(AppFont.caption())
@@ -356,11 +364,11 @@ private struct SubagentAgentDetailSheet: View {
                     }
 
                     if let instructionText, !instructionText.isEmpty {
-                        detailSection(title: "Instructions", value: instructionText)
+                        detailSection(title: "Instructions".remodexLocalizedWorkflowText(), value: instructionText)
                     }
 
                     if let latestUpdateText, !latestUpdateText.isEmpty {
-                        detailSection(title: "Latest update", value: latestUpdateText)
+                        detailSection(title: "Latest update".remodexLocalizedWorkflowText(), value: latestUpdateText)
                     }
 
                     if instructionText == nil, latestUpdateText == nil {
@@ -427,7 +435,7 @@ private struct SubagentAgentDetailSheet: View {
                 Text("Status")
                     .font(AppFont.caption(weight: .semibold))
                     .foregroundStyle(.secondary)
-                Text(statusText)
+                Text(statusText.remodexLocalizedWorkflowText())
                     .font(AppFont.body())
                     .foregroundStyle(.primary)
             }
@@ -444,7 +452,7 @@ private struct SubagentAgentDetailSheet: View {
     @ViewBuilder
     private func detailSection(title: String, value: String, monospace: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(title)
+            Text(title.remodexLocalizedWorkflowText())
                 .font(AppFont.caption(weight: .semibold))
                 .foregroundStyle(.secondary)
             Text(value)

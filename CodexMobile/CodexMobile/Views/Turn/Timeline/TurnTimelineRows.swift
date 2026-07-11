@@ -214,12 +214,9 @@ private struct TurnTimelineToolBurstView: View {
 
     @State private var isExpanded = false
 
-    private var summaryCountLabel: String {
-        "+\(group.hiddenCount)"
-    }
-
-    private var summaryNounLabel: String {
-        group.hiddenCount == 1 ? "tool call" : "tool calls"
+    private var summaryLabel: String {
+        "+\(group.hiddenCount) \(group.hiddenCount == 1 ? "tool call" : "tool calls")"
+            .remodexLocalizedWorkflowText()
     }
 
     var body: some View {
@@ -246,7 +243,7 @@ private struct TurnTimelineToolBurstView: View {
                         RemodexIcon.image(systemName: "chevron.right", size: 13, relativeTo: .body)
                             .foregroundStyle(.secondary)
                             .rotationEffect(.degrees(isExpanded ? 90 : 0))
-                        Text("\(summaryCountLabel) \(summaryNounLabel)")
+                        Text(summaryLabel)
                             .font(AppFont.body(weight: .regular))
                             .foregroundStyle(.secondary)
                     }
@@ -418,7 +415,7 @@ struct TurnTimelineRowsSection: View {
                             ProgressView()
                                 .controlSize(.small)
                         }
-                        Text(earlierMessagesButtonTitle)
+                        Text(earlierMessagesButtonTitle.remodexLocalized)
                     }
                     .font(AppFont.body(weight: .regular))
                     .foregroundStyle(.secondary)

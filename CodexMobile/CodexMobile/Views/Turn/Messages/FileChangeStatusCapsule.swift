@@ -15,7 +15,10 @@ struct FileChangeStatusSnapshot: Equatable {
     let messageID: String
 
     var compactTitle: String {
-        fileCount == 1 ? "1 file" : "\(fileCount) files"
+        String(
+            format: (fileCount == 1 ? "%d file" : "%d files").remodexLocalized,
+            fileCount
+        )
     }
 
     var hasChanges: Bool {
@@ -145,7 +148,7 @@ struct FileChangeStatusCapsule: View {
                     capsuleContent
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Open file changes diff")
+                .accessibilityLabel("Open file changes diff".remodexLocalizedWorkflowText())
                 .sheet(isPresented: $isShowingDiffSheet) {
                     TurnDiffSheet(
                         title: "Changes",
@@ -162,7 +165,7 @@ struct FileChangeStatusCapsule: View {
 
     private var capsuleContent: some View {
         GlassStatusPill {
-            Text(title)
+            Text(title.remodexLocalizedWorkflowText())
                 .font(AppFont.caption())
                 .foregroundStyle(.secondary)
                 .lineLimit(1)

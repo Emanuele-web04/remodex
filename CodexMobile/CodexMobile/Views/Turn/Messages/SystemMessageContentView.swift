@@ -69,7 +69,7 @@ struct SystemMessageContentView: View {
                     RemodexIcon.image(systemName: line.iconSystemName, size: 17, relativeTo: .body)
                         .foregroundStyle(.secondary)
 
-                    Text(line.text)
+                    Text(line.text.remodexLocalizedActivity)
                         .font(AppFont.body(weight: .regular))
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
@@ -140,7 +140,7 @@ struct SystemMessageContentView: View {
             } else {
                 let hiddenCount = entries.count - Self.maxVisibleStreamingFileChangeEntries
                 if hiddenCount > 0 {
-                    Text("+\(hiddenCount) more files")
+                    Text(String(format: "+%d more files".remodexLocalized, hiddenCount))
                         .font(AppFont.caption())
                         .foregroundStyle(.secondary.opacity(0.6))
                 }
@@ -223,7 +223,7 @@ struct SystemMessageContentView: View {
                     .font(AppFont.system(size: 17, weight: .semibold))
                     .foregroundStyle(.secondary)
 
-                Text(text.trimmingCharacters(in: .whitespacesAndNewlines))
+                Text(text.trimmingCharacters(in: .whitespacesAndNewlines).remodexLocalized)
                     .font(AppFont.title3(weight: .regular))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)

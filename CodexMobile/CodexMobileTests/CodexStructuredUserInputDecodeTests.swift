@@ -249,6 +249,37 @@ final class CodexStructuredUserInputDecodeTests: XCTestCase {
         XCTAssertEqual(resolved.modelIsRequestedHint, false)
     }
 
+    func testDynamicAgentAndToolWorkflowTextUsesSimplifiedChinesePack() throws {
+        let bundle = try simplifiedChineseBundle()
+
+        XCTAssertEqual("Spawning 2 agents".remodexLocalizedWorkflowText(in: bundle), "正在启动 2 个子代理")
+        XCTAssertEqual("Waiting on 1 agent".remodexLocalizedWorkflowText(in: bundle), "正在等待 1 个子代理")
+        XCTAssertEqual("Agent activity (3)".remodexLocalizedWorkflowText(in: bundle), "3 个子代理活动")
+        XCTAssertEqual("+4 tool calls".remodexLocalizedWorkflowText(in: bundle), "+4 次工具调用")
+        XCTAssertEqual("Latest update: finished".remodexLocalizedWorkflowText(in: bundle), "最新动态：finished")
+        XCTAssertEqual("requested: gpt-5.5".remodexLocalizedWorkflowText(in: bundle), "请求模型：gpt-5.5")
+    }
+
+    func testDynamicRecoveryApprovalAndQuestionTextUsesSimplifiedChinesePack() throws {
+        let bundle = try simplifiedChineseBundle()
+
+        XCTAssertEqual("Connection".remodexLocalizedWorkflowText(in: bundle), "连接")
+        XCTAssertEqual("Interrupted".remodexLocalizedWorkflowText(in: bundle), "已中断")
+        XCTAssertEqual("Reconnect".remodexLocalizedWorkflowText(in: bundle), "重新连接")
+        XCTAssertEqual("Command: git status".remodexLocalizedWorkflowText(in: bundle), "命令：git status")
+        XCTAssertEqual("2 of 3".remodexLocalizedWorkflowText(in: bundle), "第 2 项，共 3 项")
+        XCTAssertEqual("Select up to 2".remodexLocalizedWorkflowText(in: bundle), "最多选择 2 项")
+        XCTAssertEqual("Hand off to Desktop".remodexLocalized(in: bundle), "交接到桌面端")
+        XCTAssertEqual("Hand off to Worktree".remodexLocalized(in: bundle), "交接到工作树")
+        XCTAssertEqual("New chat".remodexLocalized(in: bundle), "新聊天")
+        XCTAssertEqual("Open Terminal Here".remodexLocalized(in: bundle), "在此打开终端")
+    }
+
+    private func simplifiedChineseBundle() throws -> Bundle {
+        let path = try XCTUnwrap(Bundle.main.path(forResource: "zh-Hans", ofType: "lproj"))
+        return try XCTUnwrap(Bundle(path: path))
+    }
+
     private func makeService() -> CodexService {
         let suiteName = "CodexStructuredUserInputDecodeTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName) ?? .standard

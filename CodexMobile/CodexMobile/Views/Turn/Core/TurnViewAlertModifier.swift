@@ -42,13 +42,13 @@ private struct TurnViewAlertModifier: ViewModifier {
                 Text("There are no changes to commit.")
             }
             .alert(
-                gitSyncAlert?.title ?? "Git",
+                (gitSyncAlert?.title ?? "Git").remodexLocalizedWorkflowText(),
                 isPresented: gitSyncAlertIsPresented,
                 presenting: gitSyncAlert
             ) { alert in
                 // Renders alert buttons from the shared model so new Git prompts do not add more switch cases here.
                 ForEach(alert.buttons) { alertButton in
-                    Button(alertButton.title, role: buttonRole(for: alertButton.role)) {
+                    Button(alertButton.title.remodexLocalizedWorkflowText(), role: buttonRole(for: alertButton.role)) {
                         let action = alertButton.action
                         if action == .dismissOnly {
                             onDismissGitSyncAlert()
@@ -58,7 +58,7 @@ private struct TurnViewAlertModifier: ViewModifier {
                     }
                 }
             } message: { alert in
-                Text(alert.message)
+                Text(alert.message.remodexLocalizedWorkflowText())
             }
             .alert("Continue on Desktop App", isPresented: $isShowingMacHandoffConfirm) {
                 Button("Cancel", role: .cancel) {}
@@ -76,7 +76,10 @@ private struct TurnViewAlertModifier: ViewModifier {
                     macHandoffErrorMessage = nil
                 }
             } message: {
-                Text(macHandoffErrorMessage ?? "Could not continue this chat on the desktop app.")
+                Text(
+                    (macHandoffErrorMessage ?? "Could not continue this chat on the desktop app.")
+                        .remodexLocalizedWorkflowText()
+                )
             }
     }
 
@@ -112,11 +115,11 @@ private struct TurnViewAlertModifier: ViewModifier {
 
         if let command = request.command?.trimmingCharacters(in: .whitespacesAndNewlines),
            !command.isEmpty {
-            lines.append("Command: \(command)")
+            lines.append("Command: \(command)".remodexLocalizedWorkflowText())
         }
 
         if lines.isEmpty {
-            return "Codex is requesting permission to continue."
+            return "Codex is requesting permission to continue.".remodexLocalizedWorkflowText()
         }
 
         return lines.joined(separator: "\n\n")

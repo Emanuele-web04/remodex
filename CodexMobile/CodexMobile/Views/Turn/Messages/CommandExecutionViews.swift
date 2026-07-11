@@ -628,11 +628,11 @@ struct CommandExecutionCardBody: View {
             .foregroundStyle(.secondary)
 
             (
-                Text(display.verb)
+                Text(display.verb.remodexLocalized)
                     .font(AppFont.body(weight: .regular))
                     .foregroundStyle(.secondary)
                 +
-                Text(" " + display.target)
+                Text(" " + display.target.remodexLocalized)
                     .font(AppFont.body(weight: .regular))
                     .foregroundStyle(.secondary)
             )
@@ -964,7 +964,7 @@ struct CommandExecutionDetailSheet: View {
 
     private var commandSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            RemodexIcon.label("Command", systemName: "terminal.fill")
+            RemodexIcon.label("Command".remodexLocalizedWorkflowText(), systemName: "terminal.fill")
                 .font(AppFont.mono(.caption))
                 .foregroundStyle(commandAccent)
 
@@ -995,13 +995,17 @@ struct CommandExecutionDetailSheet: View {
             if let durationMs = details?.durationMs {
                 metadataRow(label: "Duration", value: formattedDuration(durationMs))
             }
-            metadataRow(label: "Status", value: status.statusLabel, valueColor: status.accent.color)
+            metadataRow(
+                label: "Status",
+                value: status.statusLabel.remodexLocalizedWorkflowText(),
+                valueColor: status.accent.color
+            )
         }
     }
 
     private func metadataRow(label: String, value: String, valueColor: Color = .primary) -> some View {
         HStack {
-            Text(label)
+            Text(label.remodexLocalizedWorkflowText())
                 .font(AppFont.mono(.caption))
                 .foregroundStyle(.secondary)
             Spacer()
@@ -1022,7 +1026,10 @@ struct CommandExecutionDetailSheet: View {
                 HStack(spacing: 6) {
                     RemodexIcon.image(systemName: isOutputExpanded ? "chevron.down" : "chevron.right")
                         .font(AppFont.system(size: 10, weight: .semibold))
-                    Text("Output (last \(CommandExecutionDetails.maxOutputLines) lines)")
+                    Text(
+                        "Output (last \(CommandExecutionDetails.maxOutputLines) lines)"
+                            .remodexLocalizedWorkflowText()
+                    )
                         .font(AppFont.mono(.caption))
                 }
                 .foregroundStyle(.secondary)

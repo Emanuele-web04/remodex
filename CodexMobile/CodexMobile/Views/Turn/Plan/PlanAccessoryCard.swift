@@ -54,7 +54,7 @@ struct PlanAccessorySnapshot: Equatable {
     let isStreaming: Bool
 
     init(
-        title: String = "Plan",
+        title: String = "Task plan",
         summary: String,
         status: PlanAccessoryStatus,
         completedStepCount: Int,
@@ -202,7 +202,7 @@ struct PlanAccessoryCard: View {
             GlassStatusPill {
                 leadingMarker
 
-                Text(snapshot.title)
+                Text(snapshot.title.remodexLocalized)
                     .font(AppFont.caption())
                     .foregroundStyle(.secondary)
 
@@ -211,9 +211,11 @@ struct PlanAccessoryCard: View {
         }
         .buttonStyle(.plain)
         .fixedSize()
-        .accessibilityLabel("Open active plan")
-        .accessibilityValue("\(snapshot.status.label), \(snapshot.progressDescription)")
-        .accessibilityHint("Shows the current plan steps in a sheet")
+        .accessibilityLabel("Open active plan".remodexLocalizedWorkflowText())
+        .accessibilityValue(
+            "\(snapshot.status.label.remodexLocalizedWorkflowText()), \(snapshot.progressDescription.remodexLocalizedWorkflowText())"
+        )
+        .accessibilityHint("Shows the current plan steps in a sheet".remodexLocalizedWorkflowText())
     }
 
     // Compact status dot mirroring the plan tint, sized to sit on a caption line.
@@ -236,7 +238,7 @@ struct PlanAccessoryCard: View {
                 .font(AppFont.caption())
                 .foregroundStyle(.tertiary)
 
-            Text(progressText)
+            Text(progressText.remodexLocalizedWorkflowText())
                 .font(AppFont.caption())
                 .foregroundStyle(.secondary)
                 .fixedSize()

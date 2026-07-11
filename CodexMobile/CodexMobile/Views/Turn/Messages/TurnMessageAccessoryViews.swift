@@ -29,7 +29,7 @@ struct ApprovalBanner: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            RemodexIcon.label("Approval request", systemName: "checkmark.shield")
+            RemodexIcon.label("Approval request".remodexLocalizedWorkflowText(), systemName: "checkmark.shield")
                 .font(AppFont.subheadline())
 
             if let command = request.command, !command.isEmpty {

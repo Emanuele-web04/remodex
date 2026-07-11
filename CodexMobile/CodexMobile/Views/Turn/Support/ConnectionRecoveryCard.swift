@@ -98,9 +98,12 @@ struct ConnectionRecoveryCard: View {
             }
         }
         .opacity(snapshot.isActionable ? 1 : 0.94)
-        .accessibilityLabel(snapshot.title)
-        .accessibilityValue(snapshot.status.label)
-        .accessibilityHint(snapshot.isActionable ? "Opens the suggested recovery action" : "Shows the current recovery status")
+        .accessibilityLabel(snapshot.title.remodexLocalizedWorkflowText())
+        .accessibilityValue(snapshot.status.label.remodexLocalizedWorkflowText())
+        .accessibilityHint(
+            (snapshot.isActionable ? "Opens the suggested recovery action" : "Shows the current recovery status")
+                .remodexLocalizedWorkflowText()
+        )
     }
 
     private var leadingMarker: some View {
@@ -117,7 +120,7 @@ struct ConnectionRecoveryCard: View {
 
     private var headerRow: some View {
         HStack(alignment: .center, spacing: 6) {
-            Text(snapshot.title)
+            Text(snapshot.title.remodexLocalizedWorkflowText())
                 .font(AppFont.caption2())
                 .foregroundStyle(.secondary)
 
@@ -125,7 +128,7 @@ struct ConnectionRecoveryCard: View {
                 .fill(Color(.separator).opacity(0.6))
                 .frame(width: 3, height: 3)
 
-            Text(snapshot.status.label)
+            Text(snapshot.status.label.remodexLocalizedWorkflowText())
                 .font(AppFont.caption(weight: .regular))
                 .foregroundStyle(snapshot.status.tint)
         }
@@ -133,14 +136,14 @@ struct ConnectionRecoveryCard: View {
 
     private var summaryRow: some View {
         VStack(alignment: .leading, spacing: snapshot.detail == nil ? 0 : 4) {
-            Text(snapshot.summary)
+            Text(snapshot.summary.remodexLocalizedWorkflowText())
                 .font(AppFont.subheadline(weight: .medium))
                 .foregroundStyle(.primary)
                 .lineLimit(2)
                 .multilineTextAlignment(.leading)
 
             if let detail = snapshot.detail {
-                Text(detail)
+                Text(detail.remodexLocalizedWorkflowText())
                     .font(AppFont.caption())
                     .foregroundStyle(.secondary)
                     .lineLimit(3)
@@ -153,7 +156,7 @@ struct ConnectionRecoveryCard: View {
         Group {
             switch snapshot.trailingStyle {
             case .action(let actionTitle):
-                Text(actionTitle)
+                Text(actionTitle.remodexLocalizedWorkflowText())
                     .font(AppFont.caption(weight: .semibold))
                     .foregroundStyle(snapshot.status.tint)
             case .progress:

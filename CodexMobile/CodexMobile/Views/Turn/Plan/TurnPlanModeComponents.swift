@@ -63,7 +63,7 @@ struct PlanSystemCard: View {
             .min()
     }
     var body: some View {
-        PlanModeCardContainer(title: "Plan", showsProgress: message.isStreaming) {
+        PlanModeCardContainer(title: "Task plan", showsProgress: message.isStreaming) {
             if let inferredQuestionnaire {
                 if let introText = inferredQuestionnaire.introText {
                     MarkdownTextView(text: introText, profile: .assistantProse)
@@ -277,7 +277,7 @@ struct ProposedPlanResultCard: View {
                     }
                 } label: {
                     HStack(spacing: 5) {
-                        Text(isPlanExpanded ? "Collapse" : "Expand")
+                        Text((isPlanExpanded ? "Collapse" : "Expand").remodexLocalizedWorkflowText())
                             .font(AppFont.footnote(weight: .semibold))
                         RemodexIcon.image(systemName: isPlanExpanded ? "chevron.up" : "chevron.down")
                             .font(AppFont.system(size: 10, weight: .semibold))
@@ -369,7 +369,7 @@ private struct PlanResultActionButton: View {
                 }
                 .frame(width: 16, height: 16)
 
-                Text(title)
+                Text(title.remodexLocalized)
                     .font(AppFont.subheadline(weight: .semibold))
                     .lineLimit(1)
                     .minimumScaleFactor(0.78)
@@ -572,7 +572,7 @@ private struct PlanStepRow: View {
                     .font(AppFont.body())
                     .foregroundStyle(.primary)
 
-                Text(statusLabel)
+                Text(statusLabel.remodexLocalizedWorkflowText())
                     .font(AppFont.caption2(weight: .medium))
                     .foregroundStyle(statusColor)
                     .padding(.horizontal, 8)

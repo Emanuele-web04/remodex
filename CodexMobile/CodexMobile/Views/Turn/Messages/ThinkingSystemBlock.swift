@@ -58,6 +58,13 @@ struct ThinkingSystemBlock: View {
         let trimmed = preview.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return Text("") }
 
+        let localizedExact = trimmed.remodexLocalized
+        if localizedExact != trimmed {
+            return Text(localizedExact)
+                .font(AppFont.caption())
+                .foregroundStyle(.tertiary)
+        }
+
         let splitIndex = trimmed.firstIndex(of: " ")
         let leading: String
         let remainder: String
@@ -72,7 +79,7 @@ struct ThinkingSystemBlock: View {
 
         let capitalised = leading.prefix(1).uppercased() + leading.dropFirst()
 
-        return Text(capitalised)
+        return Text(capitalised.remodexLocalized)
             .font(AppFont.caption(weight: .medium))
             .foregroundStyle(.secondary)
         +
@@ -127,7 +134,7 @@ private struct ThinkingDisclosureView: View {
                             .rotationEffect(.degrees(isExpanded ? 90 : 0))
                             .frame(width: 10)
 
-                        Text(section.title)
+                        Text(section.title.remodexLocalizedActivity)
                             .font(AppFont.caption(weight: .semibold))
                             .foregroundStyle(.secondary.opacity(0.95))
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -138,7 +145,7 @@ private struct ThinkingDisclosureView: View {
             } else {
                 // Summary-only reasoning items have nothing to disclose. Render
                 // them as plain activity text, matching tool-call typography.
-                Text(section.title)
+                Text(section.title.remodexLocalizedActivity)
                     .font(AppFont.body(weight: .regular))
                     .foregroundStyle(.secondary)
                     .lineLimit(2)

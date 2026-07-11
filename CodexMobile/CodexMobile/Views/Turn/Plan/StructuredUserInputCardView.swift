@@ -81,7 +81,7 @@ struct StructuredUserInputCardView: View {
                 .foregroundStyle(.primary)
 
             if let selectionLimit = question.selectionLimitDescription {
-                Text(selectionLimit)
+                Text(selectionLimit.remodexLocalizedWorkflowText())
                     .font(AppFont.caption())
                     .foregroundStyle(.secondary)
             }
@@ -160,11 +160,11 @@ struct StructuredUserInputCardView: View {
 
         Group {
             if question.isSecret {
-                SecureField(question.answerFieldPlaceholder, text: binding)
+                SecureField(question.answerFieldPlaceholder.remodexLocalizedWorkflowText(), text: binding)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
             } else {
-                TextField(question.answerFieldPlaceholder, text: binding, axis: .vertical)
+                TextField(question.answerFieldPlaceholder.remodexLocalizedWorkflowText(), text: binding, axis: .vertical)
                     .textInputAutocapitalization(.sentences)
             }
         }
@@ -195,7 +195,10 @@ struct StructuredUserInputCardView: View {
 
     private var progressHeader: some View {
         HStack(alignment: .center, spacing: 8) {
-            Text("\(currentQuestionIndex + 1) of \(questions.count)")
+            Text(
+                "\(currentQuestionIndex + 1) of \(questions.count)"
+                    .remodexLocalizedWorkflowText()
+            )
                 .font(AppFont.caption2())
                 .foregroundStyle(.secondary)
 
@@ -275,7 +278,7 @@ struct StructuredUserInputCardView: View {
                         HapticFeedback.shared.triggerImpactFeedback(style: .light)
                         onSecondaryAction?()
                     } label: {
-                        Text(secondaryActionTitle)
+                        Text(secondaryActionTitle.remodexLocalizedWorkflowText())
                             .font(AppFont.subheadline(weight: .medium))
                             .padding(.horizontal, 14)
                             .padding(.vertical, 9)
@@ -342,7 +345,7 @@ struct StructuredUserInputCardView: View {
                         .controlSize(.small)
                         .tint(Color.white)
                 }
-                Text(isSubmitting ? "Sending..." : "Send")
+                Text((isSubmitting ? "Sending..." : "Send").remodexLocalizedWorkflowText())
                     .font(AppFont.subheadline(weight: .medium))
             }
             .padding(.horizontal, 20)
@@ -444,7 +447,7 @@ struct PlanModeCardContainer<Content: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 6) {
-                Text(title)
+                Text(title.remodexLocalized)
                     .font(AppFont.mono(.caption))
                     .foregroundStyle(.secondary)
 

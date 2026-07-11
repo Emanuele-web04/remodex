@@ -155,7 +155,7 @@ struct TurnToolbarContent: ToolbarContent {
     ) -> [TurnThreadActionMenuItem] {
         var actions: [TurnThreadActionMenuItem] = [
             TurnThreadActionMenuItem(
-                title: "Hand off to Desktop",
+                title: "Hand off to Desktop".remodexLocalized,
                 icon: .system("arrow.left.arrow.right"),
                 isEnabled: canTapMacHandoff
             ) {
@@ -166,7 +166,8 @@ struct TurnToolbarContent: ToolbarContent {
         if onTapWorktreeHandoff != nil {
             actions.append(
                 TurnThreadActionMenuItem(
-                    title: isCreatingGitWorktree ? "Preparing worktree..." : worktreeHandoffTitle,
+                    title: (isCreatingGitWorktree ? "Preparing worktree..." : worktreeHandoffTitle)
+                        .remodexLocalized,
                     icon: .worktree,
                     isEnabled: canTapWorktreeHandoff
                 ) {
@@ -177,14 +178,14 @@ struct TurnToolbarContent: ToolbarContent {
 
         actions.append(contentsOf: [
             TurnThreadActionMenuItem(
-                title: "New chat",
+                title: "New chat".remodexLocalized,
                 icon: .system("square.and.pencil"),
                 isEnabled: canTapNewChat
             ) {
                 onTapNewChat?()
             },
             TurnThreadActionMenuItem(
-                title: "Open Terminal Here",
+                title: "Open Terminal Here".remodexLocalized,
                 icon: .system("terminal"),
                 isEnabled: canTapTerminal
             ) {
