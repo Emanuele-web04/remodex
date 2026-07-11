@@ -57,23 +57,13 @@ struct VoiceRecordingCapsule: View {
     }
 
     private var waveformView: some View {
-        GeometryReader { geometry in
-            let renderedLevels = displayedLevels(for: geometry.size.width)
-            let barWidth = renderedBarWidth(for: geometry.size.width, slotCount: renderedLevels.count)
-
-            Canvas { context, size in
-                let midY = size.height / 2
-                for (index, level) in renderedLevels.enumerated() {
-                    let h = barHeight(for: level)
-                    let x = CGFloat(index) * (barWidth + barSpacing)
-                    let rect = CGRect(x: x, y: midY - h / 2, width: barWidth, height: h)
-                    context.fill(
-                        Path(roundedRect: rect, cornerRadius: 1),
-                        with: .color(.primary.opacity(0.15 + level * 0.65))
-                    )
-                }
-            }
-        }
+        ScrollingWaveformLane(
+            levels: audioLevels,
+            barWidth: idealBarWidth,
+            barSpacing: barSpacing,
+            minHeight: barMinHeight,
+            maxHeight: barMaxHeight
+        )
         .frame(maxWidth: .infinity, alignment: .leading)
         .layoutPriority(1)
     }
@@ -104,41 +94,88 @@ struct VoiceRecordingCapsule: View {
 
     // MARK: - Helpers
 
-    private func barHeight(for level: CGFloat) -> CGFloat {
-        barMinHeight + (barMaxHeight - barMinHeight) * level
-    }
-
-    // Resamples the rolling meter history to the number of bars that fit on screen.
-    // When the clip is still short, leading slots stay quiet so the capsule width is still occupied.
-    private func displayedLevels(for availableWidth: CGFloat) -> [CGFloat] {
-        let slotCount = max(1, Int((max(availableWidth, 0) + barSpacing) / (idealBarWidth + barSpacing)))
-        guard !audioLevels.isEmpty else { return Array(repeating: 0, count: slotCount) }
-
-        let tail = Array(audioLevels.suffix(slotCount * 3))
-        if tail.count <= slotCount {
-            return Array(repeating: 0, count: slotCount - tail.count) + tail
-        }
-
-        return (0..<slotCount).map { index in
-            let start = Int((Double(index) / Double(slotCount)) * Double(tail.count))
-            let end = max(start + 1, Int((Double(index + 1) / Double(slotCount)) * Double(tail.count)))
-            let bucket = tail[start..<min(end, tail.count)]
-            return bucket.max() ?? 0
-        }
-    }
-
-    // Uses the full waveform lane width instead of letting the bars stop at their intrinsic content size.
-    private func renderedBarWidth(for availableWidth: CGFloat, slotCount: Int) -> CGFloat {
-        guard slotCount > 0 else { return idealBarWidth }
-        let totalSpacing = CGFloat(slotCount - 1) * barSpacing
-        return max(1, (max(availableWidth, 0) - totalSpacing) / CGFloat(slotCount))
-    }
-
     private var formattedDuration: String {
         let totalSeconds = Int(duration)
         let minutes = totalSeconds / 60
         let seconds = totalSeconds % 60
         return String(format: "%d:%02d", minutes, seconds)
+    }
+}
+
+// MARK: - Scrolling waveform lane
+
+// Treadmill-style waveform: every meter sample becomes one bar whose height is
+// frozen at append time. The whole strip glides left continuously so new bars
+// slide in from the right edge, instead of re-bucketing history on every sample
+// (which made existing bars jump around).
+private struct ScrollingWaveformLane: View {
+    let levels: [CGFloat]
+    let barWidth: CGFloat
+    let barSpacing: CGFloat
+    let minHeight: CGFloat
+    let maxHeight: CGFloat
+
+    @State private var lastAppendDate: Date = .distantPast
+    // Smoothed seconds between meter samples; drives the scroll speed so the
+    // strip advances exactly one slot per sample regardless of device buffer size.
+    @State private var sampleInterval: TimeInterval = 0.09
+
+    var body: some View {
+        GeometryReader { geometry in
+            TimelineView(.animation) { timeline in
+                Canvas { context, size in
+                    draw(in: context, size: size, now: timeline.date)
+                }
+            }
+            .frame(width: geometry.size.width, height: geometry.size.height)
+            .clipped()
+        }
+        // Observes the array (not just its count): once the rolling buffer is
+        // full, appends keep the count constant while contents shift.
+        .onChange(of: levels) { oldLevels, newLevels in
+            registerAppend(oldLevels: oldLevels, newLevels: newLevels)
+        }
+    }
+
+    private func registerAppend(oldLevels: [CGFloat], newLevels: [CGFloat]) {
+        guard !newLevels.isEmpty, newLevels.count >= oldLevels.count else {
+            lastAppendDate = .distantPast
+            return
+        }
+        let now = Date()
+        if lastAppendDate != .distantPast {
+            let measured = now.timeIntervalSince(lastAppendDate)
+            if (0.02...0.5).contains(measured) {
+                sampleInterval = sampleInterval * 0.8 + measured * 0.2
+            }
+        }
+        lastAppendDate = now
+    }
+
+    private func draw(in context: GraphicsContext, size: CGSize, now: Date) {
+        let slotWidth = barWidth + barSpacing
+        let midY = size.height / 2
+
+        // 0 → newest bar fully offscreen right, 1 → settled one slot in.
+        let elapsed = now.timeIntervalSince(lastAppendDate)
+        let phase = lastAppendDate == .distantPast
+            ? 1.0
+            : min(1.0, max(0.0, elapsed / sampleInterval))
+
+        let slotCount = Int(ceil(size.width / slotWidth)) + 2
+        for slot in 0..<slotCount {
+            // slot 0 is the newest sample; older samples march left.
+            let level = slot < levels.count ? levels[levels.count - 1 - slot] : 0
+            let minX = size.width - (CGFloat(slot) + CGFloat(phase)) * slotWidth
+            guard minX + barWidth > 0 else { break }
+
+            let height = minHeight + (maxHeight - minHeight) * level
+            let rect = CGRect(x: minX, y: midY - height / 2, width: barWidth, height: height)
+            context.fill(
+                Path(roundedRect: rect, cornerRadius: 1),
+                with: .color(.primary.opacity(0.15 + level * 0.65))
+            )
+        }
     }
 }
 
