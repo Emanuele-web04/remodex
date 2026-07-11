@@ -1,49 +1,83 @@
 // FILE: TurnScrollStateTracker.swift
 // Purpose: Contains pure rules for bottom-anchor scroll state transitions.
 // Layer: View Helper
-// Exports: TurnAutoScrollMode, TurnScrollStateTracker
+// Exports: TurnScrollOwnership, TurnScrollEvent, TurnScrollStateTracker
 // Depends on: CoreGraphics
 
 import CoreGraphics
 import Foundation
 
-enum TurnAutoScrollMode {
-    case followBottom
-    case anchorAssistantResponse
-    case manual
+enum TurnScrollOwnership: Equatable {
+    enum AppTarget: Equatable {
+        case bottom
+        case assistantResponse
+    }
+
+    case app(AppTarget)
+    case user
+
+    static var followBottom: Self { .app(.bottom) }
+    static var anchorAssistantResponse: Self { .app(.assistantResponse) }
+    static var manual: Self { .user }
+
+    var allowsStreamingAnimations: Bool {
+        self != .user
+    }
+
+    var exposesScrollToLatest: Bool {
+        self == .user
+    }
+}
+
+enum TurnScrollEvent: Equatable {
+    case conversationOpened(shouldAnchorAssistantResponse: Bool)
+    case loadEarlier
+    case jumpToLatest
+    case sendBegan(shouldAnchorAssistantResponse: Bool)
+    case assistantAnchorRequested
+    case assistantAnchorResolved
+    case assistantAnchorCleared(isAtBottom: Bool)
+    case userInteractionBegan
+    case userInteractionEnded(isAtBottom: Bool)
 }
 
 struct TurnScrollStateTracker {
     static let bottomThreshold: CGFloat = 12
-    static let userScrollCooldown: TimeInterval = 0.25
-    static let contentHeightCorrectionThreshold: CGFloat = 1
 
-    static func shouldShowScrollToLatestButton(messageCount: Int, isScrolledToBottom: Bool) -> Bool {
-        messageCount > 0 && !isScrolledToBottom
+    static func shouldShowScrollToLatestButton(
+        messageCount: Int,
+        isScrolledToBottom: Bool,
+        ownership: TurnScrollOwnership
+    ) -> Bool {
+        messageCount > 0 && ownership.exposesScrollToLatest && !isScrolledToBottom
     }
 
-    // User drag owns the viewport immediately, including while a one-shot
-    // assistant anchor is waiting for its first renderable row.
-    static func modeAfterUserDragBegan(currentMode: TurnAutoScrollMode) -> TurnAutoScrollMode {
-        return .manual
-    }
-
-    static func modeAfterSendBegan(
-        shouldAnchorToAssistantResponse: Bool
-    ) -> TurnAutoScrollMode {
-        shouldAnchorToAssistantResponse ? .anchorAssistantResponse : .followBottom
-    }
-
-    // Restores follow-bottom only when the gesture finishes at the bottom;
-    // otherwise the timeline stays manual and leaves control with the user.
-    static func modeAfterUserDragEnded(
-        currentMode: TurnAutoScrollMode,
-        isScrolledToBottom: Bool
-    ) -> TurnAutoScrollMode {
-        guard currentMode != .anchorAssistantResponse else {
-            return currentMode
+    // This is the only writer for scroll ownership. Geometry is deliberately
+    // absent: layout can report physical drift, but only explicit app intent or
+    // real user interaction may transfer viewport ownership.
+    static func ownership(
+        after event: TurnScrollEvent,
+        current: TurnScrollOwnership
+    ) -> TurnScrollOwnership {
+        switch event {
+        case .conversationOpened(let shouldAnchor), .sendBegan(let shouldAnchor):
+            return shouldAnchor ? .anchorAssistantResponse : .followBottom
+        case .loadEarlier, .userInteractionBegan:
+            return .user
+        case .jumpToLatest:
+            return .followBottom
+        case .assistantAnchorRequested:
+            return .anchorAssistantResponse
+        case .assistantAnchorResolved:
+            guard current == .anchorAssistantResponse else { return current }
+            return .followBottom
+        case .assistantAnchorCleared(let isAtBottom):
+            guard current == .anchorAssistantResponse else { return current }
+            return isAtBottom ? .followBottom : .user
+        case .userInteractionEnded(let isAtBottom):
+            guard current == .user else { return current }
+            return isAtBottom ? .followBottom : .user
         }
-        return isScrolledToBottom ? .followBottom : .manual
     }
 
     // Geometry commits are intentionally delayed by one frame. Gesture-end must use the newest
@@ -66,61 +100,34 @@ struct TurnScrollStateTracker {
             && !(isSuppressingNotBottom && !observedIsAtBottom)
     }
 
-    // Re-anchor whenever pinned content meaningfully grows or shrinks so
-    // completion-time row removal cannot leave blank space below the timeline.
-    static func shouldCorrectBottomAfterContentHeightChange(
-        previousHeight: CGFloat,
-        newHeight: CGFloat,
-        isPinnedToBottom: Bool
-    ) -> Bool {
-        guard isPinnedToBottom else {
-            return false
-        }
-
-        guard previousHeight > 0, newHeight > 0 else {
-            return false
-        }
-
-        return abs(newHeight - previousHeight) > contentHeightCorrectionThreshold
-    }
-
-    // Follow-bottom represents app-owned scroll intent; user-owned scrolls switch
-    // to manual before geometry can pull the viewport back to the tail.
+    // App-owned bottom intent is maintained as an invariant. The assistant target
+    // is handled separately until its renderable row exists.
     static func shouldPinDuringGeometryChange(
-        currentMode: TurnAutoScrollMode,
-        isAutomaticScrollingPaused: Bool
+        ownership: TurnScrollOwnership,
+        isAutomaticScrollingPaused: Bool,
+        isWaitingForAssistantResponse: Bool = false
     ) -> Bool {
         guard !isAutomaticScrollingPaused else {
             return false
         }
-
-        switch currentMode {
-        case .followBottom:
-            return true
-        case .anchorAssistantResponse, .manual:
-            return false
-        }
+        return ownership == .followBottom
+            || (ownership == .anchorAssistantResponse && isWaitingForAssistantResponse)
     }
 
-    // Suppresses only the transient false-bottom frame caused by a queued app scroll.
-    static func shouldIgnoreTransientNotBottomGeometry(
-        currentMode: TurnAutoScrollMode,
-        hasPendingFollowBottomScroll: Bool,
+    static func shouldCorrectObservedBottomDrift(
+        observedIsAtBottom: Bool,
+        ownership: TurnScrollOwnership,
         isAutomaticScrollingPaused: Bool
     ) -> Bool {
-        currentMode == .followBottom
-            && hasPendingFollowBottomScroll
-            && !isAutomaticScrollingPaused
+        !observedIsAtBottom
+            && shouldPinDuringGeometryChange(
+                ownership: ownership,
+                isAutomaticScrollingPaused: isAutomaticScrollingPaused
+            )
     }
 
-    // Once a real not-bottom geometry update is accepted, follow intent becomes user-owned.
-    static func modeAfterAcceptedNotBottomGeometry(currentMode: TurnAutoScrollMode) -> TurnAutoScrollMode {
-        currentMode == .followBottom ? .manual : currentMode
-    }
-
-    // A local send is explicit user intent to enter the new turn at its live tail.
-    // Reopening an already-running desktop turn is different: first show its
-    // opener/response boundary so the user has context before live-follow resumes.
+    // A local send keeps the full live tail rendered even before explicit running
+    // evidence has propagated back into the thread snapshot.
     static func shouldOpenAtLiveTail(
         isSendInFlight: Bool
     ) -> Bool {
@@ -140,22 +147,4 @@ struct TurnScrollStateTracker {
         return isThreadRunning || hasActiveTurn || hasStreamingTail
     }
 
-    static func isAutomaticScrollingPaused(
-        isUserDragging: Bool,
-        cooldownUntil: Date?,
-        now: Date = Date()
-    ) -> Bool {
-        if isUserDragging {
-            return true
-        }
-
-        guard let cooldownUntil else {
-            return false
-        }
-        return now < cooldownUntil
-    }
-
-    static func cooldownDeadline(after date: Date = Date()) -> Date {
-        date.addingTimeInterval(userScrollCooldown)
-    }
 }

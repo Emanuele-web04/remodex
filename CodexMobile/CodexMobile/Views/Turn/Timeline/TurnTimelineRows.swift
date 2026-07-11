@@ -154,7 +154,7 @@ private struct TurnTimelineMessageRow: View {
     let currentWorkingDirectory: String?
     let planMatchingFingerprint: Int
     let newestStreamingMessageID: String?
-    let autoScrollMode: TurnAutoScrollMode
+    let autoScrollMode: TurnScrollOwnership
     let showsGlobalRunningIndicator: Bool
     let movesCopyAndRunningToGroupFooter: Bool
     let onRetryUserMessage: (String) -> Void
@@ -173,7 +173,7 @@ private struct TurnTimelineMessageRow: View {
             threadMessagesForPlanMatching: threadMessagesForPlanMatching,
             currentWorkingDirectory: currentWorkingDirectory,
             planMatchingFingerprint: planMatchingFingerprint,
-            showsStreamingAnimations: autoScrollMode == .followBottom
+            showsStreamingAnimations: autoScrollMode.allowsStreamingAnimations
                 && message.id == newestStreamingMessageID,
             inlineCommitAndPushAction: inlineCommitAndPushAction,
             inlineCommitAndPushPhase: inlineCommitAndPushPhase,
@@ -206,7 +206,7 @@ private struct TurnTimelineToolBurstView: View {
     let currentWorkingDirectory: String?
     let planMatchingFingerprint: Int
     let newestStreamingMessageID: String?
-    let autoScrollMode: TurnAutoScrollMode
+    let autoScrollMode: TurnScrollOwnership
     let showsGlobalRunningIndicator: Bool
     let onRetryUserMessage: (String) -> Void
     let onTapAssistantRevert: (CodexMessage) -> Void
@@ -303,7 +303,7 @@ private struct TurnTimelinePreviousMessagesView: View {
     let currentWorkingDirectory: String?
     let planMatchingFingerprint: Int
     let newestStreamingMessageID: String?
-    let autoScrollMode: TurnAutoScrollMode
+    let autoScrollMode: TurnScrollOwnership
     let showsGlobalRunningIndicator: Bool
     let onRetryUserMessage: (String) -> Void
     let onTapAssistantRevert: (CodexMessage) -> Void
@@ -389,7 +389,7 @@ struct TurnTimelineRowsSection: View {
     let currentWorkingDirectory: String?
     let planMatchingFingerprint: Int
     let newestStreamingMessageID: String?
-    let autoScrollMode: TurnAutoScrollMode
+    let autoScrollMode: TurnScrollOwnership
     let onRetryUserMessage: (String) -> Void
     let onTapAssistantRevert: (CodexMessage) -> Void
     let onTapSubagent: (CodexSubagentThreadPresentation) -> Void

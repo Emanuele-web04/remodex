@@ -5734,52 +5734,111 @@ final class TurnScrollStateTrackerTests: XCTestCase {
         )
     }
 
-    func testUserDragImmediatelySwitchesFollowBottomToManual() {
+    func testConversationOpenAlwaysGivesTheAppBottomOwnership() {
         XCTAssertEqual(
-            TurnScrollStateTracker.modeAfterUserDragBegan(currentMode: .followBottom),
-            .manual
+            TurnScrollStateTracker.ownership(
+                after: .conversationOpened(shouldAnchorAssistantResponse: false),
+                current: .user
+            ),
+            .followBottom
         )
     }
 
-    func testSendLeavesAppOwnedHistoryAnchorInLiveFollowMode() {
+    func testSendSelectsTheRequestedAppTarget() {
         XCTAssertEqual(
-            TurnScrollStateTracker.modeAfterSendBegan(
-                shouldAnchorToAssistantResponse: false
+            TurnScrollStateTracker.ownership(
+                after: .sendBegan(shouldAnchorAssistantResponse: false),
+                current: .user
             ),
             .followBottom
         )
         XCTAssertEqual(
-            TurnScrollStateTracker.modeAfterSendBegan(
-                shouldAnchorToAssistantResponse: true
+            TurnScrollStateTracker.ownership(
+                after: .sendBegan(shouldAnchorAssistantResponse: true),
+                current: .user
             ),
             .anchorAssistantResponse
         )
     }
 
-    func testUserDragCancelsPendingAssistantAnchorMode() {
-        XCTAssertEqual(
-            TurnScrollStateTracker.modeAfterUserDragBegan(currentMode: .anchorAssistantResponse),
-            .manual
+    func testResolvedAssistantAnchorRestoresBottomFollow() {
+        let resolved = TurnScrollStateTracker.ownership(
+            after: .assistantAnchorResolved,
+            current: .anchorAssistantResponse
+        )
+
+        XCTAssertEqual(resolved, .followBottom)
+        XCTAssertTrue(
+            TurnScrollStateTracker.shouldPinDuringGeometryChange(
+                ownership: resolved,
+                isAutomaticScrollingPaused: false
+            )
         )
     }
 
-    func testUserDragEndingAtBottomRestoresFollowBottom() {
+    func testResolvingAssistantAnchorDoesNotOverrideUserOwnership() {
         XCTAssertEqual(
-            TurnScrollStateTracker.modeAfterUserDragEnded(
-                currentMode: .manual,
-                isScrolledToBottom: true
+            TurnScrollStateTracker.ownership(
+                after: .assistantAnchorResolved,
+                current: .user
+            ),
+            .user
+        )
+    }
+
+    func testAppOwnedScrollingPreservesStreamingAnimations() {
+        XCTAssertTrue(TurnScrollOwnership.followBottom.allowsStreamingAnimations)
+        XCTAssertTrue(TurnScrollOwnership.anchorAssistantResponse.allowsStreamingAnimations)
+        XCTAssertFalse(TurnScrollOwnership.user.allowsStreamingAnimations)
+    }
+
+    func testFollowBottomTracksScrollGeometry() {
+        XCTAssertTrue(
+            TurnTimelinePendingAssistantState.shouldTrackScrollGeometry(
+                shouldAnchorToAssistantResponse: false,
+                autoScrollMode: .followBottom,
+                isWaitingForAssistantResponse: false
+            )
+        )
+    }
+
+    func testUserInteractionOwnsTheViewportAndCancelsAnyAppTarget() {
+        XCTAssertEqual(
+            TurnScrollStateTracker.ownership(
+                after: .userInteractionBegan,
+                current: .anchorAssistantResponse
+            ),
+            .user
+        )
+    }
+
+    func testUserInteractionEndingAtBottomRestoresAppOwnership() {
+        XCTAssertEqual(
+            TurnScrollStateTracker.ownership(
+                after: .userInteractionEnded(isAtBottom: true),
+                current: .user
             ),
             .followBottom
         )
     }
 
-    func testUserDragEndingAwayFromBottomKeepsManualMode() {
+    func testUserInteractionEndingAwayFromBottomKeepsUserOwnership() {
         XCTAssertEqual(
-            TurnScrollStateTracker.modeAfterUserDragEnded(
-                currentMode: .manual,
-                isScrolledToBottom: false
+            TurnScrollStateTracker.ownership(
+                after: .userInteractionEnded(isAtBottom: false),
+                current: .user
             ),
-            .manual
+            .user
+        )
+    }
+
+    func testTrackingWithoutInteractionDoesNotReplaceAssistantTarget() {
+        XCTAssertEqual(
+            TurnScrollStateTracker.ownership(
+                after: .userInteractionEnded(isAtBottom: false),
+                current: .anchorAssistantResponse
+            ),
+            .anchorAssistantResponse
         )
     }
 
@@ -5791,11 +5850,11 @@ final class TurnScrollStateTrackerTests: XCTestCase {
 
         XCTAssertFalse(effectiveBottom)
         XCTAssertEqual(
-            TurnScrollStateTracker.modeAfterUserDragEnded(
-                currentMode: .manual,
-                isScrolledToBottom: effectiveBottom
+            TurnScrollStateTracker.ownership(
+                after: .userInteractionEnded(isAtBottom: effectiveBottom),
+                current: .user
             ),
-            .manual
+            .user
         )
     }
 
@@ -5832,107 +5891,54 @@ final class TurnScrollStateTrackerTests: XCTestCase {
         )
     }
 
-    func testCorrectsBottomForMeaningfulContentGrowthWhenPinned() {
-        XCTAssertTrue(
-            TurnScrollStateTracker.shouldCorrectBottomAfterContentHeightChange(
-                previousHeight: 320,
-                newHeight: 356,
-                isPinnedToBottom: true
-            )
-        )
-    }
-
-    func testCorrectsBottomForMeaningfulContentShrinkWhenPinned() {
-        XCTAssertTrue(
-            TurnScrollStateTracker.shouldCorrectBottomAfterContentHeightChange(
-                previousHeight: 356,
-                newHeight: 320,
-                isPinnedToBottom: true
-            )
-        )
-    }
-
-    func testIgnoresTinyHeightDriftAndManualMode() {
-        XCTAssertFalse(
-            TurnScrollStateTracker.shouldCorrectBottomAfterContentHeightChange(
-                previousHeight: 320,
-                newHeight: 320.5,
-                isPinnedToBottom: true
-            )
-        )
-
-        XCTAssertFalse(
-            TurnScrollStateTracker.shouldCorrectBottomAfterContentHeightChange(
-                previousHeight: 356,
-                newHeight: 320,
-                isPinnedToBottom: false
-            )
-        )
-    }
-
     func testFollowBottomKeepsPinnedAcrossTransientGeometryDrift() {
         XCTAssertTrue(
             TurnScrollStateTracker.shouldPinDuringGeometryChange(
-                currentMode: .followBottom,
+                ownership: .followBottom,
                 isAutomaticScrollingPaused: false
             )
         )
     }
 
-    func testIgnoresTransientNotBottomOnlyWhileFollowSnapIsPending() {
+    func testGeometryCannotTransferAppOwnershipToTheUser() {
+        let ownership = TurnScrollStateTracker.ownership(
+            after: .conversationOpened(shouldAnchorAssistantResponse: false),
+            current: .user
+        )
+        XCTAssertEqual(
+            ownership,
+            .followBottom
+        )
+    }
+
+    func testOffBottomGeometryCorrectsAppOwnershipButNeverUserOwnership() {
         XCTAssertTrue(
-            TurnScrollStateTracker.shouldIgnoreTransientNotBottomGeometry(
-                currentMode: .followBottom,
-                hasPendingFollowBottomScroll: true,
+            TurnScrollStateTracker.shouldCorrectObservedBottomDrift(
+                observedIsAtBottom: false,
+                ownership: .followBottom,
                 isAutomaticScrollingPaused: false
             )
         )
-
         XCTAssertFalse(
-            TurnScrollStateTracker.shouldIgnoreTransientNotBottomGeometry(
-                currentMode: .followBottom,
-                hasPendingFollowBottomScroll: false,
+            TurnScrollStateTracker.shouldCorrectObservedBottomDrift(
+                observedIsAtBottom: false,
+                ownership: .user,
                 isAutomaticScrollingPaused: false
             )
-        )
-
-        XCTAssertFalse(
-            TurnScrollStateTracker.shouldIgnoreTransientNotBottomGeometry(
-                currentMode: .followBottom,
-                hasPendingFollowBottomScroll: true,
-                isAutomaticScrollingPaused: true
-            )
-        )
-    }
-
-    func testAcceptedNotBottomGeometrySwitchesFollowBottomToManual() {
-        XCTAssertEqual(
-            TurnScrollStateTracker.modeAfterAcceptedNotBottomGeometry(currentMode: .followBottom),
-            .manual
-        )
-
-        XCTAssertEqual(
-            TurnScrollStateTracker.modeAfterAcceptedNotBottomGeometry(currentMode: .manual),
-            .manual
-        )
-
-        XCTAssertEqual(
-            TurnScrollStateTracker.modeAfterAcceptedNotBottomGeometry(currentMode: .anchorAssistantResponse),
-            .anchorAssistantResponse
         )
     }
 
     func testManualAndPausedModesDoNotPinDuringGeometryChange() {
         XCTAssertFalse(
             TurnScrollStateTracker.shouldPinDuringGeometryChange(
-                currentMode: .manual,
+                ownership: .manual,
                 isAutomaticScrollingPaused: false
             )
         )
 
         XCTAssertFalse(
             TurnScrollStateTracker.shouldPinDuringGeometryChange(
-                currentMode: .followBottom,
+                ownership: .followBottom,
                 isAutomaticScrollingPaused: true
             )
         )
@@ -5941,15 +5947,56 @@ final class TurnScrollStateTrackerTests: XCTestCase {
     func testAssistantAnchorDoesNotBottomPinWhileWaitingForAssistantTarget() {
         XCTAssertFalse(
             TurnScrollStateTracker.shouldPinDuringGeometryChange(
-                currentMode: .anchorAssistantResponse,
+                ownership: .anchorAssistantResponse,
                 isAutomaticScrollingPaused: false
             )
         )
 
         XCTAssertFalse(
             TurnScrollStateTracker.shouldPinDuringGeometryChange(
-                currentMode: .anchorAssistantResponse,
+                ownership: .anchorAssistantResponse,
                 isAutomaticScrollingPaused: true
+            )
+        )
+    }
+
+    func testPendingAssistantTargetPinsThroughSizeChangePolicyNotGeometryDrift() {
+        XCTAssertTrue(
+            TurnScrollStateTracker.shouldPinDuringGeometryChange(
+                ownership: .anchorAssistantResponse,
+                isAutomaticScrollingPaused: false,
+                isWaitingForAssistantResponse: true
+            )
+        )
+        XCTAssertFalse(
+            TurnScrollStateTracker.shouldCorrectObservedBottomDrift(
+                observedIsAtBottom: false,
+                ownership: .anchorAssistantResponse,
+                isAutomaticScrollingPaused: false
+            )
+        )
+    }
+
+    func testScrollToLatestButtonAppearsForReadableOffBottomTargets() {
+        XCTAssertTrue(
+            TurnScrollStateTracker.shouldShowScrollToLatestButton(
+                messageCount: 10,
+                isScrolledToBottom: false,
+                ownership: .user
+            )
+        )
+        XCTAssertFalse(
+            TurnScrollStateTracker.shouldShowScrollToLatestButton(
+                messageCount: 10,
+                isScrolledToBottom: false,
+                ownership: .followBottom
+            )
+        )
+        XCTAssertFalse(
+            TurnScrollStateTracker.shouldShowScrollToLatestButton(
+                messageCount: 10,
+                isScrolledToBottom: false,
+                ownership: .anchorAssistantResponse
             )
         )
     }

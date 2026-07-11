@@ -84,14 +84,21 @@ struct PlanAccessorySnapshot: Equatable {
         )
     }
 
-    var progressText: String? {
+    /// 1-based index of the step currently being worked on, capped at the total.
+    /// Sits one past the completed steps so it reads as "the step in flight".
+    var currentStepNumber: Int {
+        guard totalStepCount > 0 else { return 0 }
+        return min(completedStepCount + 1, totalStepCount)
+    }
+
+    var stepProgressText: String? {
         guard totalStepCount > 0 else { return nil }
-        return "\(completedStepCount)/\(totalStepCount)"
+        return "Step \(currentStepNumber) / \(totalStepCount)"
     }
 
     var progressDescription: String {
         guard totalStepCount > 0 else { return status.label }
-        return "\(completedStepCount) of \(totalStepCount) complete"
+        return "Step \(currentStepNumber) of \(totalStepCount)"
     }
 
     private static func resolveStatus(
@@ -202,11 +209,7 @@ struct PlanAccessoryCard: View {
             GlassStatusPill {
                 leadingMarker
 
-                Text(snapshot.title)
-                    .font(AppFont.caption())
-                    .foregroundStyle(.secondary)
-
-                trailingMetric
+                stepLabel
             }
         }
         .buttonStyle(.plain)
@@ -216,35 +219,92 @@ struct PlanAccessoryCard: View {
         .accessibilityHint("Shows the current plan steps in a sheet")
     }
 
-    // Compact status dot mirroring the plan tint, sized to sit on a caption line.
+    // Segmented ring split by step count that fills as steps complete; falls
+    // back to a simple tinted dot while the plan is still forming (no steps yet).
+    @ViewBuilder
     private var leadingMarker: some View {
-        ZStack {
-            Circle()
-                .fill(snapshot.status.tint.opacity(0.14))
-                .frame(width: 16, height: 16)
+        if snapshot.totalStepCount > 0 {
+            PlanStepProgressRing(
+                totalSteps: snapshot.totalStepCount,
+                completedSteps: snapshot.completedStepCount,
+                tint: snapshot.status.tint
+            )
+        } else {
+            ZStack {
+                Circle()
+                    .fill(snapshot.status.tint.opacity(0.14))
+                    .frame(width: 16, height: 16)
 
-            Circle()
-                .fill(snapshot.status.tint)
-                .frame(width: 6, height: 6)
+                Circle()
+                    .fill(snapshot.status.tint)
+                    .frame(width: 6, height: 6)
+            }
         }
     }
 
     @ViewBuilder
-    private var trailingMetric: some View {
-        if let progressText = snapshot.progressText {
-            Text("·")
-                .font(AppFont.caption())
-                .foregroundStyle(.tertiary)
-
-            Text(progressText)
+    private var stepLabel: some View {
+        if let stepProgressText = snapshot.stepProgressText {
+            Text(stepProgressText)
                 .font(AppFont.caption())
                 .foregroundStyle(.secondary)
                 .fixedSize()
-        } else if snapshot.isStreaming {
-            ProgressView()
-                .controlSize(.mini)
-                .scaleEffect(0.8)
+        } else {
+            Text(snapshot.title)
+                .font(AppFont.caption())
+                .foregroundStyle(.secondary)
+
+            if snapshot.isStreaming {
+                ProgressView()
+                    .controlSize(.mini)
+                    .scaleEffect(0.8)
+            }
         }
+    }
+}
+
+/// Compact circular progress indicator divided into one arc per plan step.
+/// Completed steps light up in the plan tint; remaining steps sit in a faint
+/// track, so the ring visibly fills as the plan advances.
+private struct PlanStepProgressRing: View {
+    let totalSteps: Int
+    let completedSteps: Int
+    let tint: Color
+    var size: CGFloat = 16
+    var lineWidth: CGFloat = 2.5
+
+    var body: some View {
+        ZStack {
+            ForEach(0..<segmentCount, id: \.self) { index in
+                Circle()
+                    .trim(from: trim(for: index).start, to: trim(for: index).end)
+                    .stroke(
+                        index < completedSteps ? tint : tint.opacity(0.16),
+                        style: StrokeStyle(lineWidth: lineWidth, lineCap: .butt)
+                    )
+            }
+        }
+        .rotationEffect(.degrees(-90))
+        .frame(width: size, height: size)
+        .animation(.easeOut(duration: 0.25), value: completedSteps)
+        .accessibilityHidden(true)
+    }
+
+    private var segmentCount: Int {
+        max(totalSteps, 1)
+    }
+
+    // Gap between segments, scaled down as the step count grows so dense plans
+    // still keep a positive-length arc per step.
+    private var gap: Double {
+        segmentCount > 1 ? min(0.05, 0.4 / Double(segmentCount)) : 0
+    }
+
+    private func trim(for index: Int) -> (start: CGFloat, end: CGFloat) {
+        let slice = 1.0 / Double(segmentCount)
+        let start = Double(index) * slice + gap / 2
+        let end = Double(index + 1) * slice - gap / 2
+        return (CGFloat(start), CGFloat(end))
     }
 }
 

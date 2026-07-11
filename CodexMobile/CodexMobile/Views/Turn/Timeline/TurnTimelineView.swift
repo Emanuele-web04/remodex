@@ -73,21 +73,12 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
 
     @State private var visibleTailCount: Int = initialVisibleTailCount
     @State private var isScrolledToBottom = true
-    @State private var viewportHeight: CGFloat = 0
     @State private var renderCacheState = TurnTimelineRenderCacheState()
     @State private var scrollSessionThreadID: String?
-    @State private var autoScrollMode: TurnAutoScrollMode = .followBottom
-    @State private var initialRecoverySnapPendingThreadID: String?
-    @State private var initialLiveTailThreadID: String?
-    @State private var initialRecoverySnapTask: Task<Void, Never>?
-    @State private var followBottomScrollTask: Task<Void, Never>?
-    @State private var scrollToLatestSettlingTask: Task<Void, Never>?
-    @State private var scrollToLatestSettlingGeneration = 0
-    @State private var pendingAssistantBottomSnapTask: Task<Void, Never>?
+    @State private var autoScrollMode: TurnScrollOwnership = .followBottom
     @State private var progressiveTailRevealTask: Task<Void, Never>?
     @State private var isProgressivelyRevealingRecentTail = false
-    @State private var isUserDraggingScroll = false
-    @State private var userScrollCooldownUntil: Date?
+    @State private var isUserTouchingScroll = false
     @State private var pendingRemoteEarlierLoadMessageCount: Int?
     @State private var isLocalEarlierRevealPending = false
     @State private var isRetryingEarlierHistoryLoad = false
@@ -365,6 +356,9 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                         }
                     }
                     .frame(width: viewport.size.width)
+                    // Each conversation gets a fresh native scroll session, so
+                    // initialOffset cannot inherit deceleration or offset from another chat.
+                    .id(threadID)
                     .defaultScrollAnchor(.bottom, for: .initialOffset)
                     // While following the stream, anchor content-size growth to the bottom so the
                     // scroll view keeps the newest line pinned natively (GPU-driven, no per-frame
@@ -373,10 +367,9 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                     .defaultScrollAnchor(sizeChangeScrollAnchor, for: .sizeChanges)
                     .modifier(
                         TurnTimelineScrollObserverModifier(
-                            isGeometryTrackingEnabled: shouldTrackScrollGeometry,
                             onTapOutsideComposer: onTapOutsideComposer,
                             onScrollPhaseChange: { oldPhase, newPhase in
-                                handleScrollPhaseChange(from: oldPhase, to: newPhase)
+                                handleScrollPhaseChange(from: oldPhase, to: newPhase, using: proxy)
                             },
                             onScrollGeometryChange: { old, new in
                                 handleScrollGeometryChange(old: old, new: new, using: proxy)
@@ -551,7 +544,8 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     private var shouldShowScrollToLatestButton: Bool {
         TurnScrollStateTracker.shouldShowScrollToLatestButton(
             messageCount: messages.count,
-            isScrolledToBottom: isScrolledToBottom
+            isScrolledToBottom: isScrolledToBottom,
+            ownership: autoScrollMode
         )
     }
 
@@ -610,11 +604,8 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         }
 
         // Loading older history is explicit user ownership of the viewport.
-        initialRecoverySnapTask?.cancel()
-        initialRecoverySnapTask = nil
-        initialRecoverySnapPendingThreadID = nil
-        initialLiveTailThreadID = nil
-        autoScrollMode = .manual
+        shouldAnchorToAssistantResponse = false
+        transitionScrollOwnership(.loadEarlier)
         progressiveTailRevealTask?.cancel()
         progressiveTailRevealTask = nil
         scrollGeometryCoalescer.cancel()
@@ -673,50 +664,30 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     private func handleScrollToLatestButtonTap(using proxy: ScrollViewProxy) {
         HapticFeedback.shared.triggerImpactFeedback(style: .light)
         shouldAnchorToAssistantResponse = false
-        autoScrollMode = .followBottom
-        initialRecoverySnapPendingThreadID = nil
-        initialLiveTailThreadID = threadID
-        isUserDraggingScroll = false
-        userScrollCooldownUntil = nil
-        pendingAssistantBottomSnapTask?.cancel()
-        pendingAssistantBottomSnapTask = nil
-        // Drop a queued pre-tap `not bottom` commit, hide the affordance immediately, and keep
-        // transient geometry from re-showing it while the programmatic animation is settling.
+        transitionScrollOwnership(.jumpToLatest)
+        isUserTouchingScroll = false
+        // Drop a queued pre-tap geometry commit and let app ownership maintain
+        // the bottom if the animated jump initially lands short.
         scrollGeometryCoalescer.cancel()
-        // The button is visible only while the last committed position is away from the bottom.
-        // Keep that real observation until geometry proves the animation actually arrived.
         scrollGeometryCoalescer.markLatestObservedNotAtBottom()
         isScrolledToBottom = true
-        beginScrollToLatestSettlingWindow()
-        scrollToBottom(using: proxy, animated: true)
+        scheduleFollowBottomScroll(
+            using: proxy,
+            delayNanoseconds: 0,
+            animation: .easeInOut(duration: 0.2)
+        )
     }
 
-    private func beginScrollToLatestSettlingWindow() {
-        scrollToLatestSettlingTask?.cancel()
-        scrollToLatestSettlingGeneration &+= 1
-        let expectedGeneration = scrollToLatestSettlingGeneration
-        let expectedThreadID = threadID
-        scrollToLatestSettlingTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 350_000_000)
-            guard !Task.isCancelled,
-                  scrollToLatestSettlingGeneration == expectedGeneration,
-                  scrollSessionThreadID == expectedThreadID else {
-                return
-            }
-            let effectiveBottom = TurnScrollStateTracker.effectiveBottomState(
-                committedIsAtBottom: isScrolledToBottom,
-                latestObservedIsAtBottom: scrollGeometryCoalescer.latestObservedIsAtBottom
-            )
-            scrollToLatestSettlingTask = nil
-            if !effectiveBottom {
-                handleScrolledToBottomChanged(false)
-            }
-        }
+    private func transitionScrollOwnership(_ event: TurnScrollEvent) {
+        autoScrollMode = TurnScrollStateTracker.ownership(
+            after: event,
+            current: autoScrollMode
+        )
     }
 
-    // Resets per-thread scroll intent so each opened conversation gets one fresh
-    // post-layout recovery. Every open lands at the bottom: running threads join
-    // their live tail and finished threads show the end of the newest response.
+    // Resets per-thread ownership. The keyed ScrollView applies its native
+    // initial bottom anchor; later layout growth is repaired by the same
+    // follow-bottom invariant used for streaming.
     private func beginScrollSessionIfNeeded(force: Bool = false) {
         guard force || scrollSessionThreadID != threadID else { return }
 
@@ -726,33 +697,21 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             ? Self.initialWarmTailCount
             : min(messages.count, Self.initialVisibleTailCount)
         isScrolledToBottom = true
-        isUserDraggingScroll = false
-        userScrollCooldownUntil = nil
+        isUserTouchingScroll = false
         pendingRemoteEarlierLoadMessageCount = nil
         isLocalEarlierRevealPending = false
         isRetryingEarlierHistoryLoad = false
         localEarlierRevealTask?.cancel()
         localEarlierRevealTask = nil
-        initialLiveTailThreadID = shouldOpenAtLiveTail ? threadID : nil
-        autoScrollMode = shouldAnchorToAssistantResponse
-            ? .anchorAssistantResponse
-            : .followBottom
-        initialRecoverySnapPendingThreadID = shouldAnchorToAssistantResponse ? nil : threadID
+        transitionScrollOwnership(
+            .conversationOpened(shouldAnchorAssistantResponse: shouldAnchorToAssistantResponse)
+        )
         isProgressivelyRevealingRecentTail = shouldStageHeavyThreadOpen
     }
 
     // Cancels any delayed scroll work so old thread sessions cannot move the new one.
     private func cancelScrollTasks() {
-        initialRecoverySnapTask?.cancel()
-        initialRecoverySnapTask = nil
-        followBottomScrollTask?.cancel()
-        followBottomScrollTask = nil
-        scrollToLatestSettlingTask?.cancel()
-        scrollToLatestSettlingTask = nil
-        scrollToLatestSettlingGeneration &+= 1
         scrollGeometryCoalescer.cancel()
-        pendingAssistantBottomSnapTask?.cancel()
-        pendingAssistantBottomSnapTask = nil
         progressiveTailRevealTask?.cancel()
         progressiveTailRevealTask = nil
         isProgressivelyRevealingRecentTail = false
@@ -866,35 +825,15 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         handleTimelineMutation(using: proxy)
     }
 
-    // Marks a send that raced the scroll-session reset so the opening decision
-    // in handleInitialHistoryLoaded still sees the explicit live-tail intent.
-    private func resumeLiveTailIfNeeded() {
-        guard scrollSessionThreadID == threadID,
-              !shouldPauseAutomaticScrolling,
-              shouldOpenAtLiveTail,
-              !shouldAnchorToAssistantResponse,
-              initialLiveTailThreadID != threadID else {
-            return
-        }
-        initialLiveTailThreadID = threadID
-    }
-
     private func handleSendInFlightChange(using proxy: ScrollViewProxy) {
         debugTimelineLog("isSendInFlight changed value=\(isSendInFlight)")
         if isSendInFlight {
-            initialLiveTailThreadID = threadID
-            initialRecoverySnapPendingThreadID = nil
-            initialRecoverySnapTask?.cancel()
-            initialRecoverySnapTask = nil
-            // A send is an explicit request to enter the new live turn. If the
-            // viewport was held by an app-owned history/recovery anchor, do not
-            // leave it stranded in manual mode after clearing that anchor.
-            autoScrollMode = TurnScrollStateTracker.modeAfterSendBegan(
-                shouldAnchorToAssistantResponse: shouldAnchorToAssistantResponse
+            transitionScrollOwnership(
+                .sendBegan(shouldAnchorAssistantResponse: shouldAnchorToAssistantResponse)
             )
             isScrolledToBottom = true
             if !shouldAnchorToAssistantResponse {
-                scrollToBottom(using: proxy, animated: false)
+                scrollToBottom(using: proxy)
             }
         }
         // Sending mode is the optimistic-user-row gap between tap and turn/start.
@@ -945,18 +884,20 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
 
     private func handleAssistantAnchorChange(_ newValue: Bool, using proxy: ScrollViewProxy) {
         if newValue {
-            initialRecoverySnapTask?.cancel()
-            initialRecoverySnapTask = nil
-            initialRecoverySnapPendingThreadID = nil
-            autoScrollMode = .anchorAssistantResponse
+            transitionScrollOwnership(.assistantAnchorRequested)
             handleTimelineMutation(using: proxy)
         } else if autoScrollMode == .anchorAssistantResponse {
-            autoScrollMode = isScrolledToBottom ? .followBottom : .manual
+            let effectiveBottom = TurnScrollStateTracker.effectiveBottomState(
+                committedIsAtBottom: isScrolledToBottom,
+                latestObservedIsAtBottom: scrollGeometryCoalescer.latestObservedIsAtBottom
+            )
+            isScrolledToBottom = effectiveBottom
+            transitionScrollOwnership(.assistantAnchorCleared(isAtBottom: effectiveBottom))
         }
     }
 
-    // Initial history hydration can finish after SwiftUI has already chosen a provisional offset.
-    // Re-arm the recovery snap once the first authoritative page is available.
+    // Initial history hydration is just another app-owned timeline mutation.
+    // The bottom invariant repairs any post-hydration geometry drift.
     private func handleInitialHistoryLoaded(using proxy: ScrollViewProxy) {
         guard scrollSessionThreadID == threadID,
               !messages.isEmpty,
@@ -964,35 +905,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
               !shouldPauseAutomaticScrolling else {
             return
         }
-
-        // Preserve the opening decision even if the live turn completes before
-        // the authoritative history page finishes loading.
-        if initialLiveTailThreadID == threadID {
-            guard autoScrollMode == .followBottom else { return }
-            initialRecoverySnapTask?.cancel()
-            initialRecoverySnapTask = nil
-            initialRecoverySnapPendingThreadID = threadID
-            performInitialRecoverySnapIfNeeded(using: proxy)
-            return
-        }
-
-        // Do not override a real user scroll; only app-owned follow intent may re-snap.
-        guard autoScrollMode == .followBottom else { return }
-
-        // A reopened running thread hydrates as one batched bootstrap flush and is
-        // already pinned at the bottom; one snap suffices. Re-arming the multi-snap
-        // sequence here would fight live tail growth with extra scroll corrections.
-        if isThreadRunning,
-           isScrolledToBottom,
-           initialRecoverySnapPendingThreadID == nil {
-            scrollToBottom(using: proxy, animated: false)
-            return
-        }
-
-        initialRecoverySnapTask?.cancel()
-        initialRecoverySnapTask = nil
-        initialRecoverySnapPendingThreadID = threadID
-        performInitialRecoverySnapIfNeeded(using: proxy)
+        handleTimelineMutation(using: proxy)
     }
 
     private var timelineLoadingOverlay: some View {
@@ -1073,152 +986,94 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         }
     }
 
-    // Lets the first-open bottom snap learn the viewport even while initial history is loading.
-    private var shouldProcessInitialRecoveryGeometry: Bool {
-        initialRecoverySnapPendingThreadID == threadID && !messages.isEmpty
-    }
-
     // Coalesces scroll geometry into a small helper so the SwiftUI modifier chain stays type-checkable.
     private func handleScrollGeometryChange(
-        old: ScrollBottomGeometry,
-        new: ScrollBottomGeometry,
+        old: ScrollBottomState,
+        new: ScrollBottomState,
         using proxy: ScrollViewProxy
     ) {
-        // Even while history loading suppresses offset commits, retain the physical bottom state
-        // so a manual scroll-to-latest timeout can verify whether its animation really landed.
+        // Physical observation is always current, even while anchor settling
+        // suppresses SwiftUI commits. Geometry never transfers ownership.
         scrollGeometryCoalescer.observe(new)
-        guard !isEarlierHistoryInteractionActive || shouldProcessInitialRecoveryGeometry else { return }
+        guard shouldTrackScrollGeometry else { return }
 
         // Coalesce into a single commit per display-frame window so SwiftUI
         // does not receive several geometry-driven state mutations per frame.
         scrollGeometryCoalescer.record(old: old, new: new)
-        guard scrollGeometryCoalescer.applyTask == nil else { return }
         debugTimelineLog("geometry change scheduled for frame coalesced apply")
-        scrollGeometryCoalescer.applyTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: Self.scrollGeometryCoalescingDelayNanoseconds)
-            scrollGeometryCoalescer.applyTask = nil
-            guard let pending = scrollGeometryCoalescer.pending else { return }
-            scrollGeometryCoalescer.pending = nil
-            guard !Task.isCancelled else { return }
-            guard !isEarlierHistoryInteractionActive || shouldProcessInitialRecoveryGeometry else { return }
+        scrollGeometryCoalescer.scheduleApply(
+            after: Self.scrollGeometryCoalescingDelayNanoseconds
+        ) { old, new in
             applyScrollGeometryUpdate(
-                old: pending.old,
-                new: pending.new,
+                old: old,
+                new: new,
                 using: proxy
             )
         }
     }
 
-    // Stops follow-bottom as soon as the user drags away so queued snaps cannot fight the gesture.
+    // Records physical position only. Ownership changes exclusively through
+    // explicit reducer events, never because layout temporarily moved the bottom.
     private func handleScrolledToBottomChanged(_ nextValue: Bool) {
         guard nextValue != isScrolledToBottom else { return }
-
-        if !nextValue, scrollToLatestSettlingTask != nil {
-            return
-        }
-
-        // Ignore transient "not at bottom" geometry while a newly selected chat is still
-        // performing its initial recovery snap, otherwise fast chat switches can downgrade
-        // follow-bottom to manual before the first bottom jump lands.
-        if !nextValue,
-           initialRecoverySnapPendingThreadID == threadID,
-           autoScrollMode == .followBottom {
-            return
-        }
-
-        if isProgressivelyRevealingRecentTail,
-           autoScrollMode == .followBottom,
-           !nextValue {
-            return
-        }
-
-        // Content growth can briefly report "not bottom" before the queued
-        // follow snap lands; only user scroll phases should make that visible.
-        if !nextValue,
-           TurnScrollStateTracker.shouldIgnoreTransientNotBottomGeometry(
-            currentMode: autoScrollMode,
-            hasPendingFollowBottomScroll: followBottomScrollTask != nil,
-            isAutomaticScrollingPaused: shouldPauseAutomaticScrolling
-           ) {
-            return
-        }
-
-        if !nextValue {
-            // Cancel queued app snaps once geometry confirms the viewport is away
-            // from bottom; transient content-growth frames are filtered above.
-            followBottomScrollTask?.cancel()
-            followBottomScrollTask = nil
-            progressiveTailRevealTask?.cancel()
-            progressiveTailRevealTask = nil
-            isProgressivelyRevealingRecentTail = false
-        }
-
         isScrolledToBottom = nextValue
         if nextValue {
-            if autoScrollMode != .anchorAssistantResponse {
-                autoScrollMode = .followBottom
-            }
             scheduleProgressiveTailRevealIfNeeded()
-        } else {
-            autoScrollMode = TurnScrollStateTracker.modeAfterAcceptedNotBottomGeometry(
-                currentMode: autoScrollMode
-            )
         }
     }
 
-    // Gives user drag intent precedence over follow-bottom so streaming never wrestles the scroll gesture.
-    private func handleUserScrollDragChanged() {
-        guard !isUserDraggingScroll else { return }
-        isUserDraggingScroll = true
+    // Touch-down pauses queued corrections without claiming user ownership until
+    // ScrollPhase confirms an actual interaction.
+    private func handleUserScrollTrackingBegan() {
+        isUserTouchingScroll = true
+        scrollGeometryCoalescer.cancelFollowBottom()
+    }
+
+    private func handleUserScrollInteractionBegan() {
+        isUserTouchingScroll = true
         shouldAnchorToAssistantResponse = false
-        userScrollCooldownUntil = nil
-        initialRecoverySnapPendingThreadID = nil
-        initialLiveTailThreadID = nil
-        initialRecoverySnapTask?.cancel()
-        initialRecoverySnapTask = nil
-        followBottomScrollTask?.cancel()
-        followBottomScrollTask = nil
-        scrollToLatestSettlingTask?.cancel()
-        scrollToLatestSettlingTask = nil
-        scrollToLatestSettlingGeneration &+= 1
-        pendingAssistantBottomSnapTask?.cancel()
-        pendingAssistantBottomSnapTask = nil
+        scrollGeometryCoalescer.cancelFollowBottom()
         progressiveTailRevealTask?.cancel()
         progressiveTailRevealTask = nil
         isProgressivelyRevealingRecentTail = false
-        autoScrollMode = TurnScrollStateTracker.modeAfterUserDragBegan(currentMode: autoScrollMode)
+        transitionScrollOwnership(.userInteractionBegan)
     }
 
-    // Preserves user-controlled deceleration for a short cooldown before auto-follow can resume.
-    private func handleUserScrollDragEnded() {
-        isUserDraggingScroll = false
-        userScrollCooldownUntil = TurnScrollStateTracker.cooldownDeadline()
+    // Finalizes ownership only after deceleration reaches idle, so a flick that
+    // naturally lands at the bottom can re-enable follow mode.
+    private func handleUserScrollInteractionEnded(using proxy: ScrollViewProxy) {
+        isUserTouchingScroll = false
         let effectiveBottom = TurnScrollStateTracker.effectiveBottomState(
             committedIsAtBottom: isScrolledToBottom,
             latestObservedIsAtBottom: scrollGeometryCoalescer.latestObservedIsAtBottom
         )
         isScrolledToBottom = effectiveBottom
-        autoScrollMode = TurnScrollStateTracker.modeAfterUserDragEnded(
-            currentMode: autoScrollMode,
-            isScrolledToBottom: effectiveBottom
-        )
+        transitionScrollOwnership(.userInteractionEnded(isAtBottom: effectiveBottom))
+        handleTimelineMutation(using: proxy)
     }
 
     // Mirrors user-driven scroll phases without pausing auto-follow during programmatic animations.
-    private func handleScrollPhaseChange(from oldPhase: ScrollPhase, to newPhase: ScrollPhase) {
+    private func handleScrollPhaseChange(
+        from oldPhase: ScrollPhase,
+        to newPhase: ScrollPhase,
+        using proxy: ScrollViewProxy
+    ) {
         updateStreamingInteractionMonitor(from: oldPhase, to: newPhase)
         switch newPhase {
-        case .tracking, .interacting:
-            handleUserScrollDragChanged()
+        case .tracking:
+            handleUserScrollTrackingBegan()
+        case .interacting:
+            handleUserScrollInteractionBegan()
         case .decelerating:
-            let wasUserTouchingScroll = oldPhase == .tracking || oldPhase == .interacting
-            if wasUserTouchingScroll {
-                handleUserScrollDragEnded()
+            if oldPhase == .tracking, autoScrollMode != .user {
+                // Defensive fallback for a direct tracking -> decelerating phase
+                // transition: deceleration itself proves a user-owned gesture.
+                handleUserScrollInteractionBegan()
             }
+            isUserTouchingScroll = false
         case .idle:
-            let wasUserTouchingScroll = oldPhase == .tracking || oldPhase == .interacting
-            if wasUserTouchingScroll {
-                handleUserScrollDragEnded()
+            if oldPhase == .tracking || oldPhase == .interacting || oldPhase == .decelerating {
+                handleUserScrollInteractionEnded(using: proxy)
             }
         case .animating:
             return
@@ -1246,54 +1101,6 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         }
     }
 
-    // Repairs the initial white/blank viewport race with repeated post-layout
-    // snaps to the bottom, covering typical layout settle times.
-    private func performInitialRecoverySnapIfNeeded(using proxy: ScrollViewProxy) {
-        guard initialRecoverySnapPendingThreadID == threadID,
-              initialRecoverySnapTask == nil,
-              !messages.isEmpty,
-              viewportHeight > 0,
-              autoScrollMode == .followBottom,
-              !shouldPauseAutomaticScrolling,
-              !shouldAnchorToAssistantResponse else {
-            return
-        }
-
-        let expectedThreadID = threadID
-        // Delays in nanoseconds: yield, 16ms, 50ms, 100ms — covers typical layout settle times.
-        let snapDelays: [UInt64] = [0, 16_000_000, 50_000_000, 100_000_000]
-        initialRecoverySnapTask = Task { @MainActor in
-            for delay in snapDelays {
-                if delay == 0 {
-                    await Task.yield()
-                } else {
-                    try? await Task.sleep(nanoseconds: delay)
-                }
-
-                guard !Task.isCancelled,
-                      initialRecoverySnapPendingThreadID == expectedThreadID,
-                      scrollSessionThreadID == expectedThreadID,
-                      !messages.isEmpty,
-                      viewportHeight > 0,
-                      autoScrollMode == .followBottom,
-                      !shouldPauseAutomaticScrolling,
-                      !shouldAnchorToAssistantResponse else {
-                    break
-                }
-
-                scrollToBottom(using: proxy, animated: false)
-            }
-            let shouldKeepRecoveryPending = !initialTurnsLoaded
-                && isInitialEarlierPageLoading
-                && autoScrollMode == .followBottom
-                && !shouldPauseAutomaticScrolling
-            if !shouldKeepRecoveryPending {
-                initialRecoverySnapPendingThreadID = nil
-            }
-            initialRecoverySnapTask = nil
-        }
-    }
-
     private func anchorToAssistantResponseIfNeeded(using proxy: ScrollViewProxy) -> Bool {
         guard shouldAnchorToAssistantResponse,
               let assistantMessageID = TurnTimelineReducer.assistantResponseAnchorMessageID(
@@ -1303,174 +1110,136 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             return false
         }
 
-        withAnimation(.easeInOut(duration: 0.2)) {
+        let expectedThreadID = threadID
+        // A fast first response can arrive while the optimistic pending-row correction is
+        // still queued. Supersede it so the two programmatic targets cannot race.
+        scrollGeometryCoalescer.cancelFollowBottom()
+        withAnimation(
+            .easeInOut(duration: 0.2),
+            completionCriteria: .logicallyComplete
+        ) {
             proxy.scrollTo(assistantMessageID, anchor: .top)
-        }
-        // Break the .onChange chain by deferring the binding write to avoid
-        // AttributeGraph cycles when the parent re-renders in response.
-        DispatchQueue.main.async {
+        } completion: {
+            // The response may already be complete by the time this one-shot anchor settles.
+            // Restore bottom ownership explicitly so short and long streams behave identically.
+            guard scrollSessionThreadID == expectedThreadID,
+                  autoScrollMode == .anchorAssistantResponse else {
+                return
+            }
+
             shouldAnchorToAssistantResponse = false
+            transitionScrollOwnership(.assistantAnchorResolved)
+
+            let effectiveBottom = TurnScrollStateTracker.effectiveBottomState(
+                committedIsAtBottom: isScrolledToBottom,
+                latestObservedIsAtBottom: scrollGeometryCoalescer.latestObservedIsAtBottom
+            )
+            isScrolledToBottom = effectiveBottom
+            if !effectiveBottom {
+                scheduleFollowBottomScroll(using: proxy)
+            }
         }
-        autoScrollMode = .followBottom
-        initialRecoverySnapPendingThreadID = nil
-        pendingAssistantBottomSnapTask?.cancel()
-        pendingAssistantBottomSnapTask = nil
         return true
     }
 
-    // Keep mutation handling narrow so scroll geometry remains the follow-bottom source of truth.
+    // One mutation path maintains whichever target currently belongs to the app.
     private func handleTimelineMutation(using proxy: ScrollViewProxy) {
         guard !shouldPauseAutomaticScrolling else { return }
-        resumeLiveTailIfNeeded()
-        performInitialRecoverySnapIfNeeded(using: proxy)
 
         if autoScrollMode == .anchorAssistantResponse {
             if !anchorToAssistantResponseIfNeeded(using: proxy),
                shouldShowPendingAssistantResponse {
-                // The assistant row does not exist yet; keep the optimistic user
-                // bubble and pending thinking indicator anchored at the bottom.
-                schedulePendingAssistantBottomSnap(using: proxy)
+                // Until the response row exists, the optimistic user row and
+                // thinking indicator are the current app-owned bottom target.
+                scheduleFollowBottomScroll(using: proxy)
             }
+        } else if autoScrollMode == .followBottom, !isScrolledToBottom {
+            scheduleFollowBottomScroll(using: proxy)
         }
     }
 
-    // The user row and thinking indicator row can appear one layout pass before the
-    // assistant row exists; defer the bottom snap until that provisional stack is measurable.
-    private func schedulePendingAssistantBottomSnap(using proxy: ScrollViewProxy) {
-        guard pendingAssistantBottomSnapTask == nil else { return }
+    /// Coalesces rapid follow-bottom corrections without invalidating the SwiftUI tree.
+    /// Native size-change anchoring handles smooth streaming; this fallback is an
+    /// understated one-shot animation whose lock survives until logical completion.
+    private func scheduleFollowBottomScroll(
+        using proxy: ScrollViewProxy,
+        delayNanoseconds: UInt64 = 16_000_000,
+        animation: Animation = .smooth(duration: 0.12, extraBounce: 0)
+    ) {
         let expectedThreadID = threadID
-        let snapDelays: [UInt64] = [0, 16_000_000, 50_000_000]
-        pendingAssistantBottomSnapTask = Task { @MainActor in
-            defer { pendingAssistantBottomSnapTask = nil }
-            for delay in snapDelays {
-                if delay == 0 {
-                    await Task.yield()
-                } else {
-                    try? await Task.sleep(nanoseconds: delay)
-                }
-
-                guard !Task.isCancelled,
-                      scrollSessionThreadID == expectedThreadID,
-                      autoScrollMode == .anchorAssistantResponse,
-                      shouldShowPendingAssistantResponse,
-                      !shouldPauseAutomaticScrolling else {
-                    return
-                }
-
-                scrollToBottom(using: proxy, animated: delay != 0)
-            }
-        }
-    }
-
-    /// Coalesces rapid follow-bottom scrolls into at most one per display frame,
-    /// preventing discrete jumps on every streaming delta.
-    private func scheduleFollowBottomScroll(using proxy: ScrollViewProxy) {
-        guard followBottomScrollTask == nil else { return }
-        let expectedThreadID = threadID
-        followBottomScrollTask = Task { @MainActor in
-            defer { followBottomScrollTask = nil }
-            try? await Task.sleep(nanoseconds: 16_000_000) // ~1 display frame
-            guard !Task.isCancelled,
-                  scrollSessionThreadID == expectedThreadID,
+        scrollGeometryCoalescer.scheduleFollowBottom(after: delayNanoseconds) { completion in
+            guard scrollSessionThreadID == expectedThreadID,
                   !shouldPauseAutomaticScrolling else {
+                completion()
                 return
             }
-            guard autoScrollMode == .followBottom || shouldPinTimelineToBottomDuringGeometryChange else {
+            guard shouldPinTimelineToBottomDuringGeometryChange else {
+                completion()
                 return
             }
-            // With the native bottom size-change anchor doing the heavy lifting, this is a
-            // corrective nudge (usually a no-op when already pinned). Use a momentum-preserving
-            // interpolating spring so, unlike a restarting ease-out, retargeting mid-flight keeps
-            // its velocity and the viewport glides continuously instead of pulsing.
-            withAnimation(Self.followBottomStreamingScrollAnimation) {
+            withAnimation(
+                animation,
+                completionCriteria: .logicallyComplete
+            ) {
                 proxy.scrollTo(scrollBottomAnchorID, anchor: .bottom)
+            } completion: {
+                completion()
             }
         }
-    }
-
-    // Critically damped (bounce: 0) and short: the scroll correction should keep
-    // up with streaming growth instead of visibly walking behind each text burst.
-    private static var followBottomStreamingScrollAnimation: Animation {
-        .interpolatingSpring(duration: 0.12, bounce: 0)
     }
 
     private var shouldPauseAutomaticScrolling: Bool {
-        TurnScrollStateTracker.isAutomaticScrollingPaused(
-            isUserDragging: isUserDraggingScroll,
-            cooldownUntil: userScrollCooldownUntil
-        )
+        isUserTouchingScroll
     }
 
     // Follow-bottom owns bottom pinning; assistant anchoring waits for a real assistant row
     // so a new chat's first user bubble is not snapped around by geometry changes.
     private var shouldPinTimelineToBottomDuringGeometryChange: Bool {
-        return TurnScrollStateTracker.shouldPinDuringGeometryChange(
-            currentMode: autoScrollMode,
-            isAutomaticScrollingPaused: shouldPauseAutomaticScrolling
+        TurnScrollStateTracker.shouldPinDuringGeometryChange(
+            ownership: autoScrollMode,
+            isAutomaticScrollingPaused: shouldPauseAutomaticScrolling,
+            isWaitingForAssistantResponse: shouldShowPendingAssistantResponse
         )
     }
 
-    // Scrolls to the bottom sentinel; used by manual jump button and initial recovery snap.
-    // Streaming follow-bottom uses the throttled scheduleFollowBottomScroll instead.
-    private func scrollToBottom(using proxy: ScrollViewProxy, animated: Bool) {
+    // Immediate send-time placement; animated follow corrections use the
+    // completion-held single-flight path above.
+    private func scrollToBottom(using proxy: ScrollViewProxy) {
         guard !messages.isEmpty else { return }
-
-        if animated {
-            withAnimation(.easeInOut(duration: 0.2)) {
-                proxy.scrollTo(scrollBottomAnchorID, anchor: .bottom)
-            }
-        } else {
-            proxy.scrollTo(scrollBottomAnchorID, anchor: .bottom)
-        }
+        proxy.scrollTo(scrollBottomAnchorID, anchor: .bottom)
     }
 
     /// Single deferred commit for all scroll-geometry–driven state changes.
     /// Called once per runloop turn by the coalescer.
     private func applyScrollGeometryUpdate(
-        old: ScrollBottomGeometry,
-        new: ScrollBottomGeometry,
+        old: ScrollBottomState,
+        new: ScrollBottomState,
         using proxy: ScrollViewProxy
     ) {
         let isSuppressingBottomCorrectionsForWarmup = isRecentTailWarmupActive
             && autoScrollMode == .followBottom
-        let viewportHeightChanged = new.viewportHeight > 0
-            && abs(new.viewportHeight - old.viewportHeight) > 2
-        let shouldPinToBottom = shouldPinTimelineToBottomDuringGeometryChange
-        let shouldScheduleFollowBottom = viewportHeightChanged
-            && shouldPinToBottom
+        let shouldScheduleFollowBottom = TurnScrollStateTracker.shouldCorrectObservedBottomDrift(
+            observedIsAtBottom: new.isAtBottom,
+            ownership: autoScrollMode,
+            isAutomaticScrollingPaused: shouldPauseAutomaticScrolling
+        )
             && !isSuppressingBottomCorrectionsForWarmup
-        let shouldCorrectForContentHeight = !isSuppressingBottomCorrectionsForWarmup
-            && TurnScrollStateTracker.shouldCorrectBottomAfterContentHeightChange(
-                previousHeight: old.contentHeight,
-                newHeight: new.contentHeight,
-                isPinnedToBottom: shouldPinToBottom
-            )
         let bottomChanged = TurnScrollStateTracker.shouldReconcileBottomState(
             observedIsAtBottom: new.isAtBottom,
             committedIsAtBottom: isScrolledToBottom,
             isSuppressingNotBottom: isSuppressingBottomCorrectionsForWarmup
         )
-        let nextViewportHeight = new.viewportHeight
-
-        Task { @MainActor in
-            if nextViewportHeight > 0, abs(nextViewportHeight - viewportHeight) > 1 {
-                viewportHeight = nextViewportHeight
-                performInitialRecoverySnapIfNeeded(using: proxy)
-            }
-            if shouldScheduleFollowBottom || shouldCorrectForContentHeight {
-                scheduleFollowBottomScroll(using: proxy)
-            }
-            if bottomChanged {
-                handleScrolledToBottomChanged(new.isAtBottom)
-            }
+        if shouldScheduleFollowBottom {
+            scheduleFollowBottomScroll(using: proxy)
+        }
+        if bottomChanged {
+            handleScrolledToBottomChanged(new.isAtBottom)
         }
         debugTimelineLog(
             "applyScrollGeometryUpdate oldBottom=\(old.isAtBottom) newBottom=\(new.isAtBottom) "
-                + "oldViewport=\(Int(old.viewportHeight)) newViewport=\(Int(new.viewportHeight)) "
-                + "oldContent=\(Int(old.contentHeight)) newContent=\(Int(new.contentHeight)) "
                 + "pinned=\(shouldPinTimelineToBottomDuringGeometryChange) "
                 + "warmupSuppressed=\(isSuppressingBottomCorrectionsForWarmup) "
-                + "userDragging=\(isUserDraggingScroll)"
+                + "userTouching=\(isUserTouchingScroll)"
         )
     }
 
@@ -1489,10 +1258,9 @@ private extension TurnTimelineView {
 
 // Keeps scroll-specific observers out of the main SwiftUI body so type-checking stays predictable.
 private struct TurnTimelineScrollObserverModifier: ViewModifier {
-    let isGeometryTrackingEnabled: Bool
     let onTapOutsideComposer: () -> Void
     let onScrollPhaseChange: (ScrollPhase, ScrollPhase) -> Void
-    let onScrollGeometryChange: (ScrollBottomGeometry, ScrollBottomGeometry) -> Void
+    let onScrollGeometryChange: (ScrollBottomState, ScrollBottomState) -> Void
 
     func body(content: Content) -> some View {
         content
@@ -1506,10 +1274,9 @@ private struct TurnTimelineScrollObserverModifier: ViewModifier {
             .onScrollPhaseChange { oldPhase, newPhase in
                 onScrollPhaseChange(oldPhase, newPhase)
             }
-            .onScrollGeometryChange(for: ScrollBottomGeometry.self) { geometry in
-                ScrollBottomGeometry.from(geometry)
+            .onScrollGeometryChange(for: ScrollBottomState.self) { geometry in
+                ScrollBottomState.from(geometry)
             } action: { old, new in
-                guard isGeometryTrackingEnabled else { return }
                 onScrollGeometryChange(old, new)
             }
     }

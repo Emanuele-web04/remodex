@@ -61,7 +61,7 @@ struct SidebarProjectSectionHeader: View {
         // other section trailing affordance — but the tap target lives on
         // the button itself.
         HapticButton(hapticStyle: .medium, action: onCreate) {
-            RemodexIcon.image(systemName: "square.and.pencil", size: 20, weight: .medium)
+            RemodexIcon.image(systemName: "square.and.pencil", size: 18, weight: .medium)
                 .foregroundStyle(.secondary)
                 .frame(
                     width: SidebarSectionHeaderTrailingSlotSize.length,

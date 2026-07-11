@@ -12,7 +12,7 @@ struct SidebarThreadRunBadgeView: View {
     var body: some View {
         switch state {
         case .running:
-            RunningThreadSpinner()
+            RunningThreadSpinner(size: 13)
         case .failed:
             statusDot(color: .red)
         case .ready:
