@@ -71,6 +71,13 @@ struct TurnTimelineCommandGroup: Identifiable, Equatable {
         orderedMessages.filter { $0.role == .system && $0.kind == .thinking }
     }
 
+    var collapsedDetailMessages: [CodexMessage] {
+        orderedMessages.filter { message in
+            guard message.role == .system else { return false }
+            return message.kind == .thinking || message.kind == .fileChange
+        }
+    }
+
     var accessoryHostMessage: CodexMessage? {
         orderedMessages.last
     }
@@ -203,6 +210,7 @@ enum TurnTimelineRenderProjection {
         var bufferedToolMessages: [CodexMessage] = []
         var bufferedCommandMessages: [CodexMessage] = []
         var bufferedCommandOrderedMessages: [CodexMessage] = []
+        var bufferedCommandTrailingFileChanges: [CodexMessage] = []
         let fileChangePlan = fileChangeCollapsePlan(in: messages)
         let hiddenIndices = Set(finalCollapsePlan.values.flatMap(\.indices))
             .union(fileChangePlan.hiddenIndices)
@@ -232,8 +240,16 @@ enum TurnTimelineRenderProjection {
                     orderedMessages: bufferedCommandOrderedMessages
                 )))
             }
+            items.append(contentsOf: bufferedCommandTrailingFileChanges.map(TurnTimelineRenderItem.message))
             bufferedCommandMessages.removeAll(keepingCapacity: true)
             bufferedCommandOrderedMessages.removeAll(keepingCapacity: true)
+            bufferedCommandTrailingFileChanges.removeAll(keepingCapacity: true)
+        }
+
+        func commitBufferedCommandTrailingFileChanges() {
+            guard !bufferedCommandTrailingFileChanges.isEmpty else { return }
+            bufferedCommandOrderedMessages.append(contentsOf: bufferedCommandTrailingFileChanges)
+            bufferedCommandTrailingFileChanges.removeAll(keepingCapacity: true)
         }
 
         for (index, message) in messages.enumerated() {
@@ -247,9 +263,9 @@ enum TurnTimelineRenderProjection {
 
             if hiddenIndices.contains(index) {
                 // Completed-turn collapsing must not erase real command boundaries.
-                // Only reasoning traces may sit inside an open command disclosure;
-                // hidden assistant commentary or other activity closes it first.
-                if !isCommandGroupingTrace(message) {
+                // Reasoning and deduplicated file-change artifacts may sit inside an
+                // open command disclosure; hidden commentary still closes it first.
+                if !isCommandGroupingInterstitial(message) {
                     flushBufferedToolMessages()
                     flushBufferedCommandMessages()
                 }
@@ -265,19 +281,21 @@ enum TurnTimelineRenderProjection {
                 continue
             }
 
-            // A reasoning summary is trace output, not a command boundary. Hold it
-            // beside the command buffer so later terminal commands from the same
-            // turn can join the same disclosure. The trace is emitted immediately
-            // after that disclosure and remains independently visible.
+            // Reasoning and inline file changes are command interstitials. File changes
+            // remain pending until a later trace/command confirms that they bridge the
+            // run; otherwise flush places them back after the command disclosure.
             if !bufferedCommandMessages.isEmpty,
-               isCommandGroupingTrace(renderedMessage) {
+               isCommandGroupingInterstitial(renderedMessage) {
                 flushBufferedToolMessages()
                 if let previous = bufferedCommandMessages.last,
                    !canShareToolBurst(previous: previous, incoming: renderedMessage) {
                     flushBufferedCommandMessages()
                     items.append(.message(renderedMessage))
-                } else {
+                } else if isCommandGroupingTrace(renderedMessage) {
+                    commitBufferedCommandTrailingFileChanges()
                     bufferedCommandOrderedMessages.append(renderedMessage)
+                } else {
+                    bufferedCommandTrailingFileChanges.append(renderedMessage)
                 }
                 continue
             }
@@ -298,6 +316,7 @@ enum TurnTimelineRenderProjection {
                    !canShareToolBurst(previous: previous, incoming: renderedMessage) {
                     flushBufferedCommandMessages()
                 }
+                commitBufferedCommandTrailingFileChanges()
                 bufferedCommandMessages.append(renderedMessage)
                 bufferedCommandOrderedMessages.append(renderedMessage)
                 continue
@@ -993,6 +1012,11 @@ enum TurnTimelineRenderProjection {
 
     private static func isCommandGroupingTrace(_ message: CodexMessage) -> Bool {
         message.role == .system && message.kind == .thinking
+    }
+
+    private static func isCommandGroupingInterstitial(_ message: CodexMessage) -> Bool {
+        guard message.role == .system else { return false }
+        return message.kind == .thinking || message.kind == .fileChange
     }
 
     // Late turn ids can arrive mid-stream, so split only when both rows already

@@ -458,7 +458,7 @@ private struct TurnTimelineCommandGroupView: View {
                     groupedMessageRow(message)
                 }
             } else {
-                ForEach(group.traceMessages) { message in
+                ForEach(group.collapsedDetailMessages) { message in
                     groupedMessageRow(message)
                 }
             }

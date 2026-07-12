@@ -956,12 +956,66 @@ final class TurnTimelineReducerTests: XCTestCase {
             completedTurnIDs: ["turn-1"]
         )
 
-        XCTAssertTrue(items.contains { $0.id == "reasoning" })
+        XCTAssertEqual(items.map(\.id), ["user", "command-group:command-1", "final"])
+        guard case .commandGroup(let commandGroup) = items[1] else {
+            return XCTFail("Expected the file change and trace to remain with the command disclosure")
+        }
+        XCTAssertEqual(commandGroup.messages.map(\.id), ["command-1"])
+        XCTAssertEqual(commandGroup.traceMessages.map(\.id), ["reasoning"])
+        XCTAssertEqual(commandGroup.collapsedDetailMessages.map(\.id), ["file-change", "reasoning"])
+        XCTAssertEqual(commandGroup.orderedMessages.map(\.id), [
+            "command-1",
+            "file-change",
+            "reasoning",
+        ])
         let previousMessages = items.compactMap { item -> TurnTimelinePreviousMessagesGroup? in
             guard case .previousMessages(let group) = item else { return nil }
             return group
         }
         XCTAssertFalse(previousMessages.flatMap(\.messages).contains { $0.id == "reasoning" })
+    }
+
+    func testTimelineProjectionKeepsTrailingFileChangeOutsideCommandGroupWithoutLaterTrace() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "command-1",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git status",
+                createdAt: now,
+                turnID: "turn-1",
+                itemID: "command-1"
+            ),
+            makeMessage(
+                id: "file-change",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: "M Sources/App.swift",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "file-change"
+            ),
+            makeMessage(
+                id: "final",
+                threadID: "thread",
+                role: .assistant,
+                text: "Done.",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "final"
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(messages: messages)
+
+        XCTAssertEqual(items.map(\.id), [
+            "command-group:command-1",
+            "file-change",
+            "final",
+        ])
     }
 
     func testTimelineRenderProjectionStillSplitsCommandsAcrossAssistantCommentary() {
