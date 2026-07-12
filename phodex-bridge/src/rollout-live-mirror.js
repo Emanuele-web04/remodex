@@ -799,6 +799,26 @@ function synthesizeNotificationsFromRolloutEntry(entry, state, { nowMs = Date.no
     const payload = entry.payload || {};
     const eventType = readString(payload.type);
 
+    if (eventType === "thread_goal_updated") {
+      const goal = payload.goal && typeof payload.goal === "object" ? payload.goal : null;
+      const threadId = readString(payload.threadId) || readString(goal?.threadId) || state.threadId;
+      if (!goal || !threadId) {
+        return [];
+      }
+      return [createNotification("thread/goal/updated", {
+        threadId,
+        turnId: readString(payload.turnId) || readString(payload.turn_id) || null,
+        goal,
+      })];
+    }
+
+    if (eventType === "thread_goal_cleared") {
+      const threadId = readString(payload.threadId) || readString(payload.thread_id) || state.threadId;
+      return threadId
+        ? [createNotification("thread/goal/cleared", { threadId })]
+        : [];
+    }
+
     if (eventType === "task_started") {
       notifications.push(...finalizePendingSyntheticTerminal(state));
       const explicitTurnId = readString(payload.turn_id) || readString(payload.turnId);

@@ -659,6 +659,7 @@ struct NewChatDraftView: View {
                 onOpenWorktreeHandoff: {},
                 onOpenFeedbackMail: {},
                 onShowStatus: {},
+                allowsGoalCommand: false,
                 voiceButtonPresentation: voiceButtonPresentation,
                 isVoiceInputActive: isVoiceInputActive,
                 isVoiceRecording: voiceInput.isRecording,

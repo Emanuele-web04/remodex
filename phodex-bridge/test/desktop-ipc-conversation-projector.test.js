@@ -486,6 +486,28 @@ test("desktop conversation projector skips userMessage items that only carry con
   assert.deepEqual(startedItemIds, ["assistant-1"]);
 });
 
+test("desktop conversation projector hides native goal continuation context", () => {
+  const projector = createDesktopConversationProjector();
+  const output = projector.project("thread-goal-context", {
+    turns: [{
+      turnId: "turn-goal-context",
+      status: "inProgress",
+      params: {
+        input: [{
+          type: "text",
+          text: "<codex_internal_context source=\"goal\">\nContinue working toward the active thread goal.\n</codex_internal_context>",
+        }],
+      },
+      items: [{ id: "assistant-goal", type: "agentMessage", text: "Continuing" }],
+    }],
+  });
+  assert.equal(JSON.stringify(output.notifications).includes("codex_internal_context"), false);
+  assert.deepEqual(
+    output.notifications.filter((entry) => entry.method === "item/started").map((entry) => entry.params.itemId),
+    ["assistant-goal"]
+  );
+});
+
 test("desktop conversation projector mirrors token usage updates", () => {
   const projector = createDesktopConversationProjector();
   projector.project("thread-usage", {
@@ -647,4 +669,45 @@ test("projects Desktop conversation state into thread/read backfill shape", () =
     thread.turns[0].items.slice(2).map((item) => item.remodexDesktopIpcItemType),
     ["mcpToolCall", "dynamicToolCall"]
   );
+});
+
+test("desktop conversation projector live-syncs goal metadata without transcript rows", () => {
+  const projector = createDesktopConversationProjector();
+  const baseGoal = {
+    threadId: "thread-goal",
+    objective: "Ship live goal sync",
+    status: "active",
+    tokenBudget: null,
+    tokensUsed: 10,
+    timeUsedSeconds: 2,
+    createdAt: 1,
+    updatedAt: 2,
+  };
+  const bootstrap = projector.project("thread-goal", { threadGoal: baseGoal, turns: [] });
+  assert.deepEqual(bootstrap.notifications.map((entry) => entry.method), ["thread/goal/updated"]);
+  assert.deepEqual(bootstrap.notifications[0].params.goal, baseGoal);
+  assert.equal(bootstrap.notifications[0].params.turnId, null);
+
+  const progress = projector.project("thread-goal", {
+    threadGoal: { ...baseGoal, tokensUsed: 20, updatedAt: 3 },
+    turns: [],
+  });
+  assert.deepEqual(progress.notifications.map((entry) => entry.method), ["thread/goal/updated"]);
+  assert.equal(progress.notifications[0].params.goal.tokensUsed, 20);
+
+  const completed = projector.project("thread-goal", {
+    threadGoal: null,
+    completedThreadGoal: { ...baseGoal, status: "complete", updatedAt: 4 },
+    turns: [],
+  });
+  assert.deepEqual(completed.notifications.map((entry) => entry.method), ["thread/goal/updated"]);
+  assert.equal(completed.notifications[0].params.goal.status, "complete");
+
+  const cleared = projector.project("thread-goal", {
+    threadGoal: null,
+    completedThreadGoal: null,
+    turns: [],
+  });
+  assert.deepEqual(cleared.notifications.map((entry) => entry.method), ["thread/goal/cleared"]);
+  assert.equal(cleared.notifications[0].params.threadId, "thread-goal");
 });

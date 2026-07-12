@@ -172,6 +172,10 @@ function projectDesktopConversationStateToThread(threadId, rawState, { now = () 
   return projectConversationState(threadId, rawState, { now }).thread;
 }
 
+function projectDesktopConversationStateToGoal(threadId, rawState) {
+  return latestThreadGoal(rawState, threadId);
+}
+
 function projectConversationState(threadId, rawState, {
   now = () => Date.now(),
   turnCache = null,
@@ -215,9 +219,12 @@ function projectConversationState(threadId, rawState, {
     turns,
   };
 
+  const goal = latestThreadGoal(rawState, threadId);
+
   return {
     thread,
     turns,
+    goal,
     activeTurnId,
     status: thread.status,
   };
@@ -332,6 +339,9 @@ function bootstrapNotifications(
   const notifications = includeThreadStarted && shouldEmitThreadStarted(projection.thread)
     ? [threadStartedNotification(projection.thread)]
     : [];
+  if (projection.goal) {
+    notifications.push(threadGoalUpdatedNotification(threadId, projection.goal));
+  }
   const activeTurns = includeAllActiveTurns
     ? projection.turns.filter((turn) => isActiveTurnStatus(turn.status))
     : [projection.activeTurnId
@@ -367,10 +377,24 @@ function diffProjections(threadId, previousProjection, nextProjection) {
   const notifications = [];
 
   notifications.push(...diffThreadMetadata(previousProjection.thread, nextProjection.thread));
+  notifications.push(...diffThreadGoal(threadId, previousProjection.goal, nextProjection.goal));
   notifications.push(...diffTurnLifecycle(threadId, previousProjection, nextProjection));
   notifications.push(...diffTurnItems(threadId, previousProjection, nextProjection));
 
   return notifications;
+}
+
+function diffThreadGoal(threadId, previousGoal, nextGoal) {
+  if (JSON.stringify(previousGoal || null) === JSON.stringify(nextGoal || null)) {
+    return [];
+  }
+  if (nextGoal) {
+    return [threadGoalUpdatedNotification(threadId, nextGoal)];
+  }
+  return [tagNotification({
+    method: "thread/goal/cleared",
+    params: { threadId },
+  })];
 }
 
 function diffThreadMetadata(previousThread, nextThread) {
@@ -640,6 +664,17 @@ function turnStartedNotification(threadId, turn) {
       threadId,
       turnId: turn.id,
       turn: cloneJSON(turn),
+    },
+  });
+}
+
+function threadGoalUpdatedNotification(threadId, goal) {
+  return tagNotification({
+    method: "thread/goal/updated",
+    params: {
+      threadId,
+      turnId: null,
+      goal: cloneJSON(goal),
     },
   });
 }
@@ -1161,9 +1196,42 @@ function normalizeTimestamp(value) {
   return Number.isFinite(numeric) && numeric > 0 ? numeric : 0;
 }
 
+function latestThreadGoal(rawState, threadId) {
+  const candidates = [rawState?.threadGoal, rawState?.completedThreadGoal]
+    .map((goal) => normalizeProjectedThreadGoal(goal, threadId))
+    .filter(Boolean);
+  return candidates.sort((left, right) => right.updatedAt - left.updatedAt)[0] || null;
+}
+
+function normalizeProjectedThreadGoal(value, fallbackThreadId) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const statusByToken = {
+    active: "active",
+    paused: "paused",
+    blocked: "blocked",
+    usagelimited: "usageLimited",
+    budgetlimited: "budgetLimited",
+    complete: "complete",
+  };
+  const goal = {
+    threadId: readString(value.threadId) || readString(value.thread_id) || fallbackThreadId,
+    objective: readString(value.objective),
+    status: statusByToken[normalizeToken(value.status)] || "",
+    tokenBudget: value.tokenBudget ?? value.token_budget ?? null,
+    tokensUsed: Number(value.tokensUsed ?? value.tokens_used) || 0,
+    timeUsedSeconds: Number(value.timeUsedSeconds ?? value.time_used_seconds) || 0,
+    createdAt: Number(value.createdAt ?? value.created_at) || 0,
+    updatedAt: Number(value.updatedAt ?? value.updated_at) || 0,
+  };
+  return goal.threadId && goal.objective && goal.status ? goal : null;
+}
+
 module.exports = {
   createDesktopConversationProjector,
   desktopTurnsShareLogicalIdentity,
   matchDesktopTurnIdentityContinuities,
+  projectDesktopConversationStateToGoal,
   projectDesktopConversationStateToThread,
 };

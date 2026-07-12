@@ -11,6 +11,7 @@ const {
   createDesktopConversationProjector,
   desktopTurnsShareLogicalIdentity,
   matchDesktopTurnIdentityContinuities,
+  projectDesktopConversationStateToGoal,
   projectDesktopConversationStateToThread,
 } = require("./desktop-ipc-conversation-projector");
 const {
@@ -41,7 +42,12 @@ const BACKGROUND_DISCONNECT_GRACE_MS = 30_000;
 const MAX_ACTIVE_THREAD_IDS = 512;
 const DESKTOP_IPC_ACTION_SOURCE = "desktop-ipc-action-follower";
 const REMODEX_LIVE_OWNER_SOURCE = "desktop-ipc-live-owner";
-const DESKTOP_STATE_READ_METHODS = new Set(["thread/read", "thread/resume", "thread/turns/list"]);
+const DESKTOP_STATE_READ_METHODS = new Set([
+  "thread/read",
+  "thread/resume",
+  "thread/turns/list",
+  "thread/goal/get",
+]);
 // Sidebar refreshes should also keep the Litter subscription alive. Without
 // this, a phone with no selected chat never connects to the Desktop bus and
 // cannot discover runs that started on the Mac.
@@ -1015,6 +1021,13 @@ function createDesktopIpcActionFollower({
     }
 
     rememberActiveThread(threadId);
+    if (method === "thread/goal/get") {
+      sendApplicationResponse(JSON.stringify({
+        id: message.id,
+        result: { goal: projectDesktopConversationStateToGoal(threadId, rawState) },
+      }));
+      return true;
+    }
     // Newer Litter snapshots keep materialized history in
     // turnHistory.history.entitiesByKey while leaving the legacy top-level
     // turns array empty or limited to only the current turn. The Desktop

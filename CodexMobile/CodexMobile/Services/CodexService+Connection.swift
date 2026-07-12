@@ -179,6 +179,7 @@ extension CodexService {
         supportedBridgeVoiceTranscriptionFormats = ["wav"]
         supportsThreadFork = true
         supportsTurnPagination = true
+        supportsThreadGoals = true
         hasPresentedThreadForkBridgeUpdatePrompt = false
         hasPresentedMinimumBridgePackageUpdatePrompt = false
         lastPresentedAvailableBridgePackageVersion = nil
@@ -551,6 +552,7 @@ extension CodexService {
         if await routePendingNotificationOpenIfPossible(refreshIfNeeded: false) {
             scheduleCompleteThreadListHydration()
             scheduleRuntimeOptionRefresh()
+            scheduleThreadGoalHydration()
             return
         }
         let resolvedPreferredThreadId = normalizedInterruptIdentifier(preferredThreadId)
@@ -583,6 +585,15 @@ extension CodexService {
         }
         scheduleCompleteThreadListHydration()
         scheduleRuntimeOptionRefresh()
+        scheduleThreadGoalHydration()
+    }
+
+    // Repaints sidebar goal badges off the critical reconnect path.
+    private func scheduleThreadGoalHydration() {
+        Task { @MainActor [weak self] in
+            guard let self, self.isConnected else { return }
+            await self.hydrateThreadGoalsSnapshot()
+        }
     }
 
     // Refreshes capped sidebar metadata without keeping initial reconnect in the loading state.
@@ -688,6 +699,8 @@ extension CodexService {
         supportedBridgeVoiceTranscriptionFormats = ["wav"]
         supportsThreadFork = true
         supportsTurnPagination = true
+        supportsThreadGoals = true
+        goalByThreadID.removeAll()
         hasPresentedThreadForkBridgeUpdatePrompt = false
         hasPresentedMinimumBridgePackageUpdatePrompt = false
         lastPresentedAvailableBridgePackageVersion = nil

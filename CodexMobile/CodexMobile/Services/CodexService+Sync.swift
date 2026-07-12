@@ -592,6 +592,8 @@ extension CodexService {
 
         if isArchived {
             addLocallyArchivedThreadID(threadId)
+            // Archived chats leave the live sidebar, so their goal badge must go too.
+            goalByThreadID.removeValue(forKey: threadId)
             if pinnedThreadIDs.contains(threadId) {
                 unpinThread(threadId)
             }
@@ -631,6 +633,7 @@ extension CodexService {
 
         clearOutcomeBadge(for: threadId)
         latestTurnTerminalStateByThread.removeValue(forKey: threadId)
+        goalByThreadID.removeValue(forKey: threadId)
         persistThreadRename(nil, for: threadId)
 
         // Drop local-only runtime overrides once a chat is fully removed from the device.

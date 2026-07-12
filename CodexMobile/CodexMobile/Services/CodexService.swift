@@ -235,6 +235,10 @@ enum CodexThreadRunBadgeState: Hashable, Sendable {
     case running
     case ready
     case failed
+    // Persistent goal is active on an idle thread (continuation may start on its own).
+    case goalActive
+    // Goal needs user attention (blocked, usage limited, or budget limited).
+    case goalAttention
 }
 
 enum CodexRunCompletionResult: String, Equatable, Sendable {
@@ -434,6 +438,8 @@ final class CodexService {
     @ObservationIgnored var threadsPendingCompletionHaptic: Set<String> = []
     // Keeps the latest terminal outcome per thread so UI can react to real run completion.
     var latestTurnTerminalStateByThread: [String: CodexTurnTerminalState] = [:]
+    // Mirrors the app-server persisted thread goal (`thread/goal/updated|cleared`).
+    var goalByThreadID: [String: CodexThreadGoal] = [:]
     // Preserves terminal outcome per turn so completed/stopped blocks stay distinguishable.
     var terminalStateByTurnID: [String: CodexTurnTerminalState] = [:]
     // Projected `ipc-turn-N` ids are only unique inside one thread/source epoch.
@@ -503,6 +509,8 @@ final class CodexService {
     var supportsThreadFork = true
     // Runtime compatibility flag for `thread/turns/list` and `excludeTurns`.
     var supportsTurnPagination = true
+    // Runtime compatibility flag for the `thread/goal/*` API (false after method-not-found).
+    var supportsThreadGoals = true
     // Seeds brand-new chats with one-shot composer actions like code review.
     var pendingComposerActionByThreadID: [String: CodexPendingThreadComposerAction] = [:]
     // In-memory identity directory for subagents, keyed by thread id and agent id.

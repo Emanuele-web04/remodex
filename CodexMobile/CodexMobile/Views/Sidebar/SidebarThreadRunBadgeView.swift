@@ -15,6 +15,10 @@ struct SidebarThreadRunBadgeView: View {
             RunningThreadSpinner(size: 13)
         case .failed:
             statusDot(color: .red)
+        case .goalActive:
+            statusDot(color: .purple)
+        case .goalAttention:
+            statusDot(color: .orange)
         case .ready:
             EmptyView()
         }
@@ -35,7 +39,7 @@ struct SidebarThreadRunBadgeView: View {
 extension CodexThreadRunBadgeState {
     var isVisibleInSidebar: Bool {
         switch self {
-        case .running, .failed:
+        case .running, .failed, .goalActive, .goalAttention:
             return true
         case .ready:
             return false

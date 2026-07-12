@@ -1315,6 +1315,9 @@ final class TurnViewModel {
             resetSlashCommandState(clearPendingSelection: true)
         case .fork:
             slashCommandPanelState = .forkDestinations(availableForkDestinations)
+        case .goal:
+            removeTrailingSlashCommandTokenFromInputIfNeeded()
+            resetSlashCommandState(clearPendingSelection: true)
         case .status:
             removeTrailingSlashCommandTokenFromInputIfNeeded()
             resetSlashCommandState(clearPendingSelection: true)

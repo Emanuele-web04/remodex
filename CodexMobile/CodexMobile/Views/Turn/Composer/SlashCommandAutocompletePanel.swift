@@ -302,6 +302,8 @@ struct SlashCommandAutocompletePanel: View {
             return true
         case .fork:
             return !isThreadRunning
+        case .goal:
+            return true
         case .status:
             return true
         case .subagents:

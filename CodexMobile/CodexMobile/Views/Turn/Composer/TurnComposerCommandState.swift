@@ -11,10 +11,11 @@ enum TurnComposerSlashCommand: String, Identifiable, Codable, Equatable, Sendabl
     case compact
     case feedback
     case fork
+    case goal
     case status
     case subagents
 
-    static let allCommands: [TurnComposerSlashCommand] = [.codeReview, .compact, .feedback, .fork, .status, .subagents]
+    static let allCommands: [TurnComposerSlashCommand] = [.codeReview, .compact, .feedback, .fork, .goal, .status, .subagents]
 
     var id: String { rawValue }
 
@@ -28,6 +29,8 @@ enum TurnComposerSlashCommand: String, Identifiable, Codable, Equatable, Sendabl
             return "Feedback"
         case .fork:
             return "Fork"
+        case .goal:
+            return "Goal"
         case .status:
             return "Status"
         case .subagents:
@@ -45,6 +48,8 @@ enum TurnComposerSlashCommand: String, Identifiable, Codable, Equatable, Sendabl
             return "Share feedback on Remodex with the developer"
         case .fork:
             return "Fork this thread into local or a new worktree"
+        case .goal:
+            return "Set a persistent goal Codex keeps working toward"
         case .status:
             return "Show context usage and rate limits"
         case .subagents:
@@ -62,6 +67,8 @@ enum TurnComposerSlashCommand: String, Identifiable, Codable, Equatable, Sendabl
             return "envelope"
         case .fork:
             return "remodex.fork"
+        case .goal:
+            return "target"
         case .status:
             return "speedometer"
         case .subagents:
@@ -79,6 +86,8 @@ enum TurnComposerSlashCommand: String, Identifiable, Codable, Equatable, Sendabl
             return "/feedback"
         case .fork:
             return "/fork"
+        case .goal:
+            return "/goal"
         case .status:
             return "/status"
         case .subagents:
@@ -91,7 +100,7 @@ enum TurnComposerSlashCommand: String, Identifiable, Codable, Equatable, Sendabl
         switch self {
         case .subagents:
             return "Run subagents for different tasks. Delegate distinct work in parallel when helpful and then synthesize the results."
-        case .codeReview, .compact, .feedback, .fork, .status:
+        case .codeReview, .compact, .feedback, .fork, .goal, .status:
             return nil
         }
     }
@@ -114,12 +123,16 @@ enum TurnComposerSlashCommand: String, Identifiable, Codable, Equatable, Sendabl
     // Hides slash commands that the connected runtime cannot fulfill for this session.
     static func availableCommands(
         supportsThreadFork: Bool,
-        allowsForkCommand: Bool
+        allowsForkCommand: Bool,
+        allowsGoalCommand: Bool = true
     ) -> [TurnComposerSlashCommand] {
         allCommands.filter { command in
             switch command {
             case .fork:
                 return supportsThreadFork && allowsForkCommand
+            case .goal:
+                // Goals need a materialized thread, so new-chat drafts hide the command.
+                return allowsGoalCommand
             case .codeReview, .compact, .feedback, .status, .subagents:
                 return true
             }
