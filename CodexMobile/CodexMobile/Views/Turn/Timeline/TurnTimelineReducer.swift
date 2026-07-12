@@ -96,11 +96,11 @@ enum TurnTimelineReducer {
                 sorted = movingFileChangesToTurnTail(
                     in: turnMessages.sorted { $0.orderIndex < $1.orderIndex }
                 )
-            } else if hasInterleavedAssistantActivityFlow(turnMessages) {
-                // Multi-item turn: keep the streamed interleaving intact. If the turn has
-                // only one user prompt, we can still float that original opener forward.
-                // Once a second user row exists, treat it as an in-turn steer and preserve
-                // full chronological order so it stays near the bottom of the active run.
+            } else if hasInterleavedAssistantActivityFlow(turnMessages)
+                        || hasInterleavedCommandTraceFlow(turnMessages) {
+                // Interleaved assistant or command-trace flow: keep streamed chronology.
+                // If the turn has only one user prompt, we can still float that original
+                // opener forward. A second user row is an in-turn steer and stays in place.
                 let userCount = turnMessages.reduce(into: 0) { partialResult, message in
                     if message.role == .user {
                         partialResult += 1
@@ -218,6 +218,31 @@ enum TurnTimelineReducer {
                 }
             }
         }
+        return false
+    }
+
+    // Reasoning summaries are part of the command trace. When one arrives between
+    // command rows before any assistant message exists, chronological order
+    // is already authoritative; role-priority sorting would move the trace ahead of
+    // both commands and prevent the render projection from preserving their sequence.
+    private static func hasInterleavedCommandTraceFlow(_ turnMessages: [CodexMessage]) -> Bool {
+        let ordered = turnMessages.sorted { $0.orderIndex < $1.orderIndex }
+        var seenCommand = false
+        var seenTraceAfterCommand = false
+
+        for message in ordered {
+            if message.role == .system, message.kind == .commandExecution {
+                if seenTraceAfterCommand {
+                    return true
+                }
+                seenCommand = true
+            } else if seenCommand,
+                      message.role == .system,
+                      message.kind == .thinking {
+                seenTraceAfterCommand = true
+            }
+        }
+
         return false
     }
 

@@ -706,6 +706,56 @@ final class TurnTimelineReducerTests: XCTestCase {
         ])
     }
 
+    func testTimelineProjectionPreservesCommandTraceOrderBeforeGrouping() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "command-1",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git status",
+                createdAt: now,
+                turnID: "turn-1",
+                itemID: "command-1",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "reasoning",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "Reasoning summary between commands",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "reasoning",
+                orderIndex: 2
+            ),
+            makeMessage(
+                id: "command-2",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git diff --stat",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "command-2",
+                orderIndex: 3
+            ),
+        ]
+
+        let projectedMessages = TurnTimelineReducer.project(messages: messages).messages
+        XCTAssertEqual(projectedMessages.map(\.id), ["command-1", "reasoning", "command-2"])
+
+        let items = TurnTimelineRenderProjection.project(messages: projectedMessages)
+        guard case .commandGroup(let group) = items.first else {
+            return XCTFail("Expected one command disclosure across the reasoning trace")
+        }
+        XCTAssertEqual(items.count, 1)
+        XCTAssertEqual(group.messages.map(\.id), ["command-1", "command-2"])
+        XCTAssertEqual(group.orderedMessages.map(\.id), ["command-1", "reasoning", "command-2"])
+    }
+
     func testTimelineRenderProjectionStillSplitsCommandsAcrossAssistantCommentary() {
         let now = Date()
         let messages = [
@@ -5263,6 +5313,58 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(initialStates["thinking-placeholder"]?.showsRunningIndicator, true)
         XCTAssertNil(rehousedStates["thinking-placeholder"])
         XCTAssertEqual(rehousedStates["assistant-1"]?.showsRunningIndicator, true)
+    }
+
+    func testCommandGroupAccessoryStateDoesNotRehomeOntoReasoningTrace() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "command-1",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git status",
+                createdAt: now,
+                turnID: "turn-1",
+                itemID: "command-1"
+            ),
+            makeMessage(
+                id: "reasoning",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "Reasoning summary between commands",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "reasoning"
+            ),
+            makeMessage(
+                id: "command-2",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git diff --stat",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "command-2"
+            ),
+        ]
+        let commandState = AssistantBlockAccessoryState(
+            copyText: "Assistant result",
+            showsRunningIndicator: true,
+            allowsCopy: true
+        )
+        let renderItems = TurnTimelineRenderProjection.project(messages: messages)
+
+        let rehousedStates = TurnTimelineView<EmptyView, EmptyView>.rehomeHiddenAccessoryStates(
+            ["command-2": commandState],
+            messages: messages,
+            renderItems: renderItems
+        )
+
+        XCTAssertEqual(renderItems.map(\.id), ["command-group:command-1"])
+        XCTAssertEqual(rehousedStates["command-2"], commandState)
+        XCTAssertNil(rehousedStates["reasoning"])
     }
 
     func testHiddenAccessoryStateDoesNotCrossStableTurnBoundary() {
