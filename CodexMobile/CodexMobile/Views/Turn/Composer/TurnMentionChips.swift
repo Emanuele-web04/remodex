@@ -492,7 +492,6 @@ struct UserMentionChipStrip: View {
 struct TurnComposerMentionChipSections: View {
     let state: TurnComposerAccessoryState
     let onRemoveMentionedFile: (String) -> Void
-    let onRemoveMentionedSkill: (String) -> Void
     let onRemoveMentionedPlugin: (String) -> Void
     let onRemoveComposerReviewSelection: () -> Void
     let onRemoveComposerSubagentsSelection: () -> Void
@@ -507,16 +506,6 @@ struct TurnComposerMentionChipSections: View {
                 ) { ref in
                     guard let fileID = state.composerMentionedFiles.mentionID(matching: ref) else { return }
                     onRemoveMentionedFile(fileID)
-                }
-            }
-
-            if state.showsMentionedSkills {
-                TurnMentionChipRow.composer(
-                    chips: state.composerMentionedSkills.mentionChipRefs,
-                    topPadding: TurnMentionChipTokens.composerAccessoryTopPadding
-                ) { ref in
-                    guard let skillID = state.composerMentionedSkills.mentionID(matching: ref) else { return }
-                    onRemoveMentionedSkill(skillID)
                 }
             }
 

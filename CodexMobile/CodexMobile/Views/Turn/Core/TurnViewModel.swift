@@ -962,6 +962,10 @@ final class TurnViewModel {
         thread: CodexThread,
         activeTurnID: String?
     ) {
+        composerMentionedSkills.removeAll { mention in
+            !Self.containsBoundedSkillToken(named: mention.name, in: text)
+        }
+
         guard !isComposerInteractionLocked(activeTurnID: activeTurnID),
               codex.isConnected,
               let token = Self.trailingSkillAutocompleteToken(in: text) else {
@@ -3181,6 +3185,22 @@ final class TurnViewModel {
         let matchRange = Range(match.range, in: text)!
         result.replaceSubrange(matchRange, with: "")
         return result
+    }
+
+    static func containsBoundedSkillToken(named name: String, in text: String) -> Bool {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        let escaped = NSRegularExpression.escapedPattern(for: trimmed)
+        guard let regex = try? NSRegularExpression(
+            pattern: "(?<!\\S)[$/]" + escaped + "(?=[\\s,.;:!?)\\]}>]|$)",
+            options: [.caseInsensitive]
+        ) else {
+            return false
+        }
+        return regex.firstMatch(
+            in: text,
+            range: NSRange(location: 0, length: (text as NSString).length)
+        ) != nil
     }
 
     /// Replaces all boundary-safe occurrences of `token` with `replacement`.

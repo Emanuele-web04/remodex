@@ -295,10 +295,6 @@ struct TurnComposerHostView: View {
                 viewModel.removeMentionedFile(id: mentionID)
                 viewModel.saveLocalDraft(codex: codex, threadID: thread.id)
             },
-            onRemoveMentionedSkill: { mentionID in
-                viewModel.removeMentionedSkill(id: mentionID)
-                viewModel.saveLocalDraft(codex: codex, threadID: thread.id)
-            },
             onRemoveMentionedPlugin: { mentionID in
                 viewModel.removeMentionedPlugin(id: mentionID)
                 viewModel.saveLocalDraft(codex: codex, threadID: thread.id)

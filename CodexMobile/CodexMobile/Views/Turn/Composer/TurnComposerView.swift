@@ -81,7 +81,6 @@ struct TurnComposerView: View {
     let onSelectForkDestination: (TurnComposerForkDestination) -> Void
     let onCloseSlashCommandPanel: () -> Void
     let onRemoveMentionedFile: (String) -> Void
-    let onRemoveMentionedSkill: (String) -> Void
     let onRemoveMentionedPlugin: (String) -> Void
     let onRemoveComposerReviewSelection: () -> Void
     let onRemoveComposerSubagentsSelection: () -> Void
@@ -213,7 +212,6 @@ struct TurnComposerView: View {
                         state: accessoryState,
                         onRemoveAttachment: onRemoveAttachment,
                         onRemoveMentionedFile: onRemoveMentionedFile,
-                        onRemoveMentionedSkill: onRemoveMentionedSkill,
                         onRemoveMentionedPlugin: onRemoveMentionedPlugin,
                         onRemoveComposerReviewSelection: onRemoveComposerReviewSelection,
                         onRemoveComposerSubagentsSelection: onRemoveComposerSubagentsSelection,
@@ -266,6 +264,7 @@ struct TurnComposerView: View {
                             isFocused: isInputFocused,
                             isEditable: !isComposerInteractionLocked,
                             dynamicHeight: $composerInputHeight,
+                            mentionedSkillNames: accessoryState.composerMentionedSkills.map(\.name),
                             runtimeState: runtimeState,
                             runtimeActions: runtimeActions,
                             isCollapsed: showsCollapsedComposer,
@@ -507,7 +506,6 @@ private struct TurnComposerAccessorySection: View {
     let state: TurnComposerAccessoryState
     let onRemoveAttachment: (String) -> Void
     let onRemoveMentionedFile: (String) -> Void
-    let onRemoveMentionedSkill: (String) -> Void
     let onRemoveMentionedPlugin: (String) -> Void
     let onRemoveComposerReviewSelection: () -> Void
     let onRemoveComposerSubagentsSelection: () -> Void
@@ -528,7 +526,6 @@ private struct TurnComposerAccessorySection: View {
             TurnComposerMentionChipSections(
                 state: state,
                 onRemoveMentionedFile: onRemoveMentionedFile,
-                onRemoveMentionedSkill: onRemoveMentionedSkill,
                 onRemoveMentionedPlugin: onRemoveMentionedPlugin,
                 onRemoveComposerReviewSelection: onRemoveComposerReviewSelection,
                 onRemoveComposerSubagentsSelection: onRemoveComposerSubagentsSelection,
@@ -828,7 +825,6 @@ private struct ComposerPreviewContent: View {
             onSelectForkDestination: { _ in },
             onCloseSlashCommandPanel: {},
             onRemoveMentionedFile: { _ in },
-            onRemoveMentionedSkill: { _ in },
             onRemoveMentionedPlugin: { _ in },
             onRemoveComposerReviewSelection: {},
             onRemoveComposerSubagentsSelection: {},

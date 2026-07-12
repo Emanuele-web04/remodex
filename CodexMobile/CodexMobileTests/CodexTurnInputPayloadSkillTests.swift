@@ -231,7 +231,7 @@ final class CodexTurnInputPayloadSkillTests: XCTestCase {
         XCTAssertEqual(message?.skillMentions, ["check-code"])
     }
 
-    func testStartTurnOptimisticMessageShowsOnlySkillChipForMentionOnlySend() async throws {
+    func testStartTurnOptimisticMessageKeepsSkillTokenForMentionOnlySend() async throws {
         let service = makeService()
         service.isConnected = true
         service.resumedThreadIDs.insert("thread-skill-only-display")
@@ -253,11 +253,11 @@ final class CodexTurnInputPayloadSkillTests: XCTestCase {
         )
 
         let message = service.messagesByThread["thread-skill-only-display"]?.last
-        XCTAssertEqual(message?.text, "")
+        XCTAssertEqual(message?.text, "/recap")
         XCTAssertEqual(message?.skillMentions, ["recap"])
     }
 
-    func testStartTurnOptimisticMessageKeepsSkillLabelInLocalTextWhenThereIsProse() async throws {
+    func testStartTurnOptimisticMessageKeepsCanonicalSkillTokenInLocalTextWhenThereIsProse() async throws {
         let service = makeService()
         service.isConnected = true
         service.resumedThreadIDs.insert("thread-skill-text-display")
@@ -279,7 +279,7 @@ final class CodexTurnInputPayloadSkillTests: XCTestCase {
         )
 
         let message = service.messagesByThread["thread-skill-text-display"]?.last
-        XCTAssertEqual(message?.text, "Recap pls")
+        XCTAssertEqual(message?.text, "/recap pls")
         XCTAssertEqual(message?.skillMentions, ["recap"])
     }
 

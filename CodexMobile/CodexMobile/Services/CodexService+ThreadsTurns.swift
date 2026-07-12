@@ -2349,27 +2349,15 @@ extension CodexService {
         return inputItems
     }
 
-    // Keeps the local bubble human-only; the turn/start payload still carries legacy text
-    // fallbacks so desktop Codex can read structured mentions.
+    // Keeps canonical skill tokens in the local bubble for inline rendering; the
+    // turn/start payload still carries the same legacy text and structured mentions.
     private func displayTextForOutgoingTurn(
         userInput: String,
-        skillMentions: [CodexTurnSkillMention],
+        skillMentions _: [CodexTurnSkillMention],
         mentionMentions: [CodexTurnMention]
     ) -> String {
         var trimmedInput = userInput.trimmingCharacters(in: .whitespacesAndNewlines)
         var humanTextProbe = trimmedInput
-
-        for mention in skillMentions {
-            let rawName = mention.name ?? mention.id
-            let normalizedName = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !normalizedName.isEmpty else { continue }
-            let displayName = Self.displayNameForMentionToken(normalizedName)
-            humanTextProbe = Self.removeBoundedMentionToken("$\(normalizedName)", from: humanTextProbe)
-            humanTextProbe = Self.removeBoundedMentionToken("/\(normalizedName)", from: humanTextProbe)
-            humanTextProbe = Self.removeBoundedMentionToken(displayName, from: humanTextProbe)
-            trimmedInput = Self.replacingBoundedMentionToken("$\(normalizedName)", with: displayName, in: trimmedInput)
-            trimmedInput = Self.replacingBoundedMentionToken("/\(normalizedName)", with: displayName, in: trimmedInput)
-        }
 
         for mention in mentionMentions {
             let normalizedName = mention.name.trimmingCharacters(in: .whitespacesAndNewlines)
