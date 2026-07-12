@@ -11,6 +11,12 @@ import XCTest
 final class CodexThreadGoalTests: XCTestCase {
     private static var retainedServices: [CodexService] = []
 
+    func testGoalCapsuleElapsedTimeAlwaysIncludesSeconds() {
+        XCTAssertEqual(GoalStatusChip.formatElapsedSeconds(11_839), "3h 17m 19s")
+        XCTAssertEqual(GoalStatusChip.formatElapsedSeconds(79), "1m 19s")
+        XCTAssertEqual(GoalStatusChip.formatElapsedSeconds(9), "9s")
+    }
+
     func testSetThreadGoalOmitsTokenBudgetWhenKeeping() async throws {
         let (service, captured) = makeCapturingService()
 

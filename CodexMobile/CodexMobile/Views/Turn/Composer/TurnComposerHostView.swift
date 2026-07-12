@@ -17,6 +17,7 @@ struct TurnComposerHostView: View {
     let isEmptyThread: Bool
     let isWorktreeProject: Bool
     var activeFileChangeStatus: FileChangeStatusSnapshot? = nil
+    var threadGoal: CodexThreadGoal? = nil
     let canForkLocally: Bool
     let isInputFocused: Binding<Bool>
     let orderedModelOptions: [CodexModelOption]
@@ -36,6 +37,7 @@ struct TurnComposerHostView: View {
     // Opens the thread goal sheet; receives any remaining composer draft as an objective prefill.
     var allowsGoalCommand: Bool = true
     var onShowGoal: (String?) -> Void = { _ in }
+    var onRemoveGoal: () -> Void = {}
     let voiceButtonPresentation: TurnComposerVoiceButtonPresentation
     var isVoiceInputActive: Bool = false
     let isVoiceRecording: Bool
@@ -166,6 +168,9 @@ struct TurnComposerHostView: View {
             hasWorkingDirectory: hasComposerWorkingDirectory,
             isWorktreeProject: isWorktreeProject,
             activeFileChangeStatus: activeFileChangeStatus,
+            threadGoal: threadGoal,
+            onEditGoal: { onShowGoal(nil) },
+            onRemoveGoal: onRemoveGoal,
             orderedModelOptions: orderedModelOptions,
             selectedModelID: selectedModelID,
             selectedModelTitle: selectedModelTitle,

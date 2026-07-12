@@ -1498,19 +1498,6 @@ struct TurnView: View {
         gitWorkingDirectory: String?
     ) -> some View {
         VStack(spacing: 8) {
-            if let goal = codex.goalByThreadID[thread.id] {
-                GoalStatusChip(
-                    goal: goal,
-                    isThreadRunning: isThreadRunning,
-                    onTap: { presentGoalSheet(objectivePrefill: nil) },
-                    onStop: { pauseThreadGoal() },
-                    onResume: { resumeThreadGoal() },
-                    onRemove: { removeThreadGoal() }
-                )
-                .padding(.horizontal, 12)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
-
             if let parentThread = parentThread {
                 SubagentParentAccessoryCard(
                     parentTitle: parentThread.displayTitle,
@@ -1538,6 +1525,7 @@ struct TurnView: View {
                 isEmptyThread: isEmptyThread,
                 isWorktreeProject: isWorktreeProject,
                 activeFileChangeStatus: activeFileChangeStatus,
+                threadGoal: codex.goalByThreadID[thread.id],
                 canForkLocally: showsGitControls && gitWorkingDirectory != nil && WorktreeFlowCoordinator.localForkProjectPath(
                     for: currentThread,
                     localCheckoutPath: viewModel.gitLocalCheckoutPath
@@ -1628,6 +1616,7 @@ struct TurnView: View {
                 onShowGoal: { objectivePrefill in
                     presentGoalSheet(objectivePrefill: objectivePrefill)
                 },
+                onRemoveGoal: { removeThreadGoal() },
                 voiceButtonPresentation: voiceButtonPresentation,
                 isVoiceInputActive: isVoiceInputActive,
                 isVoiceRecording: voiceInput.isRecording,

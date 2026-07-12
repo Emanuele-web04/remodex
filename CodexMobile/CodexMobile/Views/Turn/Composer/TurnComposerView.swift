@@ -42,6 +42,9 @@ struct TurnComposerView: View {
     let hasWorkingDirectory: Bool
     let isWorktreeProject: Bool
     var activeFileChangeStatus: FileChangeStatusSnapshot? = nil
+    var threadGoal: CodexThreadGoal? = nil
+    var onEditGoal: () -> Void = {}
+    var onRemoveGoal: () -> Void = {}
 
     let orderedModelOptions: [CodexModelOption]
     let selectedModelID: String?
@@ -119,6 +122,7 @@ struct TurnComposerView: View {
     private var hasSecondaryBarContent: Bool {
         hasWorkingDirectory
             || activeFileChangeStatus != nil
+            || threadGoal != nil
             || pinnedPlanAccessory != nil
             || !accessoryState.queuedDrafts.isEmpty
     }
@@ -199,6 +203,10 @@ struct TurnComposerView: View {
                     hasWorkingDirectory: hasWorkingDirectory,
                     isWorktreeProject: isWorktreeProject,
                     activeFileChangeStatus: activeFileChangeStatus,
+                    threadGoal: threadGoal,
+                    isThreadRunning: isThreadRunning,
+                    onEditGoal: onEditGoal,
+                    onRemoveGoal: onRemoveGoal,
                     queuedDraftCount: accessoryState.queuedDrafts.count,
                     onTapQueuedDrafts: { isShowingQueuedDraftsSheet = true },
                     gitState: gitState,

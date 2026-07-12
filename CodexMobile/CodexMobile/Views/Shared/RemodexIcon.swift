@@ -97,6 +97,7 @@ enum RemodexIcon {
         // Real GitHub octocat mark (template-tinted) for GitHub-specific tool rows.
         "remodex.github": "GitHub_Invertocat_Black",
         "remodex.git-branch": "git-branch",
+        "remodex.goal": "central-target-arrow",
         "square.and.pencil": "central-compose-pencil",
         "square.stack.3d.up": "central-layers-three",
         "square.stack.3d.up.slash": "central-layers-behind",
