@@ -756,6 +756,106 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(group.orderedMessages.map(\.id), ["command-1", "reasoning", "command-2"])
     }
 
+    func testCompletedTimelineKeepsReasoningTraceWithCommandGroup() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "user",
+                threadID: "thread",
+                role: .user,
+                text: "Inspect the timeline",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "command-1",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git status",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "command-1",
+                orderIndex: 2
+            ),
+            makeMessage(
+                id: "command-2",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git diff --stat",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "command-2",
+                orderIndex: 3
+            ),
+            makeMessage(
+                id: "reasoning",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "Reasoning summary between commands",
+                createdAt: now.addingTimeInterval(3),
+                turnID: "turn-1",
+                itemID: "reasoning",
+                orderIndex: 4
+            ),
+            makeMessage(
+                id: "command-3",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed rg -n needle Sources",
+                createdAt: now.addingTimeInterval(4),
+                turnID: "turn-1",
+                itemID: "command-3",
+                orderIndex: 5
+            ),
+            makeMessage(
+                id: "command-4",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git status --short",
+                createdAt: now.addingTimeInterval(5),
+                turnID: "turn-1",
+                itemID: "command-4",
+                orderIndex: 6
+            ),
+            makeMessage(
+                id: "final",
+                threadID: "thread",
+                role: .assistant,
+                text: "The inspection is complete.",
+                createdAt: now.addingTimeInterval(6),
+                turnID: "turn-1",
+                itemID: "final",
+                orderIndex: 7
+            ),
+        ]
+
+        let projectedMessages = TurnTimelineReducer.project(messages: messages).messages
+        let items = TurnTimelineRenderProjection.project(
+            messages: projectedMessages,
+            completedTurnIDs: ["turn-1"]
+        )
+
+        XCTAssertEqual(items.map(\.id), ["user", "command-group:command-1", "final"])
+        guard case .commandGroup(let group) = items[1] else {
+            return XCTFail("Expected one completed command disclosure with its trace")
+        }
+        XCTAssertEqual(group.commandCount, 4)
+        XCTAssertEqual(group.traceMessages.map(\.id), ["reasoning"])
+        XCTAssertEqual(group.orderedMessages.map(\.id), [
+            "command-1",
+            "command-2",
+            "reasoning",
+            "command-3",
+            "command-4",
+        ])
+    }
+
     func testTimelineRenderProjectionStillSplitsCommandsAcrossAssistantCommentary() {
         let now = Date()
         let messages = [
@@ -5005,6 +5105,70 @@ final class TurnTimelineReducerTests: XCTestCase {
         )
         let rowState = state.suppressingCopyAndRunningAccessory()
 
+        XCTAssertEqual(footerState?.copyText, "Completed response")
+        XCTAssertEqual(footerState?.showsRunningIndicator, true)
+        XCTAssertEqual(globallySuppressedState?.copyText, "Completed response")
+        XCTAssertEqual(globallySuppressedState?.showsRunningIndicator, false)
+        XCTAssertNil(rowState.copyText)
+        XCTAssertEqual(rowState.allowsCopy, false)
+        XCTAssertEqual(rowState.showsRunningIndicator, false)
+        XCTAssertEqual(rowState.blockDiffText, "diff payload")
+    }
+
+    func testCommandGroupAccessoryResolverKeepsCopyAndRunningVisibleInFooter() {
+        let messages = [
+            makeMessage(
+                id: "command-1",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git status",
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "reasoning",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "Reasoning summary",
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "command-2",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git diff --stat",
+                turnID: "turn-1"
+            ),
+        ]
+        let group = TurnTimelineCommandGroup(
+            messages: [messages[0], messages[2]],
+            orderedMessages: messages
+        )
+        guard let hostID = group.accessoryHostMessage?.id else {
+            return XCTFail("Expected the command group to expose its visual footer host")
+        }
+        let state = AssistantBlockAccessoryState(
+            copyText: "Completed response",
+            showsRunningIndicator: true,
+            allowsCopy: true,
+            blockDiffText: "diff payload"
+        )
+
+        let footerState = TurnTimelineCommandGroupAccessoryResolver.copyFooterState(
+            for: group,
+            statesByMessageID: [hostID: state],
+            suppressesRunningIndicator: false
+        )
+        let globallySuppressedState = TurnTimelineCommandGroupAccessoryResolver.copyFooterState(
+            for: group,
+            statesByMessageID: [hostID: state],
+            suppressesRunningIndicator: true
+        )
+        let rowState = state.suppressingCopyAndRunningAccessory()
+
+        XCTAssertEqual(hostID, "command-2")
         XCTAssertEqual(footerState?.copyText, "Completed response")
         XCTAssertEqual(footerState?.showsRunningIndicator, true)
         XCTAssertEqual(globallySuppressedState?.copyText, "Completed response")

@@ -71,6 +71,10 @@ struct TurnTimelineCommandGroup: Identifiable, Equatable {
         orderedMessages.filter { $0.role == .system && $0.kind == .thinking }
     }
 
+    var accessoryHostMessage: CodexMessage? {
+        orderedMessages.last
+    }
+
     var failedCommandCount: Int {
         messages.count { commandStatusWord(in: $0) == "failed" }
     }
@@ -650,6 +654,7 @@ enum TurnTimelineRenderProjection {
         var hiddenIndices: [Int] = []
         var groupIndices: [Int] = []
         var generatedImageArtifactIndices: [Int] = []
+        var hasOpenFinishedCommandGroup = false
 
         for index in messageIndices.drop(while: { $0 < lowerBound }) {
             guard index != finalIndex else {
@@ -675,10 +680,20 @@ enum TurnTimelineRenderProjection {
                 continue
             }
 
-            if !isPriorityVisibleMessage(candidate, finalMessage: finalMessage) {
-                hiddenIndices.append(index)
-                groupIndices.append(index)
+            if isPriorityVisibleMessage(candidate, finalMessage: finalMessage) {
+                hasOpenFinishedCommandGroup = isFinishedCommandToolCall(candidate)
+                continue
             }
+
+            // A reasoning summary following terminal commands belongs to that command
+            // trace. Keep it out of Previous Messages so the render pass can retain it
+            // directly below the command disclosure after the turn completes.
+            if hasOpenFinishedCommandGroup, isCommandGroupingTrace(candidate) {
+                continue
+            }
+
+            hiddenIndices.append(index)
+            groupIndices.append(index)
         }
 
         return PreviousMessageSelection(

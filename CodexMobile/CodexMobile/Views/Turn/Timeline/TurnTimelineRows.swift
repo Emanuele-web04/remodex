@@ -120,6 +120,28 @@ enum TurnTimelineToolBurstAccessoryResolver {
     }
 }
 
+enum TurnTimelineCommandGroupAccessoryResolver {
+    static func copyFooterState(
+        for group: TurnTimelineCommandGroup,
+        statesByMessageID: [String: AssistantBlockAccessoryState],
+        suppressesRunningIndicator: Bool
+    ) -> AssistantBlockAccessoryState? {
+        guard let hostMessage = group.accessoryHostMessage,
+              let state = statesByMessageID[hostMessage.id] else {
+            return nil
+        }
+
+        let resolvedState = suppressesRunningIndicator
+            ? state.replacingRunningIndicator(false)
+            : state
+        guard resolvedState.showsRunningIndicator
+            || (resolvedState.allowsCopy && resolvedState.copyText != nil) else {
+            return nil
+        }
+        return resolvedState
+    }
+}
+
 private struct AssistantBlockRevertMessageSignature: Equatable {
     let id: String
     let role: CodexMessageRole
@@ -440,6 +462,17 @@ private struct TurnTimelineCommandGroupView: View {
                     groupedMessageRow(message)
                 }
             }
+
+            if let footerState = TurnTimelineCommandGroupAccessoryResolver.copyFooterState(
+                for: group,
+                statesByMessageID: cachedBlockInfoByMessageID,
+                suppressesRunningIndicator: showsGlobalRunningIndicator
+            ) {
+                CopyBlockButton(
+                    text: footerState.allowsCopy ? footerState.copyText : nil,
+                    isRunning: footerState.showsRunningIndicator
+                )
+            }
         }
         .id(group.id)
     }
@@ -458,7 +491,7 @@ private struct TurnTimelineCommandGroupView: View {
             newestStreamingMessageID: newestStreamingMessageID,
             autoScrollMode: autoScrollMode,
             showsGlobalRunningIndicator: showsGlobalRunningIndicator,
-            movesCopyAndRunningToGroupFooter: false,
+            movesCopyAndRunningToGroupFooter: message.id == group.accessoryHostMessage?.id,
             onRetryUserMessage: onRetryUserMessage,
             onTapAssistantRevert: onTapAssistantRevert,
             onTapSubagent: onTapSubagent
