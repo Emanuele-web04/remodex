@@ -55,14 +55,40 @@ struct TurnTimelinePreviousMessagesGroup: Identifiable, Equatable {
 struct TurnTimelineCommandGroup: Identifiable, Equatable {
     let id: String
     let messages: [CodexMessage]
+    let orderedMessages: [CodexMessage]
 
-    init(messages: [CodexMessage]) {
+    init(messages: [CodexMessage], orderedMessages: [CodexMessage]? = nil) {
         self.messages = messages
+        self.orderedMessages = orderedMessages ?? messages
         self.id = "command-group:\(messages.first?.id ?? "unknown")"
     }
 
     var commandCount: Int {
         messages.count
+    }
+
+    var traceMessages: [CodexMessage] {
+        orderedMessages.filter { $0.role == .system && $0.kind == .thinking }
+    }
+
+    var failedCommandCount: Int {
+        messages.count { commandStatusWord(in: $0) == "failed" }
+    }
+
+    var stoppedCommandCount: Int {
+        messages.count { commandStatusWord(in: $0) == "stopped" }
+    }
+
+    var hasUnsuccessfulCommands: Bool {
+        failedCommandCount > 0 || stoppedCommandCount > 0
+    }
+
+    private func commandStatusWord(in message: CodexMessage) -> String? {
+        message.text
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(whereSeparator: \.isWhitespace)
+            .first?
+            .lowercased()
     }
 }
 
@@ -172,7 +198,7 @@ enum TurnTimelineRenderProjection {
         var items: [TurnTimelineRenderItem] = []
         var bufferedToolMessages: [CodexMessage] = []
         var bufferedCommandMessages: [CodexMessage] = []
-        var bufferedCommandTraceMessages: [CodexMessage] = []
+        var bufferedCommandOrderedMessages: [CodexMessage] = []
         let fileChangePlan = fileChangeCollapsePlan(in: messages)
         let hiddenIndices = Set(finalCollapsePlan.values.flatMap(\.indices))
             .union(fileChangePlan.hiddenIndices)
@@ -197,11 +223,13 @@ enum TurnTimelineRenderProjection {
 
         func flushBufferedCommandMessages() {
             if !bufferedCommandMessages.isEmpty {
-                items.append(.commandGroup(TurnTimelineCommandGroup(messages: bufferedCommandMessages)))
+                items.append(.commandGroup(TurnTimelineCommandGroup(
+                    messages: bufferedCommandMessages,
+                    orderedMessages: bufferedCommandOrderedMessages
+                )))
             }
-            items.append(contentsOf: bufferedCommandTraceMessages.map(TurnTimelineRenderItem.message))
             bufferedCommandMessages.removeAll(keepingCapacity: true)
-            bufferedCommandTraceMessages.removeAll(keepingCapacity: true)
+            bufferedCommandOrderedMessages.removeAll(keepingCapacity: true)
         }
 
         for (index, message) in messages.enumerated() {
@@ -238,7 +266,7 @@ enum TurnTimelineRenderProjection {
                     flushBufferedCommandMessages()
                     items.append(.message(renderedMessage))
                 } else {
-                    bufferedCommandTraceMessages.append(renderedMessage)
+                    bufferedCommandOrderedMessages.append(renderedMessage)
                 }
                 continue
             }
@@ -260,6 +288,7 @@ enum TurnTimelineRenderProjection {
                     flushBufferedCommandMessages()
                 }
                 bufferedCommandMessages.append(renderedMessage)
+                bufferedCommandOrderedMessages.append(renderedMessage)
                 continue
             }
 

@@ -393,7 +393,18 @@ private struct TurnTimelineCommandGroupView: View {
     @State private var isExpanded = false
 
     private var title: String {
-        group.commandCount == 1 ? "Ran 1 command" : "Ran \(group.commandCount) commands"
+        var parts = [group.commandCount == 1 ? "Ran 1 command" : "Ran \(group.commandCount) commands"]
+        if group.failedCommandCount > 0 {
+            parts.append("\(group.failedCommandCount) failed")
+        }
+        if group.stoppedCommandCount > 0 {
+            parts.append("\(group.stoppedCommandCount) stopped")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private var summaryColor: Color {
+        group.hasUnsuccessfulCommands ? .red : .secondary
     }
 
     var body: some View {
@@ -405,10 +416,10 @@ private struct TurnTimelineCommandGroupView: View {
             } label: {
                 HStack(spacing: 8) {
                     RemodexIcon.image(systemName: "terminal", size: 14, relativeTo: .body)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(summaryColor)
                     Text(title)
                         .font(AppFont.body(weight: .regular))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(summaryColor)
                     RemodexIcon.image(systemName: "chevron.right", size: 13, relativeTo: .body)
                         .foregroundStyle(.secondary)
                         .rotationEffect(.degrees(isExpanded ? 90 : 0))
@@ -421,29 +432,37 @@ private struct TurnTimelineCommandGroupView: View {
             .accessibilityHint(isExpanded ? "Collapse commands" : "Expand commands")
 
             if isExpanded {
-                ForEach(group.messages) { message in
-                    TurnTimelineMessageRow(
-                        message: message,
-                        isRetryAvailable: isRetryAvailable,
-                        cachedBlockInfoByMessageID: cachedBlockInfoByMessageID,
-                        planSessionSource: planSessionSource,
-                        allowsAssistantPlanFallbackRecovery: allowsAssistantPlanFallbackRecovery,
-                        completedTurnIDs: completedTurnIDs,
-                        threadMessagesForPlanMatching: threadMessagesForPlanMatching,
-                        currentWorkingDirectory: currentWorkingDirectory,
-                        planMatchingFingerprint: planMatchingFingerprint,
-                        newestStreamingMessageID: newestStreamingMessageID,
-                        autoScrollMode: autoScrollMode,
-                        showsGlobalRunningIndicator: showsGlobalRunningIndicator,
-                        movesCopyAndRunningToGroupFooter: false,
-                        onRetryUserMessage: onRetryUserMessage,
-                        onTapAssistantRevert: onTapAssistantRevert,
-                        onTapSubagent: onTapSubagent
-                    )
+                ForEach(group.orderedMessages) { message in
+                    groupedMessageRow(message)
+                }
+            } else {
+                ForEach(group.traceMessages) { message in
+                    groupedMessageRow(message)
                 }
             }
         }
         .id(group.id)
+    }
+
+    private func groupedMessageRow(_ message: CodexMessage) -> some View {
+        TurnTimelineMessageRow(
+            message: message,
+            isRetryAvailable: isRetryAvailable,
+            cachedBlockInfoByMessageID: cachedBlockInfoByMessageID,
+            planSessionSource: planSessionSource,
+            allowsAssistantPlanFallbackRecovery: allowsAssistantPlanFallbackRecovery,
+            completedTurnIDs: completedTurnIDs,
+            threadMessagesForPlanMatching: threadMessagesForPlanMatching,
+            currentWorkingDirectory: currentWorkingDirectory,
+            planMatchingFingerprint: planMatchingFingerprint,
+            newestStreamingMessageID: newestStreamingMessageID,
+            autoScrollMode: autoScrollMode,
+            showsGlobalRunningIndicator: showsGlobalRunningIndicator,
+            movesCopyAndRunningToGroupFooter: false,
+            onRetryUserMessage: onRetryUserMessage,
+            onTapAssistantRevert: onTapAssistantRevert,
+            onTapSubagent: onTapSubagent
+        )
     }
 }
 

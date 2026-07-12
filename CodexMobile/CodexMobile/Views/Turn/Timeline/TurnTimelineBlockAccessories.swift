@@ -290,8 +290,8 @@ extension TurnTimelineView {
                 ids.insert(message.id)
             case .toolBurst(let group):
                 ids.formUnion(group.visibleMessages.map(\.id))
-            case .commandGroup:
-                break
+            case .commandGroup(let group):
+                ids.formUnion(group.traceMessages.map(\.id))
             case .previousMessages:
                 break
             }

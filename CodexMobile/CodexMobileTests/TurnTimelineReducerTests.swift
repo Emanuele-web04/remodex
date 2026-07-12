@@ -685,7 +685,7 @@ final class TurnTimelineReducerTests: XCTestCase {
             isThreadRunning: true
         )
 
-        XCTAssertEqual(items.map(\.id), ["command-group:command-1", "reasoning"])
+        XCTAssertEqual(items.map(\.id), ["command-group:command-1"])
         guard case .commandGroup(let group) = items.first else {
             return XCTFail("Expected one command disclosure across the reasoning trace")
         }
@@ -696,6 +696,14 @@ final class TurnTimelineReducerTests: XCTestCase {
             "command-4",
         ])
         XCTAssertEqual(group.commandCount, 4)
+        XCTAssertEqual(group.traceMessages.map(\.id), ["reasoning"])
+        XCTAssertEqual(group.orderedMessages.map(\.id), [
+            "command-1",
+            "command-2",
+            "reasoning",
+            "command-3",
+            "command-4",
+        ])
     }
 
     func testTimelineRenderProjectionStillSplitsCommandsAcrossAssistantCommentary() {
@@ -780,9 +788,59 @@ final class TurnTimelineReducerTests: XCTestCase {
 
         XCTAssertEqual(items.map(\.id), [
             "command-group:command-1",
-            "reasoning",
             "command-group:command-2",
         ])
+        guard case .commandGroup(let firstGroup) = items.first else {
+            return XCTFail("Expected a command group for the first turn")
+        }
+        XCTAssertEqual(firstGroup.orderedMessages.map(\.id), ["command-1", "reasoning"])
+        XCTAssertEqual(firstGroup.traceMessages.map(\.id), ["reasoning"])
+    }
+
+    func testTimelineRenderProjectionCommandGroupExposesFailedAndStoppedCounts() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "completed",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git status",
+                createdAt: now,
+                turnID: "turn-1",
+                itemID: "completed"
+            ),
+            makeMessage(
+                id: "failed",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Failed npm test",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "failed"
+            ),
+            makeMessage(
+                id: "stopped",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Stopped xcodebuild",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "stopped"
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(messages: messages)
+
+        guard case .commandGroup(let group) = items.first else {
+            return XCTFail("Expected terminal commands in one disclosure")
+        }
+        XCTAssertEqual(group.commandCount, 3)
+        XCTAssertEqual(group.failedCommandCount, 1)
+        XCTAssertEqual(group.stoppedCommandCount, 1)
+        XCTAssertTrue(group.hasUnsuccessfulCommands)
     }
 
     func testTimelineRenderProjectionKeepsRunningCommandsVisibleUntilFinished() {
