@@ -688,7 +688,13 @@ enum TurnTimelineRenderProjection {
             }
 
             if isPriorityVisibleMessage(candidate, finalMessage: finalMessage) {
-                hasOpenFinishedCommandGroup = isFinishedCommandToolCall(candidate)
+                if isFinishedCommandToolCall(candidate) {
+                    hasOpenFinishedCommandGroup = true
+                } else if !(candidate.role == .system && candidate.kind == .fileChange) {
+                    // Inline file-change cards are command output artifacts, not a
+                    // boundary for a reasoning trace that follows the command run.
+                    hasOpenFinishedCommandGroup = false
+                }
                 continue
             }
 

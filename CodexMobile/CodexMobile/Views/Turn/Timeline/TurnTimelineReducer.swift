@@ -221,25 +221,21 @@ enum TurnTimelineReducer {
         return false
     }
 
-    // Reasoning summaries are part of the command trace. When one arrives between
-    // command rows before any assistant message exists, chronological order
-    // is already authoritative; role-priority sorting would move the trace ahead of
-    // both commands and prevent the render projection from preserving their sequence.
+    // Reasoning summaries are part of the command trace. Once one arrives after a
+    // command row, chronological order is already authoritative; role-priority
+    // sorting would move the trace ahead of its command and break the disclosure,
+    // even when no later command follows it.
     private static func hasInterleavedCommandTraceFlow(_ turnMessages: [CodexMessage]) -> Bool {
         let ordered = turnMessages.sorted { $0.orderIndex < $1.orderIndex }
         var seenCommand = false
-        var seenTraceAfterCommand = false
 
         for message in ordered {
             if message.role == .system, message.kind == .commandExecution {
-                if seenTraceAfterCommand {
-                    return true
-                }
                 seenCommand = true
             } else if seenCommand,
                       message.role == .system,
                       message.kind == .thinking {
-                seenTraceAfterCommand = true
+                return true
             }
         }
 

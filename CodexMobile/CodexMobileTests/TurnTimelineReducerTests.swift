@@ -756,6 +756,44 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(group.orderedMessages.map(\.id), ["command-1", "reasoning", "command-2"])
     }
 
+    func testTimelineProjectionPreservesTrailingTraceAfterCommand() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "command-1",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git status",
+                createdAt: now,
+                turnID: "turn-1",
+                itemID: "command-1",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "reasoning",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "Reasoning summary after the command",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "reasoning",
+                orderIndex: 2
+            ),
+        ]
+
+        let projectedMessages = TurnTimelineReducer.project(messages: messages).messages
+        XCTAssertEqual(projectedMessages.map(\.id), ["command-1", "reasoning"])
+
+        let items = TurnTimelineRenderProjection.project(messages: projectedMessages)
+        guard case .commandGroup(let group) = items.first else {
+            return XCTFail("Expected the trailing trace to stay with its command disclosure")
+        }
+        XCTAssertEqual(items.count, 1)
+        XCTAssertEqual(group.orderedMessages.map(\.id), ["command-1", "reasoning"])
+    }
+
     func testCompletedTimelineKeepsReasoningTraceWithCommandGroup() {
         let now = Date()
         let messages = [
@@ -854,6 +892,76 @@ final class TurnTimelineReducerTests: XCTestCase {
             "command-3",
             "command-4",
         ])
+    }
+
+    func testCompletedTimelineKeepsCommandTraceVisibleAcrossInlineFileChange() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "user",
+                threadID: "thread",
+                role: .user,
+                text: "Inspect the timeline",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "command-1",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git status",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "command-1",
+                orderIndex: 2
+            ),
+            makeMessage(
+                id: "file-change",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: "M Sources/App.swift",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "file-change",
+                orderIndex: 3
+            ),
+            makeMessage(
+                id: "reasoning",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "Reasoning summary after the file update",
+                createdAt: now.addingTimeInterval(3),
+                turnID: "turn-1",
+                itemID: "reasoning",
+                orderIndex: 4
+            ),
+            makeMessage(
+                id: "final",
+                threadID: "thread",
+                role: .assistant,
+                text: "The inspection is complete.",
+                createdAt: now.addingTimeInterval(4),
+                turnID: "turn-1",
+                itemID: "final",
+                orderIndex: 5
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(
+            messages: messages,
+            completedTurnIDs: ["turn-1"]
+        )
+
+        XCTAssertTrue(items.contains { $0.id == "reasoning" })
+        let previousMessages = items.compactMap { item -> TurnTimelinePreviousMessagesGroup? in
+            guard case .previousMessages(let group) = item else { return nil }
+            return group
+        }
+        XCTAssertFalse(previousMessages.flatMap(\.messages).contains { $0.id == "reasoning" })
     }
 
     func testTimelineRenderProjectionStillSplitsCommandsAcrossAssistantCommentary() {
