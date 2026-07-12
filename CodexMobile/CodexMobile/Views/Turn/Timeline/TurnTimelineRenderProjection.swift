@@ -172,6 +172,7 @@ enum TurnTimelineRenderProjection {
         var items: [TurnTimelineRenderItem] = []
         var bufferedToolMessages: [CodexMessage] = []
         var bufferedCommandMessages: [CodexMessage] = []
+        var bufferedCommandTraceMessages: [CodexMessage] = []
         let fileChangePlan = fileChangeCollapsePlan(in: messages)
         let hiddenIndices = Set(finalCollapsePlan.values.flatMap(\.indices))
             .union(fileChangePlan.hiddenIndices)
@@ -195,9 +196,12 @@ enum TurnTimelineRenderProjection {
         }
 
         func flushBufferedCommandMessages() {
-            guard !bufferedCommandMessages.isEmpty else { return }
-            items.append(.commandGroup(TurnTimelineCommandGroup(messages: bufferedCommandMessages)))
+            if !bufferedCommandMessages.isEmpty {
+                items.append(.commandGroup(TurnTimelineCommandGroup(messages: bufferedCommandMessages)))
+            }
+            items.append(contentsOf: bufferedCommandTraceMessages.map(TurnTimelineRenderItem.message))
             bufferedCommandMessages.removeAll(keepingCapacity: true)
+            bufferedCommandTraceMessages.removeAll(keepingCapacity: true)
         }
 
         for (index, message) in messages.enumerated() {
@@ -221,6 +225,24 @@ enum TurnTimelineRenderProjection {
             ) {
                 continue
             }
+
+            // A reasoning summary is trace output, not a command boundary. Hold it
+            // beside the command buffer so later terminal commands from the same
+            // turn can join the same disclosure. The trace is emitted immediately
+            // after that disclosure and remains independently visible.
+            if !bufferedCommandMessages.isEmpty,
+               isCommandGroupingTrace(renderedMessage) {
+                flushBufferedToolMessages()
+                if let previous = bufferedCommandMessages.last,
+                   !canShareToolBurst(previous: previous, incoming: renderedMessage) {
+                    flushBufferedCommandMessages()
+                    items.append(.message(renderedMessage))
+                } else {
+                    bufferedCommandTraceMessages.append(renderedMessage)
+                }
+                continue
+            }
+
             guard isToolBurstCandidate(message) else {
                 flushBufferedToolMessages()
                 flushBufferedCommandMessages()
@@ -910,6 +932,10 @@ enum TurnTimelineRenderProjection {
         return firstWord == "completed"
             || firstWord == "failed"
             || firstWord == "stopped"
+    }
+
+    private static func isCommandGroupingTrace(_ message: CodexMessage) -> Bool {
+        message.role == .system && message.kind == .thinking
     }
 
     // Late turn ids can arrive mid-stream, so split only when both rows already

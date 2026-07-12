@@ -624,6 +624,167 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(items.map(\.id), ["command-group:command-1"])
     }
 
+    func testTimelineRenderProjectionGroupsCommandsAcrossLiveReasoningTrace() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "command-1",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed rg -n \"needle\" Sources",
+                createdAt: now,
+                turnID: "turn-1",
+                itemID: "command-1"
+            ),
+            makeMessage(
+                id: "command-2",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed sed -n '1,40p' Sources/App.swift",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "command-2"
+            ),
+            makeMessage(
+                id: "reasoning",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "Reasoning summary between command tool calls",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "reasoning"
+            ),
+            makeMessage(
+                id: "command-3",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git diff --stat",
+                createdAt: now.addingTimeInterval(3),
+                turnID: "turn-1",
+                itemID: "command-3"
+            ),
+            makeMessage(
+                id: "command-4",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git status --short",
+                createdAt: now.addingTimeInterval(4),
+                turnID: "turn-1",
+                itemID: "command-4"
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(
+            messages: messages,
+            activeTurnID: "turn-1",
+            isThreadRunning: true
+        )
+
+        XCTAssertEqual(items.map(\.id), ["command-group:command-1", "reasoning"])
+        guard case .commandGroup(let group) = items.first else {
+            return XCTFail("Expected one command disclosure across the reasoning trace")
+        }
+        XCTAssertEqual(group.messages.map(\.id), [
+            "command-1",
+            "command-2",
+            "command-3",
+            "command-4",
+        ])
+        XCTAssertEqual(group.commandCount, 4)
+    }
+
+    func testTimelineRenderProjectionStillSplitsCommandsAcrossAssistantCommentary() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "command-1",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git status",
+                createdAt: now,
+                turnID: "turn-1",
+                itemID: "command-1"
+            ),
+            makeMessage(
+                id: "commentary",
+                threadID: "thread",
+                role: .assistant,
+                text: "I found the relevant files.",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "commentary"
+            ),
+            makeMessage(
+                id: "command-2",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git diff --stat",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "command-2"
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(messages: messages)
+
+        XCTAssertEqual(items.map(\.id), [
+            "command-group:command-1",
+            "commentary",
+            "command-group:command-2",
+        ])
+    }
+
+    func testTimelineRenderProjectionReasoningTraceDoesNotJoinDifferentTurns() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "command-1",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git status",
+                createdAt: now,
+                turnID: "turn-1",
+                itemID: "command-1"
+            ),
+            makeMessage(
+                id: "reasoning",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "Reasoning summary for the first turn",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "reasoning"
+            ),
+            makeMessage(
+                id: "command-2",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git diff --stat",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-2",
+                itemID: "command-2"
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(messages: messages)
+
+        XCTAssertEqual(items.map(\.id), [
+            "command-group:command-1",
+            "reasoning",
+            "command-group:command-2",
+        ])
+    }
+
     func testTimelineRenderProjectionKeepsRunningCommandsVisibleUntilFinished() {
         let now = Date()
         let messages = [
