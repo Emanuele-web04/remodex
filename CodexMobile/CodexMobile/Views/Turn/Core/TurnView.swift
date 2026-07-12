@@ -1617,6 +1617,8 @@ struct TurnView: View {
                     presentGoalSheet(objectivePrefill: objectivePrefill)
                 },
                 onRemoveGoal: { removeThreadGoal() },
+                onResumeGoal: { resumeThreadGoal() },
+                onPauseGoal: { pauseThreadGoal() },
                 voiceButtonPresentation: voiceButtonPresentation,
                 isVoiceInputActive: isVoiceInputActive,
                 isVoiceRecording: voiceInput.isRecording,

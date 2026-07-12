@@ -11,6 +11,8 @@ struct GoalStatusChip: View {
     let isThreadRunning: Bool
     let onEdit: () -> Void
     let onRemove: () -> Void
+    var onResume: () -> Void = {}
+    var onPause: () -> Void = {}
     var onExpansionChange: (Bool) -> Void = { _ in }
 
     @State private var isExpanded = false
@@ -78,6 +80,12 @@ struct GoalStatusChip: View {
 
             HStack(spacing: 14) {
                 Spacer(minLength: 0)
+
+                if goal.status.isResumable {
+                    detailAction(systemName: "play.circle", label: "Resume goal", action: onResume)
+                } else if goal.status == .active {
+                    detailAction(systemName: "pause.circle", label: "Pause goal", action: onPause)
+                }
 
                 detailAction(systemName: "pencil", label: "Edit goal", action: onEdit)
                 detailAction(systemName: "trash.circle", label: "Remove goal") {

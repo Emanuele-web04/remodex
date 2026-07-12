@@ -38,6 +38,8 @@ struct TurnComposerHostView: View {
     var allowsGoalCommand: Bool = true
     var onShowGoal: (String?) -> Void = { _ in }
     var onRemoveGoal: () -> Void = {}
+    var onResumeGoal: () -> Void = {}
+    var onPauseGoal: () -> Void = {}
     let voiceButtonPresentation: TurnComposerVoiceButtonPresentation
     var isVoiceInputActive: Bool = false
     let isVoiceRecording: Bool
@@ -171,6 +173,8 @@ struct TurnComposerHostView: View {
             threadGoal: threadGoal,
             onEditGoal: { onShowGoal(nil) },
             onRemoveGoal: onRemoveGoal,
+            onResumeGoal: onResumeGoal,
+            onPauseGoal: onPauseGoal,
             orderedModelOptions: orderedModelOptions,
             selectedModelID: selectedModelID,
             selectedModelTitle: selectedModelTitle,

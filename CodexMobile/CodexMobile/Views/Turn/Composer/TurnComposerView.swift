@@ -45,6 +45,8 @@ struct TurnComposerView: View {
     var threadGoal: CodexThreadGoal? = nil
     var onEditGoal: () -> Void = {}
     var onRemoveGoal: () -> Void = {}
+    var onResumeGoal: () -> Void = {}
+    var onPauseGoal: () -> Void = {}
 
     let orderedModelOptions: [CodexModelOption]
     let selectedModelID: String?
@@ -207,6 +209,8 @@ struct TurnComposerView: View {
                     isThreadRunning: isThreadRunning,
                     onEditGoal: onEditGoal,
                     onRemoveGoal: onRemoveGoal,
+                    onResumeGoal: onResumeGoal,
+                    onPauseGoal: onPauseGoal,
                     queuedDraftCount: accessoryState.queuedDrafts.count,
                     onTapQueuedDrafts: { isShowingQueuedDraftsSheet = true },
                     gitState: gitState,
