@@ -899,6 +899,104 @@ final class TurnTimelineReducerTests: XCTestCase {
         ])
     }
 
+    func testCompletedTimelineStillSplitsCommandsAcrossHiddenAssistantCommentary() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "user",
+                threadID: "thread",
+                role: .user,
+                text: "Inspect the timeline",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "command-1",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git status",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "command-1",
+                orderIndex: 2
+            ),
+            makeMessage(
+                id: "command-2",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git diff --stat",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "command-2",
+                orderIndex: 3
+            ),
+            makeMessage(
+                id: "commentary",
+                threadID: "thread",
+                role: .assistant,
+                text: "I found the relevant files.",
+                createdAt: now.addingTimeInterval(3),
+                turnID: "turn-1",
+                itemID: "commentary",
+                orderIndex: 4
+            ),
+            makeMessage(
+                id: "command-3",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed rg -n needle Sources",
+                createdAt: now.addingTimeInterval(4),
+                turnID: "turn-1",
+                itemID: "command-3",
+                orderIndex: 5
+            ),
+            makeMessage(
+                id: "command-4",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git status --short",
+                createdAt: now.addingTimeInterval(5),
+                turnID: "turn-1",
+                itemID: "command-4",
+                orderIndex: 6
+            ),
+            makeMessage(
+                id: "final",
+                threadID: "thread",
+                role: .assistant,
+                text: "The inspection is complete.",
+                createdAt: now.addingTimeInterval(6),
+                turnID: "turn-1",
+                itemID: "final",
+                orderIndex: 7
+            ),
+        ]
+
+        let projectedMessages = TurnTimelineReducer.project(messages: messages).messages
+        let items = TurnTimelineRenderProjection.project(
+            messages: projectedMessages,
+            completedTurnIDs: ["turn-1"]
+        )
+        let commandGroups = items.compactMap { item -> TurnTimelineCommandGroup? in
+            guard case .commandGroup(let group) = item else { return nil }
+            return group
+        }
+        let previousMessages = items.compactMap { item -> TurnTimelinePreviousMessagesGroup? in
+            guard case .previousMessages(let group) = item else { return nil }
+            return group
+        }
+
+        XCTAssertEqual(commandGroups.count, 2)
+        XCTAssertEqual(commandGroups[0].messages.map(\.id), ["command-1", "command-2"])
+        XCTAssertEqual(commandGroups[1].messages.map(\.id), ["command-3", "command-4"])
+        XCTAssertEqual(previousMessages.flatMap(\.messages).map(\.id), ["commentary"])
+    }
+
     func testTimelineRenderProjectionReasoningTraceDoesNotJoinDifferentTurns() {
         let now = Date()
         let messages = [

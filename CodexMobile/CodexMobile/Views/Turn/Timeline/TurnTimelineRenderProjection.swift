@@ -246,6 +246,13 @@ enum TurnTimelineRenderProjection {
             }
 
             if hiddenIndices.contains(index) {
+                // Completed-turn collapsing must not erase real command boundaries.
+                // Only reasoning traces may sit inside an open command disclosure;
+                // hidden assistant commentary or other activity closes it first.
+                if !isCommandGroupingTrace(message) {
+                    flushBufferedToolMessages()
+                    flushBufferedCommandMessages()
+                }
                 continue
             }
 
