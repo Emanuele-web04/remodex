@@ -14,15 +14,15 @@
         {
           "image-name-specializations" : [
             {
-              "value" : "Fixed-Rounding 2.svg"
+              "value" : "VectorLight.svg"
             },
             {
               "appearance" : "dark",
-              "value" : "Fixed-Roundingwhite.svg"
+              "value" : "VectorDark.svg"
             },
             {
               "appearance" : "tinted",
-              "value" : "Fixed-Roundingwhite.svg"
+              "value" : "VectorDark.svg"
             }
           ],
           "name" : "Contrast Remodex",
@@ -31,18 +31,50 @@
               "value" : {
                 "scale" : 1,
                 "translation-in-points" : [
-                  0.16799999999983584,
-                  0.019967733251746722
+                  0.26439794274210726,
+                  -27.3359375
                 ]
               }
             },
             {
+              "appearance" : "dark",
+              "value" : {
+                "scale" : 1,
+                "translation-in-points" : [
+                  0.26439794274210726,
+                  -27.3359375
+                ]
+              }
+            },
+            {
+              "appearance" : "tinted",
+              "value" : {
+                "scale" : 1,
+                "translation-in-points" : [
+                  0.26439794274210726,
+                  -27.3359375
+                ]
+              }
+            },
+            {
+              "appearance" : "dark",
               "idiom" : "square",
               "value" : {
-                "scale" : 0.94,
+                "scale" : 1,
                 "translation-in-points" : [
-                  0.16799999999983584,
-                  0.019967733251746722
+                  0.26439794274210726,
+                  -27.3359375
+                ]
+              }
+            },
+            {
+              "appearance" : "tinted",
+              "idiom" : "square",
+              "value" : {
+                "scale" : 1,
+                "translation-in-points" : [
+                  0.26439794274210726,
+                  -27.3359375
                 ]
               }
             }
@@ -54,7 +86,7 @@
         {
           "idiom" : "square",
           "value" : {
-            "scale" : 0.99,
+            "scale" : 1,
             "translation-in-points" : [
               0,
               0

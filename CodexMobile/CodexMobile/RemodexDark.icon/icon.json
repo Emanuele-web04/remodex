@@ -19,18 +19,18 @@
               "value" : {
                 "scale" : 1,
                 "translation-in-points" : [
-                  0.16799999999983584,
-                  0.019967733251746722
+                  0.26439794274210726,
+                  -27.3359375
                 ]
               }
             },
             {
               "idiom" : "square",
               "value" : {
-                "scale" : 0.94,
+                "scale" : 1,
                 "translation-in-points" : [
-                  0.16799999999983584,
-                  0.019967733251746722
+                  0.26439794274210726,
+                  -27.3359375
                 ]
               }
             }
@@ -42,7 +42,7 @@
         {
           "idiom" : "square",
           "value" : {
-            "scale" : 0.99,
+            "scale" : 1,
             "translation-in-points" : [
               0,
               0
