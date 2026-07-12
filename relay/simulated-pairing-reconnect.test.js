@@ -21,6 +21,7 @@ const WebSocket = require("ws");
 const {
   HANDSHAKE_MODE_QR_BOOTSTRAP,
   HANDSHAKE_MODE_TRUSTED_RECONNECT,
+  SECURE_PROTOCOL_VERSION,
   createBridgeSecureTransport,
   nonceForDirection,
 } = require("../phodex-bridge/src/secure-transport");
@@ -198,7 +199,7 @@ class SimulatedPhone {
     const clientNonce = Buffer.alloc(32, 7 + this.outboundCounter);
     this.socket.send(JSON.stringify({
       kind: "clientHello",
-      protocolVersion: 1,
+      protocolVersion: SECURE_PROTOCOL_VERSION,
       sessionId: this.sessionId,
       handshakeMode,
       phoneDeviceId: this.phoneIdentity.phoneDeviceId,
@@ -213,7 +214,7 @@ class SimulatedPhone {
 
     const transcriptBytes = buildTranscriptBytes({
       sessionId: this.sessionId,
-      protocolVersion: 1,
+      protocolVersion: SECURE_PROTOCOL_VERSION,
       handshakeMode,
       keyEpoch: serverHello.keyEpoch,
       macDeviceId: this.macDeviceId,
@@ -264,6 +265,7 @@ class SimulatedPhone {
       transcriptBytes,
     });
     this.keyEpoch = serverHello.keyEpoch;
+    this.bridgeReplayEpoch = serverHello.bridgeReplayEpoch;
     this.macToPhoneKey = keys.macToPhoneKey;
     this.phoneToMacKey = keys.phoneToMacKey;
     this.outboundCounter = 0;
@@ -273,6 +275,7 @@ class SimulatedPhone {
       sessionId: this.sessionId,
       keyEpoch: this.keyEpoch,
       lastAppliedBridgeOutboundSeq,
+      bridgeReplayEpoch: this.bridgeReplayEpoch,
     }));
   }
 
