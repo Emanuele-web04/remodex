@@ -23,15 +23,18 @@ enum TurnTimelineReducer {
         let reordered = enforceIntraTurnOrder(in: anchored)
         let collapsedThinking = collapseThinkingMessages(in: reordered)
         let withoutCommandThinkingEchoes = removeRedundantThinkingCommandActivityMessages(in: collapsedThinking)
-        let dedupedUsers = removeDuplicateUserMessages(in: withoutCommandThinkingEchoes)
+        let withoutRepeatedReasoningSummaries = removeDuplicateReasoningSummaryMessages(
+            in: withoutCommandThinkingEchoes
+        )
+        let dedupedUsers = removeDuplicateUserMessages(in: withoutRepeatedReasoningSummaries)
         let dedupedFileChanges = removeDuplicateFileChangeMessages(in: dedupedUsers)
         let dedupedSubagentActions = removeDuplicateSubagentActionMessages(in: dedupedFileChanges)
         let dedupedAssistant = removeDuplicateAssistantMessages(in: dedupedSubagentActions)
         return TurnTimelineProjection(messages: dedupedAssistant)
     }
 
-    // Resolves where the viewport should anchor when assistant output starts streaming.
-    static func assistantResponseAnchorMessageID(
+    // Resolves whether the active assistant response has entered the timeline.
+    static func assistantResponseMessageID(
         in messages: [CodexMessage],
         activeTurnID: String?
     ) -> String? {
@@ -62,8 +65,26 @@ enum TurnTimelineReducer {
 
         var result = messages
 
-        for (_, indices) in indicesByTurn {
+        for (turnId, indices) in indicesByTurn {
             guard indices.count > 1 else { continue }
+
+            // A late row from an older turn can sit beyond an entire newer turn
+            // after cache reconciliation. Never permute that older turn through
+            // another stable turn's slots; canonical history owns that repair.
+            if let firstIndex = indices.first, let lastIndex = indices.last {
+                let crossesStableBoundary = result[firstIndex...lastIndex].contains { message in
+                    if let candidateTurnId = message.turnId,
+                       !candidateTurnId.isEmpty,
+                       candidateTurnId != turnId {
+                        return true
+                    }
+                    return message.role == .user
+                        && (message.turnId == nil || message.turnId?.isEmpty == true)
+                }
+                if crossesStableBoundary {
+                    continue
+                }
+            }
 
             let turnMessages = indices.map { result[$0] }
 
@@ -345,17 +366,7 @@ enum TurnTimelineReducer {
         }
     }
 
-    // Late terminal replays can arrive with a newer raw order index; stable closed assistant
-    // rows should still render by their semantic creation time inside one turn.
     private static func intraTurnTieBreak(_ a: CodexMessage, _ b: CodexMessage) -> Bool {
-        if a.role == .assistant,
-           b.role == .assistant,
-           !a.isStreaming,
-           !b.isStreaming,
-           a.createdAt != b.createdAt {
-            return a.createdAt < b.createdAt
-        }
-
         return a.orderIndex < b.orderIndex
     }
 
@@ -655,6 +666,62 @@ enum TurnTimelineReducer {
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
         return command.isEmpty ? nil : command
+    }
+
+    // Codex can emit cumulative reasoning summaries under several stable item
+    // ids in one turn (event_msg plus response_item snapshots). Keep each short
+    // trace title once while preserving the first-seen position and any unseen
+    // suffix titles. Detailed reasoning items remain independent.
+    static func removeDuplicateReasoningSummaryMessages(
+        in messages: [CodexMessage]
+    ) -> [CodexMessage] {
+        var seenSummaryKeysByTurn: [String: Set<String>] = [:]
+        var result: [CodexMessage] = []
+        result.reserveCapacity(messages.count)
+
+        for var message in messages {
+            guard message.role == .system,
+                  message.kind == .thinking,
+                  message.text.utf8.count <= largeTextDedupeByteLimit,
+                  message.text.contains("**"),
+                  let turnID = normalizedIdentifier(message.turnId) else {
+                result.append(message)
+                continue
+            }
+
+            let content = ThinkingDisclosureParser.parse(from: message.text)
+            guard content.isSummaryOnly else {
+                result.append(message)
+                continue
+            }
+
+            var seenKeys = seenSummaryKeysByTurn[turnID, default: Set<String>()]
+            let unseenSections = content.sections.filter { section in
+                let key = reasoningSummaryKey(section.title)
+                guard !key.isEmpty else { return true }
+                return seenKeys.insert(key).inserted
+            }
+            seenSummaryKeysByTurn[turnID] = seenKeys
+
+            guard !unseenSections.isEmpty else {
+                continue
+            }
+            if unseenSections.count != content.sections.count {
+                message.text = unseenSections
+                    .map { "**\($0.title)**\n\n<!-- -->" }
+                    .joined(separator: "\n\n")
+            }
+            result.append(message)
+        }
+
+        return result
+    }
+
+    private static func reasoningSummaryKey(_ title: String) -> String {
+        title
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
+            .lowercased()
     }
 
     // Collapses optimistic phone-send rows with their confirmed runtime echoes so
@@ -985,6 +1052,14 @@ enum TurnTimelineReducer {
             return false
         }
 
+        if let previousItemID = normalizedIdentifier(previous.itemId),
+           let incomingItemID = normalizedIdentifier(incoming.itemId),
+           previousItemID != incomingItemID,
+           !isProvisionalAssistantIdentity(previousItemID),
+           !isProvisionalAssistantIdentity(incomingItemID) {
+            return false
+        }
+
         let minimumTextLength = min(previous.text.utf8.count, incoming.text.utf8.count)
         guard minimumTextLength >= 24,
               messageTextsMatchForDedupe(previous.text, incoming.text) else {
@@ -1047,6 +1122,7 @@ enum TurnTimelineReducer {
             in: messages,
             threadId: incoming.threadId,
             turnId: incoming.turnId,
+            itemId: incoming.itemId,
             text: incoming.text,
             excludingMessageID: incoming.id
         )

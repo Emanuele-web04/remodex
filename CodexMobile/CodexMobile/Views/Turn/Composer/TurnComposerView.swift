@@ -42,6 +42,11 @@ struct TurnComposerView: View {
     let hasWorkingDirectory: Bool
     let isWorktreeProject: Bool
     var activeFileChangeStatus: FileChangeStatusSnapshot? = nil
+    var threadGoal: CodexThreadGoal? = nil
+    var onEditGoal: () -> Void = {}
+    var onRemoveGoal: () -> Void = {}
+    var onResumeGoal: () -> Void = {}
+    var onPauseGoal: () -> Void = {}
 
     let orderedModelOptions: [CodexModelOption]
     let selectedModelID: String?
@@ -81,7 +86,6 @@ struct TurnComposerView: View {
     let onSelectForkDestination: (TurnComposerForkDestination) -> Void
     let onCloseSlashCommandPanel: () -> Void
     let onRemoveMentionedFile: (String) -> Void
-    let onRemoveMentionedSkill: (String) -> Void
     let onRemoveMentionedPlugin: (String) -> Void
     let onRemoveComposerReviewSelection: () -> Void
     let onRemoveComposerSubagentsSelection: () -> Void
@@ -103,9 +107,9 @@ struct TurnComposerView: View {
     // with Dynamic Type so large accessibility sizes don't clip the placeholder.
     @ScaledMetric(relativeTo: .body) private var collapsedInputHeight: CGFloat = 22
 
-    // Square hit target for the resting capsule's "+" and mic controls, matched
-    // to the send button so they're just as easy to tap despite smaller glyphs.
-    private let collapsedControlTapTarget: CGFloat = 32
+    // Square hit target for the resting capsule's "+", mic, and send/stop
+    // controls. The extra 2pt keeps the closed capsule comfortable to tap.
+    private let collapsedControlTapTarget: CGFloat = 34
     private let expandedPlainTextMaxVisibleLines: CGFloat = 6
     private let expandedAccessoryTextMaxVisibleLines: CGFloat = 4
 
@@ -120,6 +124,7 @@ struct TurnComposerView: View {
     private var hasSecondaryBarContent: Bool {
         hasWorkingDirectory
             || activeFileChangeStatus != nil
+            || threadGoal != nil
             || pinnedPlanAccessory != nil
             || !accessoryState.queuedDrafts.isEmpty
     }
@@ -200,6 +205,12 @@ struct TurnComposerView: View {
                     hasWorkingDirectory: hasWorkingDirectory,
                     isWorktreeProject: isWorktreeProject,
                     activeFileChangeStatus: activeFileChangeStatus,
+                    threadGoal: threadGoal,
+                    isThreadRunning: isThreadRunning,
+                    onEditGoal: onEditGoal,
+                    onRemoveGoal: onRemoveGoal,
+                    onResumeGoal: onResumeGoal,
+                    onPauseGoal: onPauseGoal,
                     queuedDraftCount: accessoryState.queuedDrafts.count,
                     onTapQueuedDrafts: { isShowingQueuedDraftsSheet = true },
                     gitState: gitState,
@@ -213,7 +224,6 @@ struct TurnComposerView: View {
                         state: accessoryState,
                         onRemoveAttachment: onRemoveAttachment,
                         onRemoveMentionedFile: onRemoveMentionedFile,
-                        onRemoveMentionedSkill: onRemoveMentionedSkill,
                         onRemoveMentionedPlugin: onRemoveMentionedPlugin,
                         onRemoveComposerReviewSelection: onRemoveComposerReviewSelection,
                         onRemoveComposerSubagentsSelection: onRemoveComposerSubagentsSelection,
@@ -266,6 +276,7 @@ struct TurnComposerView: View {
                             isFocused: isInputFocused,
                             isEditable: !isComposerInteractionLocked,
                             dynamicHeight: $composerInputHeight,
+                            mentionedSkillNames: accessoryState.composerMentionedSkills.map(\.name),
                             runtimeState: runtimeState,
                             runtimeActions: runtimeActions,
                             isCollapsed: showsCollapsedComposer,
@@ -310,7 +321,7 @@ struct TurnComposerView: View {
                         }
                     }
                 }
-                // Collapsed capsule: 6pt on every side so the 32pt inline controls
+                // Collapsed capsule: 6pt on every side so the 34pt inline controls
                 // sit at the same distance from the edges as the 6pt vertical rhythm.
                 .padding(.leading, showsCollapsedComposer ? 6 : 14)
                 .padding(.trailing, showsCollapsedComposer ? 6 : 16)
@@ -507,7 +518,6 @@ private struct TurnComposerAccessorySection: View {
     let state: TurnComposerAccessoryState
     let onRemoveAttachment: (String) -> Void
     let onRemoveMentionedFile: (String) -> Void
-    let onRemoveMentionedSkill: (String) -> Void
     let onRemoveMentionedPlugin: (String) -> Void
     let onRemoveComposerReviewSelection: () -> Void
     let onRemoveComposerSubagentsSelection: () -> Void
@@ -528,7 +538,6 @@ private struct TurnComposerAccessorySection: View {
             TurnComposerMentionChipSections(
                 state: state,
                 onRemoveMentionedFile: onRemoveMentionedFile,
-                onRemoveMentionedSkill: onRemoveMentionedSkill,
                 onRemoveMentionedPlugin: onRemoveMentionedPlugin,
                 onRemoveComposerReviewSelection: onRemoveComposerReviewSelection,
                 onRemoveComposerSubagentsSelection: onRemoveComposerSubagentsSelection,
@@ -828,7 +837,6 @@ private struct ComposerPreviewContent: View {
             onSelectForkDestination: { _ in },
             onCloseSlashCommandPanel: {},
             onRemoveMentionedFile: { _ in },
-            onRemoveMentionedSkill: { _ in },
             onRemoveMentionedPlugin: { _ in },
             onRemoveComposerReviewSelection: {},
             onRemoveComposerSubagentsSelection: {},

@@ -27,8 +27,8 @@ nonisolated enum TurnMessageRegexCache {
     static let markdownLinkRange = try? NSRegularExpression(pattern: #"\[[^\]]+\]\([^)]+\)"#)
     static let inlineCodeRange = try? NSRegularExpression(pattern: #"`[^`]+`"#)
     static let userMentionToken = try? NSRegularExpression(
-        // File mentions may contain spaces, but skills remain single-token `$name` values.
-        pattern: #"(?<![A-Za-z0-9_])([@$])((?:[^@$\n]+?\.[A-Za-z0-9]+)|(?:[^\s@$]+))(?=[\s,.;:!?)\]}>]|$)"#
+        // File mentions may contain spaces, but skills remain single-token `$name` or `/name` values.
+        pattern: #"(?<![A-Za-z0-9_])(?:(@)((?:[^@$\n]+?\.[A-Za-z0-9]+)|(?:[^\s@$]+))|([$/])([^\s@$/]+))(?=[\s,.;:!?)\]}>]|$)"#
     )
     static let filenameWithLine = try? NSRegularExpression(pattern: #"^(.*\.[A-Za-z0-9]+):(\d+)(?::\d+)?$"#)
     static let inlineEditingRow = try? NSRegularExpression(

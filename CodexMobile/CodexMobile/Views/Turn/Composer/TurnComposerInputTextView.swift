@@ -12,10 +12,13 @@ struct TurnComposerInputTextView: UIViewRepresentable {
     static let textContainerInset = UIEdgeInsets(top: 3, left: 0, bottom: 5, right: 0)
 
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @AppStorage(UserBubbleColor.storageKey)
+    private var userBubbleColorRawValue = UserBubbleColor.defaultStoredRawValue
     @Binding var text: String
     @Binding var isFocused: Bool
     let isEditable: Bool
     @Binding var dynamicHeight: CGFloat
+    let mentionedSkillNames: [String]
     let runtimeState: TurnComposerRuntimeState?
     let runtimeActions: TurnComposerRuntimeActions
     let isCollapsed: Bool
@@ -69,10 +72,28 @@ struct TurnComposerInputTextView: UIViewRepresentable {
         )
         let maxVisibleLinesChanged = context.coordinator.updateMaxVisibleLines(maxVisibleLines)
         let expandedAfterCollapse = context.coordinator.noteCollapsedState(isCollapsed)
-        let shouldApplyBindingText = context.coordinator.shouldApplyBindingText(text, to: uiView)
-        let textChanged = shouldApplyBindingText && uiView.text != text
-        if textChanged {
-            uiView.text = text
+        let mentionNamesChanged = context.coordinator.updateMentionedSkillNames(mentionedSkillNames)
+        let canonicalText = TurnComposerInlineSkillToken.canonicalText(from: uiView.attributedText)
+        let shouldApplyBindingText = context.coordinator.shouldApplyBindingText(
+            text,
+            textViewCanonicalText: canonicalText,
+            to: uiView
+        )
+        let shouldCompareAttributedText = shouldApplyBindingText
+            && (canonicalText != text || mentionNamesChanged || fontChanged)
+        let nextAttributedText = shouldCompareAttributedText
+            ? TurnComposerInlineSkillToken.displayAttributedString(
+                canonicalText: text,
+                mentionNames: mentionedSkillNames,
+                font: nextFont,
+                textColor: .label,
+                tintColor: skillTintColor
+            )
+            : nil
+        let textChanged = nextAttributedText.map { !uiView.attributedText.isEqual(to: $0) } ?? false
+        if let nextAttributedText, textChanged {
+            uiView.attributedText = nextAttributedText
+            uiView.selectedRange = NSRange(location: uiView.attributedText.length, length: 0)
             context.coordinator.noteAppliedBindingText(text)
         }
         let shouldDeferEditabilityLock = !isEditable && uiView.isEditable && uiView.isFirstResponder
@@ -120,7 +141,8 @@ struct TurnComposerInputTextView: UIViewRepresentable {
             dynamicHeight: $dynamicHeight,
             minVisibleLines: minVisibleLines,
             maxVisibleLines: maxVisibleLines,
-            isCollapsed: isCollapsed
+            isCollapsed: isCollapsed,
+            mentionedSkillNames: mentionedSkillNames
         )
     }
 
@@ -130,6 +152,11 @@ struct TurnComposerInputTextView: UIViewRepresentable {
         // Read the SwiftUI environment so UIKit gets refreshed when Dynamic Type changes.
         let _ = dynamicTypeSize
         return AppFont.uiFont(size: 15, textStyle: .body)
+    }
+
+    private var skillTintColor: UIColor {
+        let selectedColor = UserBubbleColor(rawValue: userBubbleColorRawValue) ?? .default
+        return selectedColor == .default ? .systemBlue : selectedColor.uiColor
     }
 
     final class Coordinator: NSObject, UITextViewDelegate {
@@ -146,6 +173,7 @@ struct TurnComposerInputTextView: UIViewRepresentable {
         private var maxVisibleLines: CGFloat
         private var pendingUIKitText: String?
         private var staleBindingTextDuringPendingEdit: String?
+        private var mentionedSkillNames: [String]
 
         init(
             text: Binding<String>,
@@ -153,7 +181,8 @@ struct TurnComposerInputTextView: UIViewRepresentable {
             dynamicHeight: Binding<CGFloat>,
             minVisibleLines: CGFloat,
             maxVisibleLines: CGFloat,
-            isCollapsed: Bool
+            isCollapsed: Bool,
+            mentionedSkillNames: [String]
         ) {
             self.text = text
             self.isFocused = isFocused
@@ -167,6 +196,7 @@ struct TurnComposerInputTextView: UIViewRepresentable {
             self.lastFocusBindingValue = false
             self.lastIsEditable = true
             self.lastIsCollapsed = isCollapsed
+            self.mentionedSkillNames = mentionedSkillNames
         }
 
         func updateBindings(
@@ -194,11 +224,18 @@ struct TurnComposerInputTextView: UIViewRepresentable {
             return true
         }
 
+        fileprivate func updateMentionedSkillNames(_ names: [String]) -> Bool {
+            guard mentionedSkillNames != names else { return false }
+            mentionedSkillNames = names
+            return true
+        }
+
         func textViewDidChange(_ textView: UITextView) {
             // Let heavier streaming rows back off briefly so keystrokes stay responsive
             // while a run is repainting tool/status activity.
             StreamingUIInteractionMonitor.noteComposerKeystroke()
-            let newText = textView.text ?? ""
+            TurnComposerInlineSkillToken.normalizeTokenAttributes(in: textView.textStorage)
+            let newText = TurnComposerInlineSkillToken.canonicalText(from: textView.attributedText)
             if text.wrappedValue != newText {
                 pendingUIKitText = newText
                 staleBindingTextDuringPendingEdit = text.wrappedValue
@@ -220,15 +257,22 @@ struct TurnComposerInputTextView: UIViewRepresentable {
 
         // Prevents SwiftUI re-renders from writing an older binding value over
         // fresh UIKit edits while the deferred binding update is still queued.
-        fileprivate func shouldApplyBindingText(_ bindingText: String, to textView: UITextView) -> Bool {
+        fileprivate func shouldApplyBindingText(
+            _ bindingText: String,
+            textViewCanonicalText: String,
+            to textView: UITextView
+        ) -> Bool {
             if hasActiveMarkedText(in: textView) {
-                return shouldApplyBindingTextDuringPendingEdit(bindingText, textViewText: textView.text ?? "")
+                return shouldApplyBindingTextDuringPendingEdit(
+                    bindingText,
+                    textViewText: textViewCanonicalText
+                )
             }
 
             guard
                 textView.isFirstResponder,
                 let pendingUIKitText,
-                textView.text == pendingUIKitText
+                textViewCanonicalText == pendingUIKitText
             else {
                 return true
             }
@@ -270,6 +314,54 @@ struct TurnComposerInputTextView: UIViewRepresentable {
                 return false
             }
             return !markedRange.isEmpty
+        }
+
+        func textView(
+            _ textView: UITextView,
+            shouldChangeTextIn range: NSRange,
+            replacementText replacement: String
+        ) -> Bool {
+            let sanitized = replacement.replacingOccurrences(of: "\u{FFFC}", with: "")
+            let expanded = TurnComposerInlineSkillToken.expandedEditingRange(
+                for: range,
+                in: textView.attributedText
+            )
+            guard expanded != range || sanitized != replacement else { return true }
+
+            textView.textStorage.beginEditing()
+            textView.textStorage.replaceCharacters(in: expanded, with: sanitized)
+            if !sanitized.isEmpty {
+                textView.textStorage.setAttributes(
+                    baseTypingAttributes(for: textView),
+                    range: NSRange(location: expanded.location, length: (sanitized as NSString).length)
+                )
+            }
+            textView.textStorage.endEditing()
+            textView.selectedRange = NSRange(
+                location: expanded.location + (sanitized as NSString).length,
+                length: 0
+            )
+            textView.typingAttributes = baseTypingAttributes(for: textView)
+            textViewDidChange(textView)
+            return false
+        }
+
+        func textViewDidChangeSelection(_ textView: UITextView) {
+            let snapped = TurnComposerInlineSkillToken.snappedSelection(
+                textView.selectedRange,
+                in: textView.attributedText
+            )
+            if snapped != textView.selectedRange {
+                textView.selectedRange = snapped
+            }
+            textView.typingAttributes = baseTypingAttributes(for: textView)
+        }
+
+        private func baseTypingAttributes(for textView: UITextView) -> [NSAttributedString.Key: Any] {
+            [
+                .font: textView.font ?? UIFont.preferredFont(forTextStyle: .body),
+                .foregroundColor: UIColor.label,
+            ]
         }
 
         func textViewDidBeginEditing(_ textView: UITextView) {

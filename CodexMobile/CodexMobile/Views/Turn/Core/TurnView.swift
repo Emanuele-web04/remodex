@@ -18,8 +18,8 @@ private enum TurnWorktreeOverlayRoute: Equatable {
 struct TurnView: View {
     let thread: CodexThread
     let isWakingMacDisplayRecovery: Bool
-    private let initialShouldAnchorToAssistantResponse: Bool
-    private let onInitialAssistantAnchorConsumed: (() -> Void)?
+    private let initiallyAwaitingAssistantResponse: Bool
+    private let onInitialAssistantResponseTrackingConsumed: (() -> Void)?
     var onOpenTerminal: ((String?) -> Void)? = nil
 
     @Environment(CodexService.self) private var codex
@@ -32,6 +32,10 @@ struct TurnView: View {
     @State private var isInputFocused = false
     @State private var isShowingThreadPathSheet = false
     @State private var isShowingStatusSheet = false
+    @State private var isShowingGoalSheet = false
+    @State private var goalSheetObjectivePrefill: String?
+    // Composer text consumed as goal prefill; cleared only after the objective is submitted.
+    @State private var goalSheetComposerConsumedInput: String?
     @State private var isLoadingRepositoryDiff = false
     @State private var repositoryDiffPresentation: TurnDiffPresentation?
     @State private var assistantRevertSheetState: AssistantRevertSheetState?
@@ -45,23 +49,23 @@ struct TurnView: View {
     @State private var isForkingThread = false
     @State private var checkedOutElsewhereAlert: CheckedOutElsewhereAlert?
     @StateObject private var voiceInput = VoiceInputCoordinator()
-    @State private var hasConsumedInitialAssistantAnchor = false
+    @State private var hasConsumedInitialAssistantResponseTracking = false
     @State private var workspaceFilePreviewRequest: WorkspaceFilePreviewRequest?
 
     init(
         thread: CodexThread,
         isWakingMacDisplayRecovery: Bool,
-        initialShouldAnchorToAssistantResponse: Bool = false,
-        onInitialAssistantAnchorConsumed: (() -> Void)? = nil,
+        initiallyAwaitingAssistantResponse: Bool = false,
+        onInitialAssistantResponseTrackingConsumed: (() -> Void)? = nil,
         onOpenTerminal: ((String?) -> Void)? = nil
     ) {
         self.thread = thread
         self.isWakingMacDisplayRecovery = isWakingMacDisplayRecovery
-        self.initialShouldAnchorToAssistantResponse = initialShouldAnchorToAssistantResponse
-        self.onInitialAssistantAnchorConsumed = onInitialAssistantAnchorConsumed
+        self.initiallyAwaitingAssistantResponse = initiallyAwaitingAssistantResponse
+        self.onInitialAssistantResponseTrackingConsumed = onInitialAssistantResponseTrackingConsumed
         self.onOpenTerminal = onOpenTerminal
         _viewModel = State(initialValue: TurnViewModel(
-            shouldAnchorToAssistantResponse: initialShouldAnchorToAssistantResponse
+            isAwaitingAssistantResponse: initiallyAwaitingAssistantResponse
         ))
     }
 
@@ -134,6 +138,7 @@ struct TurnView: View {
                 timelineChangeToken: renderSnapshot.timelineChangeToken,
                 activeTurnID: activeTurnID,
                 isThreadRunning: isThreadRunning,
+                runStartGeneration: renderSnapshot.runStartGeneration,
                 isSendInFlight: viewModel.isSending,
                 latestTurnTerminalState: renderSnapshot.latestTurnTerminalState,
                 completedTurnIDs: renderSnapshot.completedTurnIDs,
@@ -162,7 +167,7 @@ struct TurnView: View {
                 initialTurnsLoaded: renderSnapshot.initialTurnsLoaded,
                 isLoadingRemoteEarlierMessages: renderSnapshot.isLoadingOlderHistory,
                 olderHistoryLoadErrorMessage: renderSnapshot.olderHistoryLoadErrorMessage,
-                shouldAnchorToAssistantResponse: shouldAnchorToAssistantResponseBinding,
+                isAwaitingAssistantResponse: isAwaitingAssistantResponseBinding,
                 isComposerFocused: isInputFocused,
                 isComposerAutocompletePresented: isComposerAutocompletePresented,
                 emptyState: resolvedEmptyConversationState,
@@ -356,6 +361,7 @@ struct TurnView: View {
                     gitWorkingDirectory: gitWorkingDirectory,
                     showsGitControls: showsGitControls
                 )
+                await refreshThreadGoalSnapshot()
             },
             onInitialAppear: {
                 handleInitialAppear(activeTurnID: activeTurnID)
@@ -493,6 +499,19 @@ struct TurnView: View {
                 isLoadingRateLimits: codex.isLoadingRateLimits,
                 rateLimitsErrorMessage: codex.rateLimitsErrorMessage
             )
+        }
+        .sheet(isPresented: $isShowingGoalSheet, onDismiss: {
+            goalSheetObjectivePrefill = nil
+            goalSheetComposerConsumedInput = nil
+        }) {
+            GoalStatusSheet(
+                threadId: thread.id,
+                initialObjectiveDraft: goalSheetObjectivePrefill,
+                onObjectiveSubmitted: { _ in
+                    consumeComposerDraftAfterGoalSubmission()
+                }
+            )
+            .environment(codex)
         }
         .sheet(isPresented: $voiceInput.isShowingSetupSheet) {
             GPTVoiceSetupSheet()
@@ -653,10 +672,10 @@ struct TurnView: View {
 
     // MARK: - Bindings
 
-    private var shouldAnchorToAssistantResponseBinding: Binding<Bool> {
+    private var isAwaitingAssistantResponseBinding: Binding<Bool> {
         Binding(
-            get: { viewModel.shouldAnchorToAssistantResponse },
-            set: { viewModel.shouldAnchorToAssistantResponse = $0 }
+            get: { viewModel.isAwaitingAssistantResponse },
+            set: { viewModel.isAwaitingAssistantResponse = $0 }
         )
     }
 
@@ -710,6 +729,70 @@ struct TurnView: View {
 
         Task {
             await codex.refreshUsageStatus(threadId: thread.id)
+        }
+    }
+
+    // Opens the thread goal sheet, optionally prefilled with leftover composer draft text.
+    private func presentGoalSheet(objectivePrefill: String?) {
+        goalSheetObjectivePrefill = objectivePrefill
+        // Remember the composer text backing the prefill so submission can consume it.
+        // Cancelling the sheet leaves the draft untouched.
+        goalSheetComposerConsumedInput = (objectivePrefill?.isEmpty == false) ? viewModel.input : nil
+        isShowingGoalSheet = true
+    }
+
+    // Clears the composer draft once its text became the goal objective, so the same
+    // text cannot be sent again as a normal chat message.
+    private func consumeComposerDraftAfterGoalSubmission() {
+        guard let consumedInput = goalSheetComposerConsumedInput,
+              !consumedInput.isEmpty,
+              viewModel.input == consumedInput else {
+            return
+        }
+        viewModel.input = ""
+        viewModel.saveLocalDraft(codex: codex, threadID: thread.id)
+        goalSheetComposerConsumedInput = nil
+    }
+
+    // Parses `/goal` or `/goal <objective>` typed inline (TUI parity). Returns the
+    // objective remainder, or nil when the draft is not a goal command.
+    static func inlineGoalCommandObjective(in text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("/goal") else { return nil }
+        let remainder = trimmed.dropFirst("/goal".count)
+        guard remainder.isEmpty || remainder.first?.isWhitespace == true else { return nil }
+        return remainder.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    // Keeps the goal chip accurate on open/resume even when the live
+    // `thread/goal/updated` snapshot was missed (reconnect, mirrored threads).
+    private func refreshThreadGoalSnapshot() async {
+        await codex.refreshThreadGoalMirror(threadId: thread.id)
+    }
+
+    // One-tap resume back to the active goal state from the chip prompt.
+    private func resumeThreadGoal() {
+        updateThreadGoal { try await codex.setThreadGoal(threadId: thread.id, status: .active) }
+    }
+
+    // "Stop" on the chip pauses the goal: continuation halts but state and accounting survive.
+    private func pauseThreadGoal() {
+        updateThreadGoal { try await codex.setThreadGoal(threadId: thread.id, status: .paused) }
+    }
+
+    // "Remove" on the chip clears the goal after the inline confirmation.
+    private func removeThreadGoal() {
+        updateThreadGoal { _ = try await codex.clearThreadGoal(threadId: thread.id) }
+    }
+
+    private func updateThreadGoal(_ operation: @escaping () async throws -> Void) {
+        Task { @MainActor in
+            do {
+                try await operation()
+            } catch {
+                codex.lastErrorMessage = (error as? LocalizedError)?.errorDescription
+                    ?? error.localizedDescription
+            }
         }
     }
 
@@ -785,6 +868,19 @@ struct TurnView: View {
 
     private func handleSend() {
         guard !isVoiceInputActive else { return }
+        // `/goal <objective>` typed inline opens the goal sheet with the objective
+        // prefilled instead of sending a chat message (Codex TUI parity).
+        if let objective = Self.inlineGoalCommandObjective(in: viewModel.input) {
+            viewModel.clearComposerAutocomplete()
+            if objective.isEmpty {
+                // A bare `/goal` carries no draft worth preserving; drop the token now.
+                viewModel.input = ""
+                viewModel.saveLocalDraft(codex: codex, threadID: thread.id)
+            }
+            presentGoalSheet(objectivePrefill: objective.isEmpty ? nil : objective)
+            isInputFocused = false
+            return
+        }
         viewModel.clearComposerAutocomplete()
         viewModel.sendTurn(codex: codex, subscriptions: subscriptions, threadID: thread.id)
         isInputFocused = false
@@ -987,10 +1083,10 @@ struct TurnView: View {
 
     private func handleInitialAppear(activeTurnID: String?) {
         syncApprovalAlertPresentation()
-        if initialShouldAnchorToAssistantResponse && !hasConsumedInitialAssistantAnchor {
-            hasConsumedInitialAssistantAnchor = true
-            viewModel.shouldAnchorToAssistantResponse = true
-            onInitialAssistantAnchorConsumed?()
+        if initiallyAwaitingAssistantResponse && !hasConsumedInitialAssistantResponseTracking {
+            hasConsumedInitialAssistantResponseTracking = true
+            viewModel.isAwaitingAssistantResponse = true
+            onInitialAssistantResponseTrackingConsumed?()
         }
         if let pendingComposerAction = codex.consumePendingComposerAction(for: thread.id) {
             viewModel.applyPendingComposerAction(pendingComposerAction)
@@ -1330,16 +1426,18 @@ struct TurnView: View {
 
     private var reasoningDisplayOptions: [TurnComposerReasoningDisplayOption] {
         TurnComposerMetaMapper.reasoningDisplayOptions(
-            from: codex.supportedReasoningEffortsForSelectedModel().map(\.reasoningEffort)
+            from: codex.supportedReasoningEffortsForSelectedModel(threadId: thread.id).map(\.reasoningEffort)
         )
     }
 
     private var selectedModelTitle: String {
-        if let selectedModel = codex.selectedModelOption() {
+        if let selectedModel = codex.selectedModelOption(threadId: thread.id) {
             return TurnComposerMetaMapper.modelTitle(for: selectedModel)
         }
 
-        return TurnComposerMetaMapper.modelTitle(forIdentifier: codex.selectedModelId)
+        return TurnComposerMetaMapper.modelTitle(
+            forIdentifier: codex.visibleSelectedModelIDForComposer(threadId: thread.id)
+        )
     }
 
     private var approvalForThread: CodexApprovalRequest? {
@@ -1421,11 +1519,13 @@ struct TurnView: View {
                 viewModel: viewModel,
                 codex: codex,
                 thread: currentThread,
+                usesThreadRuntimeSettings: true,
                 activeTurnID: activeTurnID,
                 isThreadRunning: isThreadRunning,
                 isEmptyThread: isEmptyThread,
                 isWorktreeProject: isWorktreeProject,
                 activeFileChangeStatus: activeFileChangeStatus,
+                threadGoal: codex.goalByThreadID[thread.id],
                 canForkLocally: showsGitControls && gitWorkingDirectory != nil && WorktreeFlowCoordinator.localForkProjectPath(
                     for: currentThread,
                     localCheckoutPath: viewModel.gitLocalCheckoutPath
@@ -1513,6 +1613,12 @@ struct TurnView: View {
                     ))
                 },
                 onShowStatus: presentStatusSheet,
+                onShowGoal: { objectivePrefill in
+                    presentGoalSheet(objectivePrefill: objectivePrefill)
+                },
+                onRemoveGoal: { removeThreadGoal() },
+                onResumeGoal: { resumeThreadGoal() },
+                onPauseGoal: { pauseThreadGoal() },
                 voiceButtonPresentation: voiceButtonPresentation,
                 isVoiceInputActive: isVoiceInputActive,
                 isVoiceRecording: voiceInput.isRecording,

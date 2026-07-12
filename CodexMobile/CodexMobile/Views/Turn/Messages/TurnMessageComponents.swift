@@ -587,14 +587,6 @@ struct MessageRow: View, Equatable {
             return trailingAssistantImageReferences.isEmpty ? assistantBlockAccessoryState?.copyText : nil
         }()
         return VStack(alignment: .leading, spacing: 4) {
-            if let commentContent, commentContent.hasFindings {
-                VStack(alignment: .leading, spacing: 10) {
-                    ForEach(commentContent.findings) { finding in
-                        CodeCommentFindingCard(finding: finding)
-                    }
-                }
-            }
-
             if hasRenderableAssistantContent {
                 if let mermaidContent {
                     MermaidMarkdownContentView(content: mermaidContent)
@@ -690,6 +682,14 @@ struct MessageRow: View, Equatable {
                         }
                     }
                     .padding(.top, trailingAssistantImageReferences.isEmpty ? 0 : 4)
+                }
+            }
+
+            if let commentContent, commentContent.hasFindings {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(commentContent.findings) { finding in
+                        CodeCommentFindingCard(finding: finding)
+                    }
                 }
             }
 

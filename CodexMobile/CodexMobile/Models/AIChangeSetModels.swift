@@ -1,12 +1,29 @@
 // FILE: AIChangeSetModels.swift
 // Purpose: Models assistant-scoped code change sets and revert preview/apply results.
 // Layer: Model
-// Exports: AIChangeSet, AIFileChange, RevertPreviewResult, RevertApplyResult,
+// Exports: AIChangeSetTurnKey, AIChangeSet, AIFileChange, RevertPreviewResult, RevertApplyResult,
 //   AssistantRevertRiskLevel, AssistantRevertPresentation
 // Depends on: Foundation, CryptoKit
 
 import Foundation
 import CryptoKit
+
+struct AIChangeSetTurnKey: Hashable, Sendable {
+    let threadId: String
+    let turnId: String
+
+    init?(threadId: String?, turnId: String?) {
+        guard let threadId = threadId?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !threadId.isEmpty,
+              let turnId = turnId?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !turnId.isEmpty else {
+            return nil
+        }
+
+        self.threadId = threadId
+        self.turnId = turnId
+    }
+}
 
 enum AIFileChangeKind: String, Codable, Hashable, Sendable {
     case create

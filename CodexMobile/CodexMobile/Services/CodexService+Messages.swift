@@ -8,9 +8,18 @@ import Foundation
 import UIKit
 
 private enum CanonicalHistoryReconcileRetryPolicy {
-    // Transient thread/read failures should self-heal, but with a small delay so we do not
-    // spin aggressively when the bridge or socket is still recovering.
-    static let transientErrorDelayNanoseconds: UInt64 = 1_500_000_000
+    static let initialDelayNanoseconds: UInt64 = 1_500_000_000
+    static let maximumDelayNanoseconds: UInt64 = 60_000_000_000
+
+    // Giant histories can take tens of seconds per attempt. Exponential spacing
+    // keeps recovery persistent without hammering the bridge forever.
+    static func delayNanoseconds(forAttempt attempt: Int) -> UInt64 {
+        var delay = initialDelayNanoseconds
+        for _ in 1..<max(1, min(attempt, 7)) {
+            delay = min(delay * 2, maximumDelayNanoseconds)
+        }
+        return delay
+    }
 }
 
 private enum StreamingDeltaCoalescingPolicy {
@@ -74,14 +83,22 @@ extension CodexService {
         case loadedCanonicalHistory
         case loadedRecentWindow
         case loadedPaginatedWindow
+        case loadedProvisionalPaginatedWindow
         case deferredAfterTimeout
+        case deferredAfterEmptyPage
+        case deferredAfterUnavailablePage
 
         var didCompleteCanonicalReconcile: Bool {
             self == .loadedCanonicalHistory
         }
 
         var needsCanonicalRetry: Bool {
-            self == .loadedRecentWindow || self == .skippedForRunningThread
+            self == .loadedRecentWindow
+                || self == .loadedProvisionalPaginatedWindow
+                || self == .skippedForRunningThread
+                || self == .deferredAfterTimeout
+                || self == .deferredAfterEmptyPage
+                || self == .deferredAfterUnavailablePage
         }
     }
 
@@ -179,6 +196,27 @@ extension CodexService {
         return thread.displayTitle == CodexThread.defaultDisplayTitle
     }
 
+    // An empty page is only a recovery signal when local metadata proves that
+    // content should exist. A never-prompted thread may have a custom title, so
+    // the title itself must not turn its legitimate empty page into a retry loop.
+    func shouldDeferEmptyThreadHistoryPage(
+        threadId: String,
+        loadedViaPagination: Bool
+    ) -> Bool {
+        let hasPendingSourceReplacement = pendingCanonicalSourceReplacementThreadIDs.contains(threadId)
+        guard loadedViaPagination || hasPendingSourceReplacement else {
+            return false
+        }
+
+        if hasPendingSourceReplacement || messagesByThread[threadId]?.isEmpty == false {
+            return true
+        }
+
+        let preview = (thread(for: threadId)?.preview ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return !preview.isEmpty
+    }
+
     // Returns a lightweight per-thread revision token for any message timeline mutation.
     func messageRevision(for threadId: String) -> Int {
         messageRevisionByThread[threadId] ?? 0
@@ -200,6 +238,7 @@ extension CodexService {
     func removeThreadTimelineState(for threadId: String) {
         threadTimelineStateByThread.removeValue(forKey: threadId)
         stoppedTurnIDsByThread.removeValue(forKey: threadId)
+        projectedTerminalStateByThreadID.removeValue(forKey: threadId)
         messageIndexCacheByThread.removeValue(forKey: threadId)
         latestAssistantOutputByThread.removeValue(forKey: threadId)
         latestAssistantMessageIDByThread.removeValue(forKey: threadId)
@@ -208,6 +247,11 @@ extension CodexService {
         cancelPendingStreamingDeltaFlushes(for: threadId)
         threadsPendingCompletionHaptic.remove(threadId)
         threadsNeedingCanonicalHistoryReconcile.remove(threadId)
+        pendingCanonicalSourceReplacementThreadIDs.remove(threadId)
+        pendingReconnectRunContinuityThreadIDs.remove(threadId)
+        runStartGenerationByThread.removeValue(forKey: threadId)
+        lastRunStartTurnIDByThread.removeValue(forKey: threadId)
+        provisionalPaginatedHistoryThreadIDs.remove(threadId)
         threadsWithSatisfiedDeferredHistoryHydration.remove(threadId)
         olderThreadHistoryCursorByThreadID.removeValue(forKey: threadId)
         exhaustedOlderThreadHistoryCursorByThreadID.removeValue(forKey: threadId)
@@ -221,6 +265,7 @@ extension CodexService {
         canonicalHistoryReconcileTaskByThreadID.removeValue(forKey: threadId)
         canonicalHistoryReconcileRetryTaskByThreadID[threadId]?.cancel()
         canonicalHistoryReconcileRetryTaskByThreadID.removeValue(forKey: threadId)
+        canonicalHistoryReconcileRetryAttemptByThreadID.removeValue(forKey: threadId)
         timelineCatchUpFlushTaskByThreadID[threadId]?.cancel()
         timelineCatchUpFlushTaskByThreadID.removeValue(forKey: threadId)
         timelineCatchUpBurstThreadIDs.remove(threadId)
@@ -229,9 +274,10 @@ extension CodexService {
     }
 
     // Clears every service-owned timeline cache during global teardown.
-    func removeAllThreadTimelineState() {
+    func removeAllThreadTimelineState(preserveRunLifecycle: Bool = false) {
         threadTimelineStateByThread.removeAll()
         stoppedTurnIDsByThread.removeAll()
+        projectedTerminalStateByThreadID.removeAll()
         messageIndexCacheByThread.removeAll()
         latestAssistantOutputByThread.removeAll()
         latestAssistantMessageIDByThread.removeAll()
@@ -239,6 +285,13 @@ extension CodexService {
         assistantRevertStateCacheByThread.removeAll()
         cancelAllPendingStreamingDeltaFlushes()
         threadsNeedingCanonicalHistoryReconcile.removeAll()
+        pendingCanonicalSourceReplacementThreadIDs.removeAll()
+        if !preserveRunLifecycle {
+            pendingReconnectRunContinuityThreadIDs.removeAll()
+            runStartGenerationByThread.removeAll()
+            lastRunStartTurnIDByThread.removeAll()
+        }
+        provisionalPaginatedHistoryThreadIDs.removeAll()
         threadsWithSatisfiedDeferredHistoryHydration.removeAll()
         olderThreadHistoryCursorByThreadID.removeAll()
         exhaustedOlderThreadHistoryCursorByThreadID.removeAll()
@@ -252,6 +305,7 @@ extension CodexService {
         canonicalHistoryReconcileTaskByThreadID.removeAll()
         canonicalHistoryReconcileRetryTaskByThreadID.values.forEach { $0.cancel() }
         canonicalHistoryReconcileRetryTaskByThreadID.removeAll()
+        canonicalHistoryReconcileRetryAttemptByThreadID.removeAll()
         timelineCatchUpFlushTaskByThreadID.values.forEach { $0.cancel() }
         timelineCatchUpFlushTaskByThreadID.removeAll()
         timelineCatchUpBurstThreadIDs.removeAll()
@@ -327,6 +381,7 @@ extension CodexService {
                in: rawMessages,
                threadId: threadId,
                turnId: updatedMessage.turnId,
+               itemId: updatedMessage.itemId,
                text: updatedMessage.text,
                excludingMessageID: messageId
            ) {
@@ -356,6 +411,7 @@ extension CodexService {
             timelineChangeToken: revision,
             activeTurnID: state.renderSnapshot.activeTurnID,
             isThreadRunning: state.renderSnapshot.isThreadRunning,
+            runStartGeneration: state.renderSnapshot.runStartGeneration,
             latestTurnTerminalState: state.renderSnapshot.latestTurnTerminalState,
             completedTurnIDs: state.renderSnapshot.completedTurnIDs,
             stoppedTurnIDs: state.renderSnapshot.stoppedTurnIDs,
@@ -417,6 +473,7 @@ extension CodexService {
             timelineChangeToken: revision,
             activeTurnID: state.renderSnapshot.activeTurnID,
             isThreadRunning: state.renderSnapshot.isThreadRunning,
+            runStartGeneration: state.renderSnapshot.runStartGeneration,
             latestTurnTerminalState: state.renderSnapshot.latestTurnTerminalState,
             completedTurnIDs: state.renderSnapshot.completedTurnIDs,
             stoppedTurnIDs: state.renderSnapshot.stoppedTurnIDs,
@@ -516,6 +573,7 @@ extension CodexService {
     func clearRunningState(for threadId: String) {
         runningThreadIDs.remove(threadId)
         protectedRunningFallbackThreadIDs.remove(threadId)
+        pendingReconnectRunContinuityThreadIDs.remove(threadId)
         desktopMirroredRunningThreadIDs.remove(threadId)
         desktopMirroredRunningStaleSnapshotCountsByThread.removeValue(forKey: threadId)
         desktopMirroredRunningLastActivityAtByThread.removeValue(forKey: threadId)
@@ -545,11 +603,15 @@ extension CodexService {
 
     // Schedules one full reconcile after a lightweight running catch-up once the thread settles.
     func scheduleCanonicalHistoryReconcileIfNeeded(for threadId: String) {
+        // A provisional JSONL page needs its canonical replacement even while the turn is
+        // running. The merge is revision-guarded below; deferring it until completion leaves a
+        // reopen showing only a partial tail for the entire active turn.
+        let mayReconcileDuringActiveTurn = provisionalPaginatedHistoryThreadIDs.contains(threadId)
         guard threadsNeedingCanonicalHistoryReconcile.contains(threadId),
               canonicalHistoryReconcileTaskByThreadID[threadId] == nil,
               canonicalHistoryReconcileRetryTaskByThreadID[threadId] == nil,
               isConnected,
-              !threadHasActiveOrRunningTurn(threadId),
+              (mayReconcileDuringActiveTurn || !threadHasActiveOrRunningTurn(threadId)),
               thread(for: threadId)?.syncState == .live else {
             return
         }
@@ -571,6 +633,9 @@ extension CodexService {
                         guard !Task.isCancelled else {
                             return
                         }
+                        // Release this timer's single-flight slot before asking
+                        // the scheduler to create the next reconcile attempt.
+                        self?.canonicalHistoryReconcileRetryTaskByThreadID.removeValue(forKey: threadId)
                         self?.scheduleCanonicalHistoryReconcileIfNeeded(for: threadId)
                     }
                 }
@@ -579,7 +644,8 @@ extension CodexService {
             guard let self,
                   self.threadsNeedingCanonicalHistoryReconcile.contains(threadId),
                   self.isConnected,
-                  !self.threadHasActiveOrRunningTurn(threadId),
+                  (self.provisionalPaginatedHistoryThreadIDs.contains(threadId)
+                      || !self.threadHasActiveOrRunningTurn(threadId)),
                   self.thread(for: threadId)?.syncState == .live else {
                 return
             }
@@ -594,9 +660,15 @@ extension CodexService {
                 } else if outcome.needsCanonicalRetry,
                           self.threadsNeedingCanonicalHistoryReconcile.contains(threadId),
                           self.isConnected,
-                          !self.threadHasActiveOrRunningTurn(threadId),
+                          (self.provisionalPaginatedHistoryThreadIDs.contains(threadId)
+                              || !self.threadHasActiveOrRunningTurn(threadId)),
                           self.thread(for: threadId)?.syncState == .live {
                     shouldRetry = true
+                    if outcome == .deferredAfterTimeout
+                        || outcome == .deferredAfterEmptyPage
+                        || outcome == .deferredAfterUnavailablePage {
+                        retryDelayNanoseconds = self.nextCanonicalHistoryReconcileRetryDelay(for: threadId)
+                    }
                 }
             } catch is CancellationError {
                 return
@@ -604,16 +676,24 @@ extension CodexService {
                 if self.shouldTreatAsThreadNotFound(error) {
                     self.threadsNeedingCanonicalHistoryReconcile.remove(threadId)
                     self.threadsWithSatisfiedDeferredHistoryHydration.remove(threadId)
+                    self.canonicalHistoryReconcileRetryAttemptByThreadID.removeValue(forKey: threadId)
                     self.handleMissingThread(threadId)
                 } else if self.threadsNeedingCanonicalHistoryReconcile.contains(threadId),
                           self.isConnected,
-                          !self.threadHasActiveOrRunningTurn(threadId),
+                          (self.provisionalPaginatedHistoryThreadIDs.contains(threadId)
+                              || !self.threadHasActiveOrRunningTurn(threadId)),
                           self.thread(for: threadId)?.syncState == .live {
                     shouldRetry = true
-                    retryDelayNanoseconds = CanonicalHistoryReconcileRetryPolicy.transientErrorDelayNanoseconds
+                    retryDelayNanoseconds = self.nextCanonicalHistoryReconcileRetryDelay(for: threadId)
                 }
             }
         }
+    }
+
+    private func nextCanonicalHistoryReconcileRetryDelay(for threadId: String) -> UInt64 {
+        let nextAttempt = min((canonicalHistoryReconcileRetryAttemptByThreadID[threadId] ?? 0) + 1, 7)
+        canonicalHistoryReconcileRetryAttemptByThreadID[threadId] = nextAttempt
+        return CanonicalHistoryReconcileRetryPolicy.delayNanoseconds(forAttempt: nextAttempt)
     }
 
     // Marks a large chat as "local-first for now, but still needs one authoritative server merge".
@@ -622,7 +702,10 @@ extension CodexService {
         requestImmediateSync: Bool = false
     ) {
         threadsWithSatisfiedDeferredHistoryHydration.remove(threadId)
-        threadsNeedingCanonicalHistoryReconcile.insert(threadId)
+        let inserted = threadsNeedingCanonicalHistoryReconcile.insert(threadId).inserted
+        if inserted {
+            canonicalHistoryReconcileRetryAttemptByThreadID.removeValue(forKey: threadId)
+        }
         scheduleCanonicalHistoryReconcileIfNeeded(for: threadId)
 
         guard requestImmediateSync else {
@@ -639,16 +722,19 @@ extension CodexService {
                 || hasLargePersistedTranscript(threadId: threadId) else {
             threadsNeedingCanonicalHistoryReconcile.remove(threadId)
             threadsWithSatisfiedDeferredHistoryHydration.remove(threadId)
+            canonicalHistoryReconcileRetryAttemptByThreadID.removeValue(forKey: threadId)
             return
         }
 
         threadsNeedingCanonicalHistoryReconcile.remove(threadId)
         threadsWithSatisfiedDeferredHistoryHydration.insert(threadId)
+        canonicalHistoryReconcileRetryAttemptByThreadID.removeValue(forKey: threadId)
     }
 
     // With turn pagination, the cursor-backed store replaces one-shot full-history reconciliation.
     func markThreadPaginatedHistorySatisfied(_ threadId: String) {
         threadsNeedingCanonicalHistoryReconcile.remove(threadId)
+        canonicalHistoryReconcileRetryAttemptByThreadID.removeValue(forKey: threadId)
     }
 
     // Returns the latest real terminal outcome seen for a thread.
@@ -657,8 +743,15 @@ extension CodexService {
     }
 
     // Returns the terminal outcome for a specific turn when known.
-    func turnTerminalState(for turnId: String?) -> CodexTurnTerminalState? {
+    func turnTerminalState(
+        for turnId: String?,
+        threadId: String? = nil
+    ) -> CodexTurnTerminalState? {
         guard let turnId else { return nil }
+        if CodexSyntheticIdentifiers.isProjectedDesktopTurnID(turnId),
+           let threadId {
+            return projectedTerminalStateByThreadID[threadId]?[turnId]
+        }
         return terminalStateByTurnID[turnId]
     }
 
@@ -672,6 +765,18 @@ extension CodexService {
     func threadRunBadgeState(for threadId: String) -> CodexThreadRunBadgeState? {
         if threadHasActiveOrRunningTurn(threadId) {
             return .running
+        }
+        // Goal lifecycle outranks stale ready/failed dots: an active goal keeps
+        // working on its own and attention states need the user to intervene.
+        if let goal = goalByThreadID[threadId] {
+            switch goal.status {
+            case .active:
+                return .goalActive
+            case .blocked, .usageLimited, .budgetLimited:
+                return .goalAttention
+            case .paused, .complete:
+                break
+            }
         }
         if failedThreadIDs.contains(threadId) {
             return .failed
@@ -766,22 +871,32 @@ extension CodexService {
     func recordTurnTerminalState(
         threadId: String,
         turnId: String?,
-        state: CodexTurnTerminalState
+        state: CodexTurnTerminalState,
+        updatesThreadState: Bool = true
     ) {
         let previousState = latestTurnTerminalStateByThread[threadId]
-        latestTurnTerminalStateByThread[threadId] = state
+        if updatesThreadState {
+            latestTurnTerminalStateByThread[threadId] = state
+        }
+        // Desktop snapshots synthesize `ipc-turn-N` per thread, so the same id
+        // can exist in many conversations. Keep those outcomes thread-scoped;
+        // persisting them in the global turn-id map poisons unrelated threads.
         if let turnId {
-            if terminalStateByTurnID[turnId] != state {
+            if CodexSyntheticIdentifiers.isProjectedDesktopTurnID(turnId) {
+                projectedTerminalStateByThreadID[threadId, default: [:]][turnId] = state
+            } else if terminalStateByTurnID[turnId] != state {
                 terminalStateByTurnID[turnId] = state
                 persistTurnTerminalStates()
             }
         }
         refreshThreadTimelineState(for: threadId)
-        triggerRunCompletionHapticIfNeeded(
-            threadId: threadId,
-            state: state,
-            previousState: previousState
-        )
+        if updatesThreadState {
+            triggerRunCompletionHapticIfNeeded(
+                threadId: threadId,
+                state: state,
+                previousState: previousState
+            )
+        }
     }
 
     // Sets the active thread and lazily hydrates old messages from server history.
@@ -854,9 +969,14 @@ extension CodexService {
             // When reopening a running thread, force a fresh resume snapshot so the
             // timeline catches up with output produced while the thread was off-screen.
             // Keep a sync fallback only when the shared catch-up pipeline skipped
-            // the forced resume for throttling or a transient refresh failure.
+            // the forced resume for throttling or a transient refresh failure. With
+            // pagination, resume intentionally sends `excludeTurns: true`, so it only
+            // refreshes lifecycle metadata and a separate history sync must still load
+            // the complete current turn instead of leaving only the latest live delta.
             if catchupOutcome.didRunForcedResume {
-                shouldRequestImmediateSync = false
+                shouldRequestImmediateSync = shouldRequestImmediateHistorySyncAfterRunningCatchup(
+                    didRunForcedResume: true
+                )
             }
             updateCurrentOutput(for: threadId)
         }
@@ -867,6 +987,12 @@ extension CodexService {
             requestImmediateActiveThreadSync(threadId: threadId, forceHistoryRefresh: true)
         }
         return true
+    }
+
+    func shouldRequestImmediateHistorySyncAfterRunningCatchup(
+        didRunForcedResume: Bool
+    ) -> Bool {
+        !didRunForcedResume || supportsTurnPagination
     }
 
     // Detects a brand-new local thread that has no timeline to hydrate yet.
@@ -1071,6 +1197,7 @@ extension CodexService {
             refreshThreadTimelineState(for: threadId)
             return .alreadyHydrated
         }
+        repairEmptyThreadHistoryLoadStateIfNeeded(threadId: threadId)
         if !forceRefresh,
            hydratedThreadIDs.contains(threadId),
            hasSatisfiedInitialThreadHistoryLoad(threadId: threadId) {
@@ -1101,6 +1228,9 @@ extension CodexService {
         let task = Task<ThreadHistoryLoadOutcome, Error> { @MainActor in
             let hadInitialTurnsLoadedBeforeRefresh = initialTurnsLoadedByThreadID.contains(threadId)
             let hadAuthoritativeLocalStartBeforeRefresh = hasAuthoritativeLocalHistoryStart(threadId: threadId)
+            let hadProvisionalPaginatedHistoryBeforeRefresh = provisionalPaginatedHistoryThreadIDs.contains(threadId)
+            let requiresCanonicalPaginatedHistory = hadProvisionalPaginatedHistoryBeforeRefresh
+                || threadsNeedingCanonicalHistoryReconcile.contains(threadId)
             var initialTurnsTask: Task<ThreadTurnsHistoryPage, Error>?
             loadingThreadIDs.insert(threadId)
             defer {
@@ -1132,11 +1262,18 @@ extension CodexService {
 
             if supportsTurnPagination {
                 initialTurnsTask = Task { @MainActor in
-                    try await self.fetchInitialThreadTurnsHistoryPage(threadId: threadId)
+                    try await self.fetchInitialThreadTurnsHistoryPage(
+                        threadId: threadId,
+                        requireCanonical: requiresCanonicalPaginatedHistory
+                    )
                 }
             }
 
             var loadedViaPagination = false
+            var loadedProvisionalJsonlFallback = false
+            var paginatedNextCursor: JSONValue?
+            var shouldSeedPaginatedInitialCursor = false
+            var decodedThreadFromHistory: CodexThread?
             var threadObject: RPCObject
             if supportsTurnPagination {
                 do {
@@ -1144,19 +1281,21 @@ extension CodexService {
                     if let initialTurnsTask {
                         turnsPage = try await initialTurnsTask.value
                     } else {
-                        turnsPage = try await fetchInitialThreadTurnsHistoryPage(threadId: threadId)
+                        turnsPage = try await fetchInitialThreadTurnsHistoryPage(
+                            threadId: threadId,
+                            requireCanonical: requiresCanonicalPaginatedHistory
+                        )
                     }
                     loadedViaPagination = true
+                    loadedProvisionalJsonlFallback = turnsPage.isProvisionalJsonlFallback
                     let shouldSeedInitialCursor = !hadInitialTurnsLoadedBeforeRefresh
+                        || hadProvisionalPaginatedHistoryBeforeRefresh
                         || (
                             !hasRemoteOlderThreadHistoryCursor(threadId: threadId)
                                 && !hadAuthoritativeLocalStartBeforeRefresh
                         )
-                    updateOlderThreadHistoryCursorFromInitialPage(
-                        threadId: threadId,
-                        cursor: turnsPage.nextCursor,
-                        isFreshInitialLoad: shouldSeedInitialCursor
-                    )
+                    paginatedNextCursor = turnsPage.nextCursor
+                    shouldSeedPaginatedInitialCursor = shouldSeedInitialCursor
                     threadObject = [
                         "id": .string(threadId),
                         "turns": .array(chronologicalTurnsFromDescendingPage(turnsPage.turns)),
@@ -1183,6 +1322,11 @@ extension CodexService {
                         debugSyncLog("thread/turns/list timed out for thread=\(threadId); showing local timeline while history is deferred")
                         return .deferredAfterTimeout
                     }
+                    if shouldDeferThreadHistoryAfterBridgeFailure(error) {
+                        markThreadHistoryDeferredAfterUnavailablePage(threadId: threadId)
+                        debugSyncLog("bridge could not supply thread/turns/list for thread=\(threadId); keeping local timeline while history retries")
+                        return .deferredAfterUnavailablePage
+                    }
                     if consumeUnsupportedTurnPagination(error, attemptedMethod: "thread/turns/list") {
                         do {
                             threadObject = try await fetchLegacyThreadHistoryObject(threadId: threadId)
@@ -1206,7 +1350,7 @@ extension CodexService {
                         extractContextWindowUsageIfAvailable(threadId: threadId, threadObject: threadObject)
                         if let threadData = try? JSONEncoder().encode(JSONValue.object(threadObject)),
                            let decoded = try? JSONDecoder().decode(CodexThread.self, from: threadData) {
-                            upsertThread(decoded, treatAsServerState: true)
+                            decodedThreadFromHistory = decoded
                         }
                     } else {
                         throw error
@@ -1242,8 +1386,37 @@ extension CodexService {
                 extractContextWindowUsageIfAvailable(threadId: threadId, threadObject: threadObject)
                 if let threadData = try? JSONEncoder().encode(JSONValue.object(threadObject)),
                    let decoded = try? JSONDecoder().decode(CodexThread.self, from: threadData) {
-                    upsertThread(decoded, treatAsServerState: true)
+                    decodedThreadFromHistory = decoded
                 }
+            }
+
+            let historyMessages = decodeMessagesFromThreadRead(threadId: threadId, threadObject: threadObject)
+            let isSuspiciousEmptyHistory = historyMessages.isEmpty
+                && shouldDeferEmptyThreadHistoryPage(
+                    threadId: threadId,
+                    loadedViaPagination: loadedViaPagination
+                )
+            if isSuspiciousEmptyHistory {
+                markThreadHistoryDeferredAfterEmptyPage(threadId: threadId)
+                debugSyncLog("thread history returned no visible rows despite prior-content evidence thread=\(threadId); keeping cached timeline and retrying")
+                return .deferredAfterEmptyPage
+            }
+
+            if let decodedThreadFromHistory {
+                upsertThread(decodedThreadFromHistory, treatAsServerState: true)
+            }
+            // Only an accepted canonical or paginated response confirms that
+            // an active cached-only sidebar row is a real server thread.
+            restoredThreadSnapshotIDs.remove(threadId)
+
+            if loadedViaPagination,
+               !loadedProvisionalJsonlFallback,
+               let paginatedNextCursor {
+                updateOlderThreadHistoryCursorFromInitialPage(
+                    threadId: threadId,
+                    cursor: paginatedNextCursor,
+                    isFreshInitialLoad: shouldSeedPaginatedInitialCursor
+                )
             }
 
             let historyTerminalStates = decodeTurnTerminalStatesFromThreadRead(threadObject)
@@ -1251,7 +1424,6 @@ extension CodexService {
                 threadId: threadId,
                 terminalStatesByTurnID: historyTerminalStates
             )
-            let historyMessages = decodeMessagesFromThreadRead(threadId: threadId, threadObject: threadObject)
             registerSubagentThreads(from: historyMessages, parentThreadId: threadId)
             if loadedViaPagination {
                 seedThreadTimelineProjectionForPaginatedHistory(
@@ -1263,13 +1435,33 @@ extension CodexService {
                 updateThreadTimelineProjectionForEmbeddedHistory(threadId: threadId, decodedMessageCount: historyMessages.count)
             }
             var outcome: ThreadHistoryLoadOutcome = loadedViaPagination
-                ? .loadedPaginatedWindow
+                ? (loadedProvisionalJsonlFallback
+                    ? .loadedProvisionalPaginatedWindow
+                    : .loadedPaginatedWindow)
                 : .loadedCanonicalHistory
             if !historyMessages.isEmpty {
-                let existingMessages = messagesByThread[threadId] ?? []
-                let activeThreadIDs = Set(activeTurnIdByThread.keys)
-                let runningIDs = runningThreadIDs
-                let usedRecentWindow = shouldForceRefresh
+                var cachedMessages = messagesByThread[threadId] ?? []
+                var cachedMessageRevision = messageRevision(for: threadId)
+                let replacesMirroredSourceEpoch = !loadedProvisionalJsonlFallback
+                    && pendingCanonicalSourceReplacementThreadIDs.contains(threadId)
+                func preparedExistingMessages(
+                    _ cached: [CodexMessage],
+                    shouldRepairMirroredCanonicalTail: Bool
+                ) -> [CodexMessage] {
+                    return shouldRepairMirroredCanonicalTail
+                        ? Self.existingMessagesForCanonicalSourceReplacement(
+                            cached,
+                            history: historyMessages
+                        )
+                        : cached
+                }
+                var existingMessages = preparedExistingMessages(
+                    cachedMessages,
+                    shouldRepairMirroredCanonicalTail: replacesMirroredSourceEpoch
+                        || !threadHasActiveOrRunningTurn(threadId)
+                )
+                var usedRecentWindow = !replacesMirroredSourceEpoch
+                    && shouldForceRefresh
                     && threadHasActiveOrRunningTurn(threadId)
                     && Self.shouldPreferRecentHistoryWindow(
                         existingCount: existingMessages.count,
@@ -1288,29 +1480,77 @@ extension CodexService {
                 } else if !loadedViaPagination, !usedRecentWindow {
                     markThreadLocalHistoryStartAuthoritative(threadId, clearRemoteCursor: true)
                 }
-                if usedRecentWindow {
-                    markThreadNeedingCanonicalHistoryReconcile(threadId)
-                }
-                let merged = try await mergeHistoryMessagesOffMainActor(
+                var merged = try await mergeHistoryMessagesOffMainActor(
                     existing: existingMessages,
                     history: historyMessages,
-                    activeThreadIDs: activeThreadIDs,
-                    runningThreadIDs: runningIDs,
+                    activeThreadIDs: Set(activeTurnIdByThread.keys),
+                    activeTurnIDs: Set(activeTurnIdByThread.values),
+                    runningThreadIDs: runningThreadIDs,
                     preferRecentWindow: usedRecentWindow
                 )
                 guard !Task.isCancelled,
                       isPerThreadRefreshCurrent(for: threadId, generation: refreshGeneration) else {
                     throw CancellationError()
                 }
+                if messageRevision(for: threadId) != cachedMessageRevision {
+                    // A detached merge must never write an older snapshot over a
+                    // delta that arrived while it was working. Rebase once on the
+                    // latest timeline; if it changes again, leave live state alone
+                    // and let the canonical reconcile scheduler retry when quiet.
+                    cachedMessages = messagesByThread[threadId] ?? []
+                    cachedMessageRevision = messageRevision(for: threadId)
+                    existingMessages = preparedExistingMessages(
+                        cachedMessages,
+                        shouldRepairMirroredCanonicalTail: replacesMirroredSourceEpoch
+                            || !threadHasActiveOrRunningTurn(threadId)
+                    )
+                    usedRecentWindow = !replacesMirroredSourceEpoch
+                        && shouldForceRefresh
+                        && threadHasActiveOrRunningTurn(threadId)
+                        && Self.shouldPreferRecentHistoryWindow(
+                            existingCount: existingMessages.count,
+                            historyCount: historyMessages.count
+                        )
+                    merged = try await mergeHistoryMessagesOffMainActor(
+                        existing: existingMessages,
+                        history: historyMessages,
+                        activeThreadIDs: Set(activeTurnIdByThread.keys),
+                        activeTurnIDs: Set(activeTurnIdByThread.values),
+                        runningThreadIDs: runningThreadIDs,
+                        preferRecentWindow: usedRecentWindow
+                    )
+                    guard !Task.isCancelled,
+                          isPerThreadRefreshCurrent(for: threadId, generation: refreshGeneration) else {
+                        throw CancellationError()
+                    }
+                    guard messageRevision(for: threadId) == cachedMessageRevision else {
+                        markThreadNeedingCanonicalHistoryReconcile(threadId)
+                        hydratedThreadIDs.insert(threadId)
+                        return .skippedForRunningThread
+                    }
+                }
+                if usedRecentWindow {
+                    markThreadNeedingCanonicalHistoryReconcile(threadId)
+                }
                 guard shouldForceRefresh || !threadHasActiveOrRunningTurn(threadId) else {
                     hydratedThreadIDs.insert(threadId)
                     return .skippedForRunningThread
+                }
+                if replacesMirroredSourceEpoch {
+                    pendingCanonicalSourceReplacementThreadIDs.remove(threadId)
+                }
+
+                if loadedProvisionalJsonlFallback {
+                    provisionalPaginatedHistoryThreadIDs.insert(threadId)
+                    markThreadNeedingCanonicalHistoryReconcile(threadId)
+                } else if loadedViaPagination {
+                    provisionalPaginatedHistoryThreadIDs.remove(threadId)
                 }
 
                 // Litter keeps any already-hydrated local transcript and merges pages into it.
                 // Do not shrink a legacy/full local cache down to only the first 5-turn page.
                 let nextMessages = merged
-                if nextMessages != existingMessages {
+                if nextMessages != cachedMessages {
                     messagesByThread[threadId] = nextMessages
                     persistMessages()
                     updateCurrentOutput(for: threadId)
@@ -1633,7 +1873,6 @@ extension CodexService {
                 if threadMessages[targetIndex].itemId == nil {
                     threadMessages[targetIndex].itemId = itemId
                 }
-                let keepID = threadMessages[targetIndex].id
                 pruneDuplicateSystemRows(
                     in: &threadMessages,
                     keepIndex: targetIndex,
@@ -1676,6 +1915,13 @@ extension CodexService {
         isStreaming: Bool,
         planPresentation: CodexPlanPresentation
     ) {
+        preparePlanItemIdentityForUpsert(
+            threadId: threadId,
+            turnId: turnId,
+            itemId: itemId,
+            planPresentation: planPresentation
+        )
+
         if let itemId, !itemId.isEmpty {
             upsertStreamingSystemItemMessage(
                 threadId: threadId,
@@ -1724,11 +1970,97 @@ extension CodexService {
         messagesByThread[threadId]?[messageIndex].planState = planState
         messagesByThread[threadId]?[messageIndex].planPresentation = resolvedPlanPresentation(
             requested: planPresentation,
-            turnId: turnId
+            turnId: turnId,
+            threadId: threadId
         )
         refreshDerivedPlanMetadata(threadId: threadId, messageIndex: messageIndex)
         persistMessages()
         updateCurrentOutput(for: threadId)
+    }
+
+    // Progress is one mutable plan snapshot per turn. Canonical history can
+    // promote its identity while replay still emits an older placeholder/call id,
+    // so bind every known alias to the one surviving row without downgrading the
+    // canonical todo-list identity.
+    private func preparePlanItemIdentityForUpsert(
+        threadId: String,
+        turnId: String?,
+        itemId: String?,
+        planPresentation: CodexPlanPresentation
+    ) {
+        guard let resolvedTurnId = normalizedStreamingItemID(turnId) else {
+            return
+        }
+
+        let syntheticItemId = syntheticStreamingItemId(turnId: resolvedTurnId, kind: .plan)
+        let syntheticKey = streamingItemMessageKey(threadId: threadId, itemId: syntheticItemId)
+
+        guard planPresentation == .progress else {
+            // A result-plan item is a separate row. Do not let a progress alias
+            // capture it merely because both items belong to the same turn.
+            if let mappedID = streamingSystemMessageByItemID[syntheticKey],
+               let mappedIndex = findMessageIndex(threadId: threadId, messageId: mappedID),
+               messagesByThread[threadId]?[mappedIndex].resolvedPlanPresentation == .progress {
+                streamingSystemMessageByItemID.removeValue(forKey: syntheticKey)
+            }
+            return
+        }
+
+        let candidateIndices = messagesByThread[threadId]?.indices.filter { index in
+            guard let candidate = messagesByThread[threadId]?[index] else {
+                return false
+            }
+            return candidate.role == .system
+                && candidate.kind == .plan
+                && normalizedStreamingItemID(candidate.turnId) == resolvedTurnId
+                && candidate.resolvedPlanPresentation == .progress
+        } ?? []
+        guard candidateIndices.count == 1,
+              let candidateIndex = candidateIndices.first,
+              let candidate = messagesByThread[threadId]?[candidateIndex] else {
+            // A synthetic alias owned by a result row (or one ambiguous progress
+            // row among several) must not capture this progress update.
+            streamingSystemMessageByItemID.removeValue(forKey: syntheticKey)
+            return
+        }
+
+        let incomingItemId = normalizedStreamingItemID(itemId)
+        let existingItemId = normalizedStreamingItemID(candidate.itemId)
+        if let existingItemId {
+            streamingSystemMessageByItemID[
+                streamingItemMessageKey(threadId: threadId, itemId: existingItemId)
+            ] = candidate.id
+        }
+        if let incomingItemId {
+            streamingSystemMessageByItemID[
+                streamingItemMessageKey(threadId: threadId, itemId: incomingItemId)
+            ] = candidate.id
+        }
+        streamingSystemMessageByItemID[syntheticKey] = candidate.id
+
+        guard let incomingItemId,
+              incomingItemId != existingItemId,
+              shouldAdoptIncomingProgressPlanItemID(
+                existingItemId: existingItemId,
+                incomingItemId: incomingItemId
+              ) else {
+            return
+        }
+        messagesByThread[threadId]?[candidateIndex].itemId = incomingItemId
+    }
+
+    private func shouldAdoptIncomingProgressPlanItemID(
+        existingItemId: String?,
+        incomingItemId: String
+    ) -> Bool {
+        guard let existingItemId else {
+            return true
+        }
+        if incomingItemId.hasPrefix("todo-list-") {
+            return !existingItemId.hasPrefix("todo-list-")
+        }
+        return Self.isProvisionalSystemItemIdentifier(existingItemId)
+            && !Self.isProvisionalSystemItemIdentifier(incomingItemId)
     }
 
     // Completes a streamed plan without creating a placeholder or replacing its
@@ -1754,7 +2086,8 @@ extension CodexService {
         messagesByThread[threadId]?[messageIndex].isStreaming = false
         messagesByThread[threadId]?[messageIndex].planPresentation = resolvedPlanPresentation(
             requested: .resultCompletedItem,
-            turnId: turnId
+            turnId: turnId,
+            threadId: threadId
         )
         refreshDerivedPlanMetadata(threadId: threadId, messageIndex: messageIndex)
 
@@ -2247,32 +2580,73 @@ extension CodexService {
         let incomingToolActivityKey = kind == .toolActivity
             ? toolActivityPreviewKey(from: text)
             : nil
+        if let mappedID = streamingSystemMessageByItemID[key],
+           findMessageIndex(threadId: threadId, messageId: mappedID) == nil {
+            streamingSystemMessageByItemID.removeValue(forKey: key)
+        }
+        if let syntheticKey,
+           let mappedID = streamingSystemMessageByItemID[syntheticKey],
+           findMessageIndex(threadId: threadId, messageId: mappedID) == nil {
+            streamingSystemMessageByItemID.removeValue(forKey: syntheticKey)
+        }
         let messageID: String?
         if let existingMessageID = streamingSystemMessageByItemID[key] {
             messageID = existingMessageID
+        } else if let normalizedIncomingItemID = normalizedStreamingItemID(itemId),
+                  let persistedMessage = messagesByThread[threadId]?
+                    .filter({ candidate in
+                        guard candidate.role == .system,
+                              candidate.kind == kind || candidate.kind == .chat,
+                              let candidateItemID = normalizedStreamingItemID(candidate.itemId) else {
+                            return false
+                        }
+                        return candidateItemID == normalizedIncomingItemID
+                    })
+                    .min(by: { $0.orderIndex < $1.orderIndex }) {
+            // Process relaunch clears the in-memory item lookup, but persisted
+            // provider identity is still exact. Rehydrate it before any semantic
+            // fallback so replayed completions update the original row in place.
+            streamingSystemMessageByItemID[key] = persistedMessage.id
+            if let syntheticKey {
+                streamingSystemMessageByItemID[syntheticKey] = persistedMessage.id
+            }
+            messageID = persistedMessage.id
         } else if let syntheticKey,
-                  let migratedMessageID = streamingSystemMessageByItemID[syntheticKey] {
+                  kind != .commandExecution,
+                  let migratedMessageID = streamingSystemMessageByItemID[syntheticKey],
+                  canReuseSyntheticSystemItemAlias(
+                    threadId: threadId,
+                    messageId: migratedMessageID,
+                    incomingItemId: itemId,
+                    kind: kind
+                  ) {
             // Rebind the synthetic turn key to the real item id once the server starts sending it.
             streamingSystemMessageByItemID[key] = migratedMessageID
             streamingSystemMessageByItemID.removeValue(forKey: syntheticKey)
             messageID = migratedMessageID
         } else if kind == .commandExecution,
                   let resolvedTurnId, !resolvedTurnId.isEmpty,
-                  let incomingCommandKey,
-                  let existingMessageID = messagesByThread[threadId]?.reversed().first(where: { candidate in
-                      guard candidate.role == .system,
-                            candidate.kind == .commandExecution,
-                            candidate.turnId == resolvedTurnId,
-                            let candidateKey = commandExecutionPreviewKey(from: candidate.text) else {
-                          return false
-                      }
-                      return candidateKey == incomingCommandKey
-                  })?.id {
-            streamingSystemMessageByItemID[key] = existingMessageID
-            if let syntheticKey {
-                streamingSystemMessageByItemID[syntheticKey] = existingMessageID
+                  let incomingCommandKey {
+            let matchingRows = (messagesByThread[threadId] ?? []).filter { candidate in
+                guard candidate.role == .system,
+                      candidate.kind == .commandExecution,
+                      candidate.turnId == resolvedTurnId,
+                      Self.isProvisionalSystemItemIdentifier(candidate.itemId)
+                        || Self.isProvisionalSystemItemIdentifier(itemId),
+                      let candidateKey = commandExecutionPreviewKey(from: candidate.text) else {
+                    return false
+                }
+                return candidateKey == incomingCommandKey
             }
-            messageID = existingMessageID
+            if matchingRows.count == 1, let existingMessageID = matchingRows.first?.id {
+                streamingSystemMessageByItemID[key] = existingMessageID
+                if let syntheticKey {
+                    streamingSystemMessageByItemID[syntheticKey] = existingMessageID
+                }
+                messageID = existingMessageID
+            } else {
+                messageID = nil
+            }
         } else if kind == .toolActivity,
                   let resolvedTurnId, !resolvedTurnId.isEmpty,
                   let incomingToolActivityKey {
@@ -2335,10 +2709,9 @@ extension CodexService {
             messageID = existingMessageID
         } else if kind == .thinking,
                   let resolvedTurnId, !resolvedTurnId.isEmpty,
-                  let existingMessageID = reusableProvisionalThinkingRowID(
+                  let existingMessageID = uniqueProvisionalThinkingRowID(
                       threadId: threadId,
-                      turnId: resolvedTurnId,
-                      incomingItemId: itemId
+                      turnId: resolvedTurnId
                   ) {
             // Rollout mirrors aggregate a turn's reasoning under one synthetic
             // "rollout-thinking:" id while IPC mirrors stream real per-item ids.
@@ -2405,6 +2778,10 @@ extension CodexService {
                 // Adopt the real reasoning identity so a later real section opens
                 // its own row instead of overwriting this one through the fallback.
                 messagesByThread[threadId]?[index].itemId = itemId
+            } else if kind == .commandExecution,
+                      Self.isProvisionalSystemItemIdentifier(messagesByThread[threadId]?[index].itemId),
+                      !Self.isProvisionalSystemItemIdentifier(itemId) {
+                messagesByThread[threadId]?[index].itemId = itemId
             }
             if var threadMessages = messagesByThread[threadId],
                let refreshedIndex = threadMessages.indices.first(where: { threadMessages[$0].id == messageID }) {
@@ -2438,6 +2815,49 @@ extension CodexService {
                             turnId: resolvedTurnId,
                             toolActivityKey: incomingToolActivityKey
                         )
+                    }
+                }
+                if let normalizedIncomingItemID = normalizedStreamingItemID(itemId) {
+                    let duplicateRows = threadMessages.filter { candidate in
+                        guard candidate.id != keepID,
+                              candidate.role == .system,
+                              candidate.kind == kind || candidate.kind == .chat,
+                              let candidateItemID = normalizedStreamingItemID(candidate.itemId) else {
+                            return false
+                        }
+                        return candidateItemID == normalizedIncomingItemID
+                    }
+                    if let keepIndex = threadMessages.firstIndex(where: { $0.id == keepID }) {
+                        let shouldSalvageDuplicateText = incomingTrimmed.isEmpty
+                            || isStreamingPlaceholder(incomingTrimmed, for: kind)
+                        for duplicate in duplicateRows {
+                            if shouldSalvageDuplicateText,
+                               duplicate.text.utf8.count > threadMessages[keepIndex].text.utf8.count {
+                                threadMessages[keepIndex].text = duplicate.text
+                            }
+                            let keeperPlanCount = threadMessages[keepIndex].planState?.steps.count ?? 0
+                            let duplicatePlanCount = duplicate.planState?.steps.count ?? 0
+                            if duplicate.planState != nil,
+                               (threadMessages[keepIndex].planState == nil
+                                || duplicatePlanCount > keeperPlanCount) {
+                                threadMessages[keepIndex].planState = duplicate.planState
+                                threadMessages[keepIndex].planPresentation = duplicate.planPresentation
+                                threadMessages[keepIndex].proposedPlan = duplicate.proposedPlan
+                            }
+                            if threadMessages[keepIndex].attachments.isEmpty,
+                               !duplicate.attachments.isEmpty {
+                                threadMessages[keepIndex].attachments = duplicate.attachments
+                            }
+                        }
+                    }
+                    threadMessages.removeAll { candidate in
+                        guard candidate.id != keepID,
+                              candidate.role == .system,
+                              candidate.kind == kind || candidate.kind == .chat,
+                              let candidateItemID = normalizedStreamingItemID(candidate.itemId) else {
+                            return false
+                        }
+                        return candidateItemID == normalizedIncomingItemID
                     }
                 }
                 if let finalIndex = threadMessages.indices.first(where: { threadMessages[$0].id == keepID }) {
@@ -2639,27 +3059,59 @@ extension CodexService {
         return lines.joined(separator: "\n")
     }
 
-    // Desktop mirrors race two reasoning identities for one turn: the IPC
-    // follower streams real per-item ids while the rollout tail aggregates the
-    // turn under one synthetic "rollout-thinking:" id. Rebinding is only safe
-    // when a side is provisional; two distinct real ids stay separate sections.
-    private func reusableProvisionalThinkingRowID(
+    // A stable reasoning id that misses exact lookup may only adopt one clearly
+    // provisional row. Two stable sections, or multiple provisional candidates,
+    // are distinct/ambiguous and must not overwrite one another.
+    private func uniqueProvisionalThinkingRowID(
         threadId: String,
-        turnId: String,
-        incomingItemId: String
+        turnId: String
     ) -> String? {
-        guard let candidate = messagesByThread[threadId]?.last(where: { message in
+        let candidates = (messagesByThread[threadId] ?? []).filter { message in
             message.role == .system
                 && message.kind == .thinking
                 && message.turnId == turnId
-        }) else {
-            return nil
+                && Self.isProvisionalThinkingIdentifier(message.itemId)
         }
-        guard Self.isProvisionalThinkingIdentifier(incomingItemId)
-                || Self.isProvisionalThinkingIdentifier(candidate.itemId) else {
+        guard candidates.count == 1, let candidate = candidates.first else {
             return nil
         }
         return candidate.id
+    }
+
+    // A turn-scoped synthetic alias can bridge a provisional reasoning row to a
+    // real id, but it must never redirect one stable reasoning section into a
+    // different stable item. Command rows use their stricter semantic fallback.
+    private func canReuseSyntheticSystemItemAlias(
+        threadId: String,
+        messageId: String,
+        incomingItemId: String,
+        kind: CodexMessageKind
+    ) -> Bool {
+        guard kind == .thinking else {
+            return true
+        }
+        guard let index = findMessageIndex(threadId: threadId, messageId: messageId),
+              let candidate = messagesByThread[threadId]?[index],
+              candidate.role == .system,
+              candidate.kind == .thinking || candidate.kind == .chat else {
+            return false
+        }
+
+        let candidateItemId = normalizedStreamingItemID(candidate.itemId)
+        let incomingItemId = normalizedStreamingItemID(incomingItemId)
+        if let candidateItemId, let incomingItemId, candidateItemId == incomingItemId {
+            return true
+        }
+        guard Self.isProvisionalThinkingIdentifier(candidateItemId) else {
+            return false
+        }
+        let provisionalCandidates = (messagesByThread[threadId] ?? []).filter { message in
+            message.role == .system
+                && message.kind == .thinking
+                && message.turnId == candidate.turnId
+                && Self.isProvisionalThinkingIdentifier(message.itemId)
+        }
+        return provisionalCandidates.count == 1 && provisionalCandidates[0].id == candidate.id
     }
 
     // Allows text-based reuse only for provisional rows; stable item ids must stay distinct.
@@ -3057,12 +3509,16 @@ extension CodexService {
             }
 
             if let normalizedTurnId, !normalizedTurnId.isEmpty {
-                return threadMessages.indices.reversed().first(where: { index in
+                let provisionalMatches = threadMessages.indices.filter { index in
                     let candidate = threadMessages[index]
                     return candidate.role == .system
                         && candidate.kind == .thinking
                         && candidate.turnId == normalizedTurnId
-                })
+                        && Self.isProvisionalThinkingIdentifier(candidate.itemId)
+                }
+                if provisionalMatches.count == 1 {
+                    return provisionalMatches[0]
+                }
             }
 
             return nil
@@ -3082,8 +3538,8 @@ extension CodexService {
            let normalizedTurnId, !normalizedTurnId.isEmpty {
             threadMessages[targetIndex].turnId = normalizedTurnId
         }
-        if threadMessages[targetIndex].itemId == nil,
-           let normalizedItemId, !normalizedItemId.isEmpty {
+        if let normalizedItemId, !normalizedItemId.isEmpty,
+           Self.isProvisionalThinkingIdentifier(threadMessages[targetIndex].itemId) {
             threadMessages[targetIndex].itemId = normalizedItemId
         }
 
@@ -3368,7 +3824,7 @@ extension CodexService {
     ) -> Bool {
         let normalizedTurnId = turnId.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedTurnId.isEmpty,
-              terminalStateByTurnID[normalizedTurnId] != nil,
+              turnTerminalState(for: normalizedTurnId, threadId: threadId) != nil,
               activeTurnIdByThread[threadId] != normalizedTurnId,
               var threadMessages = messagesByThread[threadId] else {
             return false
@@ -3426,6 +3882,7 @@ extension CodexService {
         threadId: String,
         turnId: String?,
         itemId: String?,
+        sourceItemKey: String? = nil,
         assistantPhase: String? = nil,
         text: String
     ) {
@@ -3439,6 +3896,7 @@ extension CodexService {
         var resolvedAssistantMessageId: String?
         let explicitTurnId = normalizedStreamingItemID(turnId)
         let explicitItemId = normalizedStreamingItemID(itemId)
+        let normalizedSourceItemKey = normalizedStreamingItemID(sourceItemKey)
         let activeTurnIdForThread = activeTurnIdByThread[threadId]
         let hasExplicitIdentity = explicitTurnId != nil || explicitItemId != nil
 
@@ -3469,6 +3927,64 @@ extension CodexService {
         }
         flushPendingAssistantDeltas(for: threadId, turnId: resolvedTurnId, itemId: explicitItemId)
 
+        // The bridge can replay one assistant item as a JSONL/rollout row and later as an
+        // item with Codex's provider id. The alias is generated per turn, so it is safe to use
+        // as an exact source identity here and avoids text-only reconciliation across handoffs.
+        if let normalizedSourceItemKey,
+           let resolvedTurnId {
+            let eligibleAliasIndices = (messagesByThread[threadId] ?? []).indices.filter { index in
+                let candidate = messagesByThread[threadId]![index]
+                return candidate.role == .assistant
+                    && candidate.turnId == resolvedTurnId
+                    && candidate.sourceItemKey == normalizedSourceItemKey
+                    && Self.sourceItemIdentityAllowsReconcile(candidate.itemId, explicitItemId)
+            }
+            if eligibleAliasIndices.count == 1, let aliasMatchIndex = eligibleAliasIndices.first {
+                let existingAliasText = messagesByThread[threadId]?[aliasMatchIndex].text ?? ""
+                // Buffered/rollout replay is older than a still-streaming local row. Do not let a
+                // shorter stale copy replace live text or close its stream just because its source
+                // alias matches.
+                if isApplyingReplayedBridgeEvent,
+                   messagesByThread[threadId]?[aliasMatchIndex].isStreaming == true,
+                   existingAliasText.utf8.count > trimmedText.utf8.count {
+                    return
+                }
+                messagesByThread[threadId]?[aliasMatchIndex].text = Self.assistantCompletionTextPreservingImages(
+                    existingText: existingAliasText,
+                    canonicalText: trimmedText
+                )
+                messagesByThread[threadId]?[aliasMatchIndex].isStreaming = false
+                applyAssistantPhaseIfNeeded(
+                    threadId: threadId,
+                    messageIndex: aliasMatchIndex,
+                    assistantPhase: normalizedPhase
+                )
+                if let explicitItemId,
+                   (messagesByThread[threadId]?[aliasMatchIndex].itemId == nil
+                       || messagesByThread[threadId]?[aliasMatchIndex].itemId.map(CodexSyntheticIdentifiers.isMirrorMintedItemID) == true) {
+                    promoteAssistantItemIdentity(
+                        threadId: threadId,
+                        turnId: resolvedTurnId,
+                        messageIndex: aliasMatchIndex,
+                        providerItemId: explicitItemId
+                    )
+                }
+                refreshDerivedPlanMetadata(threadId: threadId, messageIndex: aliasMatchIndex)
+                resolvedAssistantMessageId = messagesByThread[threadId]?[aliasMatchIndex].id
+                assistantCompletionFingerprintByThread[threadId] = (text: trimmedText, timestamp: now)
+                if let resolvedAssistantMessageId {
+                    persistMessages()
+                    noteAssistantMessage(
+                        threadId: threadId,
+                        turnId: resolvedTurnId,
+                        assistantMessageId: resolvedAssistantMessageId
+                    )
+                    updateCurrentOutput(for: threadId)
+                }
+                return
+            }
+        }
+
         if resolvedTurnId == nil, explicitItemId == nil,
            let fingerprint = assistantCompletionFingerprintByThread[threadId],
            fingerprint.text == trimmedText,
@@ -3479,6 +3995,7 @@ extension CodexService {
         if let replayTerminalMessageId = absorbAssistantBlockReplayCompletion(
             threadId: threadId,
             turnId: resolvedTurnId,
+            itemId: explicitItemId,
             text: trimmedText
         ) {
             applyAssistantPhaseIfNeeded(
@@ -3486,6 +4003,16 @@ extension CodexService {
                 messageId: replayTerminalMessageId,
                 assistantPhase: normalizedPhase
             )
+            if let replayTerminalMessageIndex = findMessageIndex(
+                threadId: threadId,
+                messageId: replayTerminalMessageId
+            ) {
+                applyAssistantSourceItemKeyIfNeeded(
+                    threadId: threadId,
+                    messageIndex: replayTerminalMessageIndex,
+                    sourceItemKey: normalizedSourceItemKey
+                )
+            }
             assistantCompletionFingerprintByThread[threadId] = (text: trimmedText, timestamp: now)
             _ = mergeGeneratedImageArtifactsIntoAssistantMessage(
                 threadId: threadId,
@@ -3525,6 +4052,11 @@ extension CodexService {
             if messagesByThread[threadId]?[imagePreviewIndex].itemId == nil, let explicitItemId {
                 messagesByThread[threadId]?[imagePreviewIndex].itemId = explicitItemId
             }
+            applyAssistantSourceItemKeyIfNeeded(
+                threadId: threadId,
+                messageIndex: imagePreviewIndex,
+                sourceItemKey: normalizedSourceItemKey
+            )
             refreshDerivedPlanMetadata(threadId: threadId, messageIndex: imagePreviewIndex)
             let messageId = messagesByThread[threadId]?[imagePreviewIndex].id
             assistantCompletionFingerprintByThread[threadId] = (text: trimmedText, timestamp: now)
@@ -3558,6 +4090,11 @@ extension CodexService {
                 threadId: threadId,
                 messageIndex: duplicateIndex,
                 assistantPhase: normalizedPhase
+            )
+            applyAssistantSourceItemKeyIfNeeded(
+                threadId: threadId,
+                messageIndex: duplicateIndex,
+                sourceItemKey: normalizedSourceItemKey
             )
             refreshDerivedPlanMetadata(threadId: threadId, messageIndex: duplicateIndex)
             assistantCompletionFingerprintByThread[threadId] = (text: trimmedText, timestamp: now)
@@ -3616,6 +4153,11 @@ extension CodexService {
                     if messagesByThread[threadId]?[targetIndex].turnId == nil {
                         messagesByThread[threadId]?[targetIndex].turnId = resolvedTurnId
                     }
+                    applyAssistantSourceItemKeyIfNeeded(
+                        threadId: threadId,
+                        messageIndex: targetIndex,
+                        sourceItemKey: normalizedSourceItemKey
+                    )
                     refreshDerivedPlanMetadata(threadId: threadId, messageIndex: targetIndex)
                     resolvedAssistantMessageId = messagesByThread[threadId]?[targetIndex].id
                 }
@@ -3679,6 +4221,11 @@ extension CodexService {
             if messagesByThread[threadId]?[messageIndex].turnId == nil {
                 messagesByThread[threadId]?[messageIndex].turnId = resolvedTurnId
             }
+            applyAssistantSourceItemKeyIfNeeded(
+                threadId: threadId,
+                messageIndex: messageIndex,
+                sourceItemKey: normalizedSourceItemKey
+            )
             refreshDerivedPlanMetadata(threadId: threadId, messageIndex: messageIndex)
             resolvedAssistantMessageId = messagesByThread[threadId]?[messageIndex].id
         } else {
@@ -3700,6 +4247,11 @@ extension CodexService {
                 if messagesByThread[threadId]?[existingItemIndex].turnId == nil {
                     messagesByThread[threadId]?[existingItemIndex].turnId = resolvedTurnId
                 }
+                applyAssistantSourceItemKeyIfNeeded(
+                    threadId: threadId,
+                    messageIndex: existingItemIndex,
+                    sourceItemKey: normalizedSourceItemKey
+                )
                 refreshDerivedPlanMetadata(threadId: threadId, messageIndex: existingItemIndex)
                 resolvedAssistantMessageId = messagesByThread[threadId]?[existingItemIndex].id
             } else if let duplicateIndex = messagesByThread[threadId]?.lastIndex(where: { candidate in
@@ -3724,6 +4276,11 @@ extension CodexService {
                 if messagesByThread[threadId]?[duplicateIndex].turnId == nil {
                     messagesByThread[threadId]?[duplicateIndex].turnId = resolvedTurnId
                 }
+                applyAssistantSourceItemKeyIfNeeded(
+                    threadId: threadId,
+                    messageIndex: duplicateIndex,
+                    sourceItemKey: normalizedSourceItemKey
+                )
                 refreshDerivedPlanMetadata(threadId: threadId, messageIndex: duplicateIndex)
                 resolvedAssistantMessageId = messagesByThread[threadId]?[duplicateIndex].id
             } else {
@@ -3735,6 +4292,7 @@ extension CodexService {
                     text: trimmedText,
                     turnId: resolvedTurnId,
                     itemId: explicitItemId,
+                    sourceItemKey: normalizedSourceItemKey,
                     isStreaming: false,
                     deliveryState: .confirmed
                 )
@@ -3762,6 +4320,58 @@ extension CodexService {
             )
         }
         updateCurrentOutput(for: threadId)
+    }
+
+    // Keep the bridge alias once it has been proven for this row. It is intentionally
+    // write-once: a different alias in the same turn is a distinct assistant item.
+    func applyAssistantSourceItemKeyIfNeeded(
+        threadId: String,
+        messageIndex: Int,
+        sourceItemKey: String?
+    ) {
+        guard let sourceItemKey,
+              !sourceItemKey.isEmpty,
+              messagesByThread[threadId]?[messageIndex].sourceItemKey == nil else {
+            return
+        }
+        messagesByThread[threadId]?[messageIndex].sourceItemKey = sourceItemKey
+    }
+
+    // A canonical provider id replaces a synthetic mirror id. Move every live lookup and queued
+    // delta to the new identity in the same mutation so a late chunk cannot revive a second row.
+    func promoteAssistantItemIdentity(
+        threadId: String,
+        turnId: String,
+        messageIndex: Int,
+        providerItemId: String
+    ) {
+        guard let oldItemId = messagesByThread[threadId]?[messageIndex].itemId,
+              oldItemId != providerItemId else {
+            messagesByThread[threadId]?[messageIndex].itemId = providerItemId
+            return
+        }
+        messagesByThread[threadId]?[messageIndex].itemId = providerItemId
+
+        let oldLookupKey = assistantStreamingMessageKey(
+            threadId: threadId,
+            turnId: turnId,
+            itemId: oldItemId
+        )
+        let newLookupKey = assistantStreamingMessageKey(
+            threadId: threadId,
+            turnId: turnId,
+            itemId: providerItemId
+        )
+        if let messageID = streamingAssistantMessageByItemKey.removeValue(forKey: oldLookupKey) {
+            streamingAssistantMessageByItemKey[newLookupKey] = messageID
+        }
+
+        migratePendingAssistantDelta(
+            threadId: threadId,
+            turnId: turnId,
+            sourceItemId: oldItemId,
+            destinationItemId: providerItemId
+        )
     }
 
     // Renders image-generation artifacts as assistant image previews without embedding image bytes.
@@ -4021,6 +4631,7 @@ extension CodexService {
     private func absorbAssistantBlockReplayCompletion(
         threadId: String,
         turnId: String?,
+        itemId: String?,
         text: String
     ) -> String? {
         guard var threadMessages = messagesByThread[threadId] else {
@@ -4031,6 +4642,7 @@ extension CodexService {
             in: threadMessages,
             threadId: threadId,
             turnId: turnId,
+            itemId: itemId,
             text: text
         ) {
             var didMutate = false
@@ -4237,6 +4849,7 @@ extension CodexService {
                 in: nextMessages,
                 threadId: threadId,
                 turnId: message.turnId,
+                itemId: message.itemId,
                 text: message.text,
                 excludingMessageID: message.id
             ) else {
@@ -4268,6 +4881,7 @@ extension CodexService {
         in messages: [CodexMessage],
         threadId: String,
         turnId: String?,
+        itemId: String?,
         text: String,
         excludingMessageID: String
     ) -> String? {
@@ -4275,6 +4889,7 @@ extension CodexService {
             in: messages,
             threadId: threadId,
             turnId: turnId,
+            itemId: itemId,
             text: text,
             excludingMessageID: excludingMessageID
         ) {
@@ -4401,15 +5016,24 @@ extension CodexService {
 
     // Marks streaming assistant state complete once turn/completed arrives.
     func markTurnCompleted(threadId: String, turnId: String?) {
-        let resolvedTurnId = turnId ?? activeTurnIdByThread[threadId]
+        let currentActiveTurnId = activeTurnIdByThread[threadId]
+        let resolvedTurnId = turnId ?? currentActiveTurnId
         flushPendingAssistantDeltas(for: threadId, turnId: resolvedTurnId)
         flushPendingSystemDeltasForTurn(threadId: threadId, turnId: resolvedTurnId)
 
-        clearRunningState(for: threadId)
-        clearRunningThreadWatch(threadId)
+        // Desktop can report a late terminal event for turn A after turn B has
+        // already become the thread's active turn. Completing A must not clear
+        // B's running badge and then wait for a later state probe to restore it.
+        let completesCurrentThreadRun = resolvedTurnId == nil
+            || currentActiveTurnId == nil
+            || resolvedTurnId == currentActiveTurnId
+        if completesCurrentThreadRun {
+            clearRunningState(for: threadId)
+            clearRunningThreadWatch(threadId)
+        }
         let shouldFinalizePlanSteps: Bool = {
             if let resolvedTurnId {
-                return terminalStateByTurnID[resolvedTurnId] == .completed
+                return turnTerminalState(for: resolvedTurnId, threadId: threadId) == .completed
             }
             return latestTurnTerminalStateByThread[threadId] == .completed
         }()
@@ -4419,7 +5043,7 @@ extension CodexService {
         }
 
         if let resolvedTurnId,
-           activeTurnIdByThread[threadId] == resolvedTurnId {
+           currentActiveTurnId == resolvedTurnId {
             setActiveTurnID(nil, for: threadId)
         } else if resolvedTurnId == nil {
             setActiveTurnID(nil, for: threadId)
@@ -4438,9 +5062,10 @@ extension CodexService {
             var didMutate = false
             let belongsToCompletedTurn: (CodexMessage) -> Bool = { message in
                 if let resolvedTurnId {
-                    return message.turnId == resolvedTurnId || message.turnId == nil
+                    return message.turnId == resolvedTurnId
+                        || (completesCurrentThreadRun && message.turnId == nil)
                 }
-                return message.isStreaming
+                return completesCurrentThreadRun && message.isStreaming
             }
 
             for index in threadMessages.indices where threadMessages[index].role == .system
@@ -4516,10 +5141,11 @@ extension CodexService {
                 threadMessages.removeAll {
                     $0.role == .system
                         && $0.kind == .thinking
-                        && ($0.turnId == resolvedTurnId || $0.turnId == nil)
+                        && ($0.turnId == resolvedTurnId
+                            || (completesCurrentThreadRun && $0.turnId == nil))
                         && shouldPruneThinkingRowAfterTurnCompletion($0)
                 }
-            } else {
+            } else if completesCurrentThreadRun {
                 threadMessages.removeAll {
                     $0.role == .system
                         && $0.kind == .thinking
@@ -4535,7 +5161,11 @@ extension CodexService {
             }
         }
 
-        streamingSystemMessageByItemID = streamingSystemMessageByItemID.filter { _, messageId in
+        let completedThreadItemKeyPrefix = "\(threadId)|item:"
+        streamingSystemMessageByItemID = streamingSystemMessageByItemID.filter { key, messageId in
+            guard key.hasPrefix(completedThreadItemKeyPrefix) else {
+                return true
+            }
             guard let index = findMessageIndex(threadId: threadId, messageId: messageId),
                   let message = messagesByThread[threadId]?[index] else {
                 return false
@@ -4544,12 +5174,17 @@ extension CodexService {
                 return true
             }
             if message.kind == .thinking {
-                return false
+                if let resolvedTurnId {
+                    return message.turnId != resolvedTurnId
+                        && (!completesCurrentThreadRun || message.turnId != nil)
+                }
+                return !completesCurrentThreadRun
             }
             if let resolvedTurnId {
                 return message.turnId != resolvedTurnId
+                    && (!completesCurrentThreadRun || message.turnId != nil)
             }
-            return !message.isStreaming
+            return !completesCurrentThreadRun || !message.isStreaming
         }
 
         // Keep turn->thread mapping after completion to support late-arriving
@@ -4577,6 +5212,13 @@ extension CodexService {
                 didMutate = true
             }
         }
+
+        // A reconnect can re-announce the same in-flight turn after these
+        // volatile running flags are cleared. Preserve one continuity claim so
+        // its start event does not look like a brand-new run generation.
+        pendingReconnectRunContinuityThreadIDs.formUnion(runningThreadIDs)
+        pendingReconnectRunContinuityThreadIDs.formUnion(protectedRunningFallbackThreadIDs)
+        pendingReconnectRunContinuityThreadIDs.formUnion(activeTurnIdByThread.keys)
 
         activeTurnId = nil
         activeTurnIdByThread.removeAll()
@@ -4624,12 +5266,19 @@ extension CodexService {
             return
         }
 
-        guard !terminalStateByTurnID.isEmpty else {
+        let persistableStates = terminalStateByTurnID.filter { turnId, _ in
+            !CodexSyntheticIdentifiers.isProjectedDesktopTurnID(turnId)
+        }
+        if persistableStates.count != terminalStateByTurnID.count {
+            terminalStateByTurnID = persistableStates
+        }
+
+        guard !persistableStates.isEmpty else {
             defaults.removeObject(forKey: macScopedDefaultsKey(Self.turnTerminalStatesDefaultsKey))
             return
         }
 
-        guard let data = try? encoder.encode(terminalStateByTurnID) else {
+        guard let data = try? encoder.encode(persistableStates) else {
             defaults.removeObject(forKey: macScopedDefaultsKey(Self.turnTerminalStatesDefaultsKey))
             return
         }
@@ -4657,7 +5306,6 @@ extension CodexService {
             migratePendingTurnFallbackDelta(
                 threadId: threadId,
                 turnId: turnId,
-                destinationStreamID: streamID,
                 normalizedItemId: normalizedItemId
             )
         }
@@ -4686,33 +5334,48 @@ extension CodexService {
     private func migratePendingTurnFallbackDelta(
         threadId: String,
         turnId: String,
-        destinationStreamID: String,
         normalizedItemId: String?
     ) {
-        let fallbackStreamID = assistantDeltaStreamID(threadId: threadId, turnId: turnId, itemId: nil)
-        guard fallbackStreamID != destinationStreamID,
-              let fallbackDelta = pendingAssistantDeltaByStreamID.removeValue(forKey: fallbackStreamID) else {
+        migratePendingAssistantDelta(
+            threadId: threadId,
+            turnId: turnId,
+            sourceItemId: nil,
+            destinationItemId: normalizedItemId
+        )
+    }
+
+    // One identity migration path for turn-scoped fallback -> item and synthetic item ->
+    // provider item. It preserves the stream queue order, concatenates pending text once, and
+    // keeps a batch replay-only only when both sides were replay-only.
+    private func migratePendingAssistantDelta(
+        threadId: String,
+        turnId: String,
+        sourceItemId: String?,
+        destinationItemId: String?
+    ) {
+        let sourceStreamID = assistantDeltaStreamID(threadId: threadId, turnId: turnId, itemId: sourceItemId)
+        let destinationStreamID = assistantDeltaStreamID(threadId: threadId, turnId: turnId, itemId: destinationItemId)
+        guard sourceStreamID != destinationStreamID,
+              let sourceDelta = pendingAssistantDeltaByStreamID.removeValue(forKey: sourceStreamID) else {
             return
         }
 
-        let fallbackContext = pendingAssistantDeltaContextByStreamID[fallbackStreamID]
-        pendingAssistantDeltaContextByStreamID.removeValue(forKey: fallbackStreamID)
-        pendingAssistantDeltaStreamOrder.removeAll { $0 == fallbackStreamID }
-        if pendingAssistantDeltaByStreamID[destinationStreamID] == nil,
-           !pendingAssistantDeltaStreamOrder.contains(destinationStreamID) {
+        let sourceContext = pendingAssistantDeltaContextByStreamID.removeValue(forKey: sourceStreamID)
+        pendingAssistantDeltaStreamOrder.removeAll { $0 == sourceStreamID }
+        if !pendingAssistantDeltaStreamOrder.contains(destinationStreamID) {
             pendingAssistantDeltaStreamOrder.append(destinationStreamID)
         }
         pendingAssistantDeltaByStreamID[destinationStreamID] = mergeAssistantDelta(
             existingText: pendingAssistantDeltaByStreamID[destinationStreamID] ?? "",
-            incomingDelta: fallbackDelta
+            incomingDelta: sourceDelta
         )
         let destinationIsReplay = pendingAssistantDeltaContextByStreamID[destinationStreamID]?.isReplay ?? true
         pendingAssistantDeltaContextByStreamID[destinationStreamID] = (
             threadId: threadId,
             turnId: turnId.trimmingCharacters(in: .whitespacesAndNewlines),
-            itemId: normalizedItemId,
-            assistantPhase: fallbackContext?.assistantPhase,
-            isReplay: destinationIsReplay && (fallbackContext?.isReplay ?? true)
+            itemId: destinationItemId,
+            assistantPhase: sourceContext?.assistantPhase,
+            isReplay: destinationIsReplay && (sourceContext?.isReplay ?? true)
         )
     }
 
@@ -4932,6 +5595,7 @@ extension CodexService {
         let revision = messageRevisionByThread[threadId] ?? 0
         let activeTurnID = activeTurnIdByThread[threadId]
         let isThreadRunning = threadHasActiveOrRunningTurn(threadId)
+        let runStartGeneration = runStartGenerationByThread[threadId] ?? 0
         let usesPaginatedHistory = supportsTurnPagination && initialTurnsLoadedByThreadID.contains(threadId)
         let projectionSourceMessages = snapshotProjectionSourceMessages(
             threadId: threadId,
@@ -4945,7 +5609,7 @@ extension CodexService {
         let completedTurnIDs = Set(
             projectedMessages.compactMap { message -> String? in
                 guard let turnId = message.turnId,
-                      terminalStateByTurnID[turnId] == .completed else {
+                      turnTerminalState(for: turnId, threadId: threadId) == .completed else {
                     return nil
                 }
                 return turnId
@@ -4972,6 +5636,7 @@ extension CodexService {
         state.messageRevision = revision
         state.activeTurnID = activeTurnID
         state.isThreadRunning = isThreadRunning
+        state.runStartGeneration = runStartGeneration
         state.latestTurnTerminalState = latestTurnTerminalState
         state.completedTurnIDs = completedTurnIDs
         state.stoppedTurnIDs = stoppedTurnIDs
@@ -4991,6 +5656,7 @@ extension CodexService {
             timelineChangeToken: revision,
             activeTurnID: activeTurnID,
             isThreadRunning: isThreadRunning,
+            runStartGeneration: runStartGeneration,
             latestTurnTerminalState: latestTurnTerminalState,
             completedTurnIDs: completedTurnIDs,
             stoppedTurnIDs: stoppedTurnIDs,
@@ -5008,6 +5674,10 @@ extension CodexService {
 
     // Both paginated and legacy threads use the same bounded render window. Paginated fetches
     // prepend pages into the backing cache, then this projection reveals them deliberately.
+    //
+    // The newest materialized turn is an exception: it is the turn a user just opened and it
+    // must remain coherent even while running metadata catches up after reconnect. In particular,
+    // never render just the final 80 tool/reasoning rows of a 500-row turn without its prompt.
     func snapshotProjectionSourceMessages(
         threadId: String,
         from messages: [CodexMessage],
@@ -5021,15 +5691,61 @@ extension CodexService {
             return messages
         }
 
-        let visibleTail = Array(messages.suffix(limit))
+        let shouldKeepCompleteNewestTurn = threadHasActiveOrRunningTurn(threadId)
+            || pendingReconnectRunContinuityThreadIDs.contains(threadId)
+            || desktopMirroredRunningThreadIDs.contains(threadId)
+        let visibleStartIndex = shouldKeepCompleteNewestTurn
+            ? (newestMaterializedTurnStartIndex(in: messages) ?? (messages.count - limit))
+            : (messages.count - limit)
+        let visibleTail = Array(messages[visibleStartIndex...])
         return visibleTailPreservingTurnArtifacts(
             visibleTail: visibleTail,
-            omittedPrefix: messages.dropLast(limit)
+            omittedPrefix: messages[..<visibleStartIndex]
         )
     }
 
-    // Desktop renders durable turn artifacts from early raw items. Preserve recent
-    // plan/file-change rows before the 80-message projection window drops them.
+    // Finds the opener for the newest turn represented by the local backing cache instead of
+    // trusting lifecycle state alone. `turn/started` and reconnect replay can be late, stale, or
+    // turnless; the newest concrete turn in chronological history is the only safe first-paint
+    // anchor. Prefer its user opener, then fall back to the contiguous item block when a source
+    // omitted that opener.
+    func newestMaterializedTurnStartIndex(in messages: [CodexMessage]) -> Int? {
+        var newestTurnID: String?
+        for message in messages.reversed() {
+            guard let turnID = message.turnId?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !turnID.isEmpty else {
+                continue
+            }
+            newestTurnID = turnID
+            break
+        }
+        guard let newestTurnID else {
+            return messages.lastIndex(where: { $0.role == .user })
+        }
+
+        if let openerIndex = messages.firstIndex(where: { message in
+            message.role == .user
+                && message.turnId?.trimmingCharacters(in: .whitespacesAndNewlines) == newestTurnID
+        }) {
+            return openerIndex
+        }
+
+        guard let newestItemIndex = messages.lastIndex(where: {
+            $0.turnId?.trimmingCharacters(in: .whitespacesAndNewlines) == newestTurnID
+        }) else {
+            return messages.lastIndex(where: { $0.role == .user })
+        }
+        var startIndex = newestItemIndex
+        while startIndex > messages.startIndex,
+              messages[messages.index(before: startIndex)].turnId?
+                .trimmingCharacters(in: .whitespacesAndNewlines) == newestTurnID {
+            startIndex = messages.index(before: startIndex)
+        }
+        return startIndex
+    }
+
+    // Preserve the visible turn's prompt and durable artifacts when its tool-heavy
+    // tail is larger than the 80-message first-paint window.
     func visibleTailPreservingTurnArtifacts(
         visibleTail: [CodexMessage],
         omittedPrefix: ArraySlice<CodexMessage>
@@ -5044,8 +5760,8 @@ extension CodexService {
 
         let preservedArtifactKinds: Set<CodexMessageKind> = [.fileChange, .plan]
         let visibleMessageIDs = Set(visibleTail.map(\.id))
-        let missingVisibleTurnArtifacts = omittedPrefix.filter { message in
-            guard isPreservableTurnArtifact(message, kinds: preservedArtifactKinds),
+        let missingVisibleTurnContext = omittedPrefix.filter { message in
+            guard (message.role == .user || isPreservableTurnArtifact(message, kinds: preservedArtifactKinds)),
                   let turnId = message.turnId?.trimmingCharacters(in: .whitespacesAndNewlines),
                   visibleTurnIDs.contains(turnId),
                   !visibleMessageIDs.contains(message.id) else {
@@ -5054,22 +5770,14 @@ extension CodexService {
             return true
         }
 
-        let sameTurnArtifactIDs = Set(missingVisibleTurnArtifacts.map(\.id))
-        let recentOmittedArtifacts = omittedPrefix
-            .suffix(300)
-            .filter { message in
-                isPreservableTurnArtifact(message, kinds: preservedArtifactKinds)
-                    && !visibleMessageIDs.contains(message.id)
-                    && !sameTurnArtifactIDs.contains(message.id)
-            }
-            .suffix(8)
-
-        let preservedArtifacts = Array(missingVisibleTurnArtifacts) + Array(recentOmittedArtifacts)
-        guard !preservedArtifacts.isEmpty else {
+        // Never borrow plan/file-change rows from an omitted *different* turn. That creates an
+        // orphan card above the prompt and makes a partial source look like a corrupted timeline.
+        let preservedContext = Array(missingVisibleTurnContext)
+        guard !preservedContext.isEmpty else {
             return visibleTail
         }
 
-        return (preservedArtifacts + visibleTail)
+        return (preservedContext + visibleTail)
             .sorted { $0.orderIndex < $1.orderIndex }
     }
 
@@ -5129,7 +5837,7 @@ extension CodexService {
     func rebuildStoppedTurnIDs(for threadId: String, messages: [CodexMessage]) -> Set<String> {
         let stoppedTurnIDs = Set(
             messages.compactMap(\.turnId)
-                .filter { terminalStateByTurnID[$0] == .stopped }
+                .filter { turnTerminalState(for: $0, threadId: threadId) == .stopped }
         )
         stoppedTurnIDsByThread[threadId] = stoppedTurnIDs
         return stoppedTurnIDs
@@ -5146,13 +5854,23 @@ extension CodexService {
         }
 
         var didChange = false
+        var didChangePersistedState = false
         for (turnId, state) in historyStates {
+            // Desktop-projected ids are only unique within their thread. Hydrate
+            // their volatile thread-scoped cache without poisoning persistence.
+            if CodexSyntheticIdentifiers.isProjectedDesktopTurnID(turnId) {
+                guard projectedTerminalStateByThreadID[threadId]?[turnId] != state else { continue }
+                projectedTerminalStateByThreadID[threadId, default: [:]][turnId] = state
+                didChange = true
+                continue
+            }
             guard terminalStateByTurnID[turnId] != state else { continue }
             terminalStateByTurnID[turnId] = state
             didChange = true
+            didChangePersistedState = true
         }
 
-        if didChange {
+        if didChangePersistedState {
             persistTurnTerminalStates()
         }
         return didChange
@@ -5309,10 +6027,12 @@ extension CodexService {
            ),
            let existingMessage = messagesByThread[message.threadId]?[existingIndex] {
             let activeThreadIDs = Set(activeTurnIdByThread.keys)
+            let activeTurnIDs = Set(activeTurnIdByThread.values)
             let merged = Self.reconcileExistingMessage(
                 existingMessage,
                 with: normalizedMessage,
                 activeThreadIDs: activeThreadIDs,
+                activeTurnIDs: activeTurnIDs,
                 runningThreadIDs: runningThreadIDs
             )
             messagesByThread[message.threadId]?[existingIndex] = merged
@@ -5467,13 +6187,14 @@ extension CodexService {
 
     private func resolvedPlanPresentation(
         requested: CodexPlanPresentation,
-        turnId: String?
+        turnId: String?,
+        threadId: String
     ) -> CodexPlanPresentation {
         guard requested == .resultCompletedItem else {
             return requested
         }
 
-        switch turnTerminalState(for: turnId) {
+        switch turnTerminalState(for: turnId, threadId: threadId) {
         case .completed:
             return .resultReady
         case .failed, .stopped:
@@ -5536,6 +6257,33 @@ extension CodexService {
                 assistantPhase: normalizedPhase
             )
             return messageID
+        }
+
+        // Transport recovery clears the volatile lookup maps after closing live rows. Buffered
+        // replay can then resume with the same provider item id; reconnect that identity to the
+        // persisted row instead of creating a second assistant bubble for the replayed delta.
+        if let normalizedItemId,
+           let itemStreamingKey,
+           let persistedMessage = messagesByThread[threadId]?
+               .filter({ candidate in
+                   guard candidate.role == .assistant,
+                         normalizedStreamingItemID(candidate.itemId) == normalizedItemId else {
+                       return false
+                   }
+                   return candidate.turnId == turnId || candidate.turnId == nil
+               })
+               .min(by: { $0.orderIndex < $1.orderIndex }),
+           let messageIndex = findMessageIndex(threadId: threadId, messageId: persistedMessage.id) {
+            if messagesByThread[threadId]?[messageIndex].turnId == nil {
+                messagesByThread[threadId]?[messageIndex].turnId = turnId
+            }
+            applyAssistantPhaseIfNeeded(
+                threadId: threadId,
+                messageIndex: messageIndex,
+                assistantPhase: normalizedPhase
+            )
+            streamingAssistantMessageByItemKey[itemStreamingKey] = persistedMessage.id
+            return persistedMessage.id
         }
 
         if let turnMessageID = streamingAssistantFallbackMessageByTurnID[turnStreamingKey],

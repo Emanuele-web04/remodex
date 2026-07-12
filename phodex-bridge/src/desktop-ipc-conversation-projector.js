@@ -44,7 +44,7 @@ function createDesktopConversationProjector({
     });
   }
 
-  function project(threadId, rawState) {
+  function project(threadId, rawState, { includeAllActiveTurns = false } = {}) {
     const normalizedThreadId = readString(threadId);
     if (!normalizedThreadId || !rawState || typeof rawState !== "object") {
       return {
@@ -56,9 +56,17 @@ function createDesktopConversationProjector({
     const nextProjection = projectState(normalizedThreadId, rawState);
     const previousCache = cacheByThreadId.get(normalizedThreadId) || null;
     const previousProjection = previousCache?.projection || null;
+    const continuityMatches = previousProjection
+      ? matchDesktopTurnIdentityContinuities(previousProjection.turns, nextProjection.turns)
+      : { previousTurnIds: new Set(), nextTurnIds: new Set() };
+    const hasSyntheticAliasRepair = continuityMatches.nextTurnIds.size > 0;
+    const requiresSyntheticFullReplace = previousProjection
+      && hasSynthesizedTurnIds(previousProjection)
+      && (!hasSynthesizedTurnIds(nextProjection) || hasSyntheticAliasRepair);
 
     let notifications;
     let type = "events";
+    let turnIdentityContinuityTurnIds = [];
     if (!previousProjection && evictedThreadIds.has(normalizedThreadId)) {
       // Previously mirrored but evicted: reseed silently so the phone does not
       // receive a duplicate bootstrap replay of already-delivered history.
@@ -66,12 +74,27 @@ function createDesktopConversationProjector({
       type = "baseline";
       notifications = [];
     } else if (!previousProjection) {
-      notifications = bootstrapNotifications(normalizedThreadId, nextProjection);
-    } else if (hasSynthesizedTurnIds(previousProjection) && !hasSynthesizedTurnIds(nextProjection)) {
+      notifications = bootstrapNotifications(normalizedThreadId, nextProjection, {
+        includeAllActiveTurns,
+      });
+    } else if (requiresSyntheticFullReplace) {
       type = "fullReplace";
+      const unchangedActiveTurnIDs = nextProjection.turns.flatMap((turn) => (
+        isActiveTurnStatus(turn.status)
+          && previousProjection.turns.some((previousTurn) => previousTurn.id === turn.id)
+          ? [turn.id]
+          : []
+      ));
+      turnIdentityContinuityTurnIds = [
+        ...continuityMatches.nextTurnIds,
+        ...unchangedActiveTurnIDs.filter((turnID) => !continuityMatches.nextTurnIds.has(turnID)),
+      ];
       notifications = [
         threadStartedNotification(nextProjection.thread),
-        ...bootstrapNotifications(normalizedThreadId, nextProjection, { includeThreadStarted: false }),
+        ...bootstrapNotifications(normalizedThreadId, nextProjection, {
+          includeThreadStarted: false,
+          includeAllActiveTurns: true,
+        }),
       ];
     } else {
       notifications = diffProjections(
@@ -91,6 +114,7 @@ function createDesktopConversationProjector({
       type,
       notifications,
       thread: nextProjection.thread,
+      turnIdentityContinuityTurnIds,
     };
   }
 
@@ -148,6 +172,10 @@ function projectDesktopConversationStateToThread(threadId, rawState, { now = () 
   return projectConversationState(threadId, rawState, { now }).thread;
 }
 
+function projectDesktopConversationStateToGoal(threadId, rawState) {
+  return latestThreadGoal(rawState, threadId);
+}
+
 function projectConversationState(threadId, rawState, {
   now = () => Date.now(),
   turnCache = null,
@@ -155,6 +183,9 @@ function projectConversationState(threadId, rawState, {
 } = {}) {
   const turns = projectTurns(threadId, rawState, { turnCache, itemCache });
   const activeTurnId = activeTurnIdFromTurns(turns);
+  const runtimeSettings = rawState?.remodexRuntimeSettings
+    || rawState?.remodex_runtime_settings
+    || null;
   const thread = {
     id: threadId,
     sessionId: threadId,
@@ -167,7 +198,17 @@ function projectConversationState(threadId, rawState, {
     cwd: readString(rawState?.cwd) || readString(rawState?.current_working_directory) || "",
     path: readString(rawState?.rolloutPath) || readString(rawState?.rollout_path) || null,
     modelProvider: readString(rawState?.modelProvider) || readString(rawState?.model_provider) || "",
-    model: readString(rawState?.latestModel) || readString(rawState?.latest_model) || "",
+    model: readString(runtimeSettings?.model)
+      || readString(rawState?.latestModel)
+      || readString(rawState?.latest_model)
+      || "",
+    ...(runtimeSettings ? {
+      reasoningEffort: readString(runtimeSettings.reasoningEffort) || null,
+      serviceTier: readString(runtimeSettings.serviceTier) || null,
+      runtimeSettingsRevision: Number(runtimeSettings.revision) || 0,
+      runtimeSettingsUpdatedAt: Number(runtimeSettings.updatedAt) || 0,
+      runtimeSettingsSource: readString(runtimeSettings.source) || null,
+    } : {}),
     cliVersion: readString(rawState?.cliVersion) || readString(rawState?.cli_version) || "",
     source: rawState?.source ?? null,
     gitInfo: cloneJSON(rawState?.gitInfo ?? rawState?.git_info ?? null),
@@ -178,9 +219,12 @@ function projectConversationState(threadId, rawState, {
     turns,
   };
 
+  const goal = latestThreadGoal(rawState, threadId);
+
   return {
     thread,
     turns,
+    goal,
     activeTurnId,
     status: thread.status,
   };
@@ -274,7 +318,11 @@ function projectTurn(threadId, rawTurn, index, { itemCache = null } = {}) {
     turnId,
     status,
     error: cloneJSON(rawTurn.error || null),
-    startedAt: rawTurn.startedAt ?? rawTurn.started_at ?? null,
+    startedAt: rawTurn.startedAt
+      ?? rawTurn.started_at
+      ?? rawTurn.turnStartedAtMs
+      ?? rawTurn.turn_started_at_ms
+      ?? null,
     completedAt: rawTurn.completedAt ?? rawTurn.completed_at ?? null,
     durationMs: rawTurn.durationMs ?? rawTurn.duration_ms ?? null,
     items,
@@ -283,24 +331,35 @@ function projectTurn(threadId, rawTurn, index, { itemCache = null } = {}) {
 
 // --- Notification generation ----------------------------------
 
-function bootstrapNotifications(threadId, projection, { includeThreadStarted = true } = {}) {
+function bootstrapNotifications(
+  threadId,
+  projection,
+  { includeThreadStarted = true, includeAllActiveTurns = false } = {}
+) {
   const notifications = includeThreadStarted && shouldEmitThreadStarted(projection.thread)
     ? [threadStartedNotification(projection.thread)]
     : [];
-  const activeTurn = projection.activeTurnId
-    ? projection.turns.find((turn) => turn.id === projection.activeTurnId)
-    : null;
-  if (!activeTurn) {
+  if (projection.goal) {
+    notifications.push(threadGoalUpdatedNotification(threadId, projection.goal));
+  }
+  const activeTurns = includeAllActiveTurns
+    ? projection.turns.filter((turn) => isActiveTurnStatus(turn.status))
+    : [projection.activeTurnId
+      ? projection.turns.find((turn) => turn.id === projection.activeTurnId)
+      : null].filter(Boolean);
+  if (activeTurns.length === 0) {
     return notifications;
   }
 
-  notifications.push(turnStartedNotification(threadId, activeTurn));
-  for (const item of activeTurn.items) {
-    notifications.push(itemStartedNotification(threadId, activeTurn.id, item));
-    // Streaming items (running commands, in-flight tools) must not be closed
-    // prematurely; later diffs emit their deltas and eventual completion.
-    if (isTerminalItemState(item)) {
-      notifications.push(itemCompletedNotification(threadId, activeTurn.id, item));
+  for (const activeTurn of activeTurns) {
+    notifications.push(turnStartedNotification(threadId, activeTurn));
+    for (const item of activeTurn.items) {
+      notifications.push(itemStartedNotification(threadId, activeTurn.id, item));
+      // Streaming items (running commands, in-flight tools) must not be closed
+      // prematurely; later diffs emit their deltas and eventual completion.
+      if (isTerminalItemState(item)) {
+        notifications.push(itemCompletedNotification(threadId, activeTurn.id, item));
+      }
     }
   }
   return notifications;
@@ -318,14 +377,33 @@ function diffProjections(threadId, previousProjection, nextProjection) {
   const notifications = [];
 
   notifications.push(...diffThreadMetadata(previousProjection.thread, nextProjection.thread));
+  notifications.push(...diffThreadGoal(threadId, previousProjection.goal, nextProjection.goal));
   notifications.push(...diffTurnLifecycle(threadId, previousProjection, nextProjection));
   notifications.push(...diffTurnItems(threadId, previousProjection, nextProjection));
 
   return notifications;
 }
 
+function diffThreadGoal(threadId, previousGoal, nextGoal) {
+  if (JSON.stringify(previousGoal || null) === JSON.stringify(nextGoal || null)) {
+    return [];
+  }
+  if (nextGoal) {
+    return [threadGoalUpdatedNotification(threadId, nextGoal)];
+  }
+  return [tagNotification({
+    method: "thread/goal/cleared",
+    params: { threadId },
+  })];
+}
+
 function diffThreadMetadata(previousThread, nextThread) {
   const notifications = [];
+  const previousRuntimeRevision = Number(previousThread.runtimeSettingsRevision) || 0;
+  const nextRuntimeRevision = Number(nextThread.runtimeSettingsRevision) || 0;
+  if (nextRuntimeRevision > previousRuntimeRevision) {
+    notifications.push(threadStartedNotification(nextThread));
+  }
   const previousTitle = readString(previousThread.title) || readString(previousThread.name);
   const nextTitle = readString(nextThread.title) || readString(nextThread.name);
   if (nextTitle && previousTitle !== nextTitle) {
@@ -590,6 +668,17 @@ function turnStartedNotification(threadId, turn) {
   });
 }
 
+function threadGoalUpdatedNotification(threadId, goal) {
+  return tagNotification({
+    method: "thread/goal/updated",
+    params: {
+      threadId,
+      turnId: null,
+      goal: cloneJSON(goal),
+    },
+  });
+}
+
 function turnCompletedNotification(threadId, turn) {
   return tagNotification({
     method: "turn/completed",
@@ -743,6 +832,135 @@ function hasSynthesizedTurnIds(projection) {
   return projection.turns.some((turn) => readString(turn.id).startsWith("ipc-turn-"));
 }
 
+// Synthetic Desktop ids can become canonical without starting a new logical
+// turn. Require stable content identity so a disconnected A -> different B
+// snapshot is not mistaken for a mere id repair.
+function desktopTurnsShareLogicalIdentity(previousTurn, nextTurn) {
+  return desktopTurnLogicalIdentityScore(previousTurn, nextTurn) > 0;
+}
+
+function desktopTurnLogicalIdentityScore(previousTurn, nextTurn) {
+  if (!previousTurn || !nextTurn) {
+    return 0;
+  }
+
+  const previousStableItemIDs = stableTurnItemIDs(previousTurn);
+  const nextStableItemIDs = stableTurnItemIDs(nextTurn);
+  for (const itemID of previousStableItemIDs) {
+    if (nextStableItemIDs.has(itemID)) {
+      return 2;
+    }
+  }
+
+  const previousPrompt = turnPromptSignature(previousTurn);
+  const nextPrompt = turnPromptSignature(nextTurn);
+  const previousStart = turnStartIdentity(previousTurn);
+  const nextStart = turnStartIdentity(nextTurn);
+  return previousPrompt !== ""
+    && previousPrompt === nextPrompt
+    && previousStart !== ""
+    && previousStart === nextStart
+    ? 1
+    : 0;
+}
+
+// Matches removed synthetic aliases to added canonical turns one-to-one. Stable
+// item identity wins over the prompt+start fallback, and no canonical turn can
+// suppress more than one real run-start generation.
+function matchDesktopTurnIdentityContinuities(previousTurns, nextTurns) {
+  const previousById = new Map(previousTurns.map((turn) => [readString(turn?.id), turn]));
+  const nextById = new Map(nextTurns.map((turn) => [readString(turn?.id), turn]));
+  const previousTurnIds = new Set();
+  const nextTurnIds = new Set();
+  const removedSyntheticTurns = previousTurns.filter((turn) => {
+    const turnID = readString(turn?.id);
+    return turnID && !nextById.has(turnID) && turnID.startsWith("ipc-turn-");
+  });
+  const addedCanonicalTurns = nextTurns.filter((turn) => {
+    const turnID = readString(turn?.id);
+    return turnID && !previousById.has(turnID) && !turnID.startsWith("ipc-turn-");
+  });
+
+  function applyMaximumMatchesForScore(requiredScore) {
+    const nextOwnerByID = new Map();
+
+    function tryAssign(previousEntry, visitedNextIDs) {
+      for (const nextEntry of addedCanonicalTurns) {
+        const nextID = readString(nextEntry?.id);
+        if (nextTurnIds.has(nextID) || visitedNextIDs.has(nextID)) {
+          continue;
+        }
+        const score = desktopTurnLogicalIdentityScore(
+          previousEntry?.turn || previousEntry,
+          nextEntry?.turn || nextEntry
+        );
+        if (score !== requiredScore) {
+          continue;
+        }
+        visitedNextIDs.add(nextID);
+        const currentOwner = nextOwnerByID.get(nextID);
+        if (!currentOwner || tryAssign(currentOwner, visitedNextIDs)) {
+          nextOwnerByID.set(nextID, previousEntry);
+          return true;
+        }
+      }
+      return false;
+    }
+
+    for (const previousEntry of removedSyntheticTurns) {
+      const previousID = readString(previousEntry?.id);
+      if (!previousTurnIds.has(previousID)) {
+        tryAssign(previousEntry, new Set());
+      }
+    }
+    for (const [nextID, previousEntry] of nextOwnerByID) {
+      previousTurnIds.add(readString(previousEntry?.id));
+      nextTurnIds.add(nextID);
+    }
+  }
+
+  // Stable item identity is globally reserved first; prompt+start matching can
+  // only consume aliases/canonical turns left over from that maximum matching.
+  applyMaximumMatchesForScore(2);
+  applyMaximumMatchesForScore(1);
+
+  return { previousTurnIds, nextTurnIds };
+}
+
+function stableTurnItemIDs(turn) {
+  return new Set((Array.isArray(turn?.items) ? turn.items : []).flatMap((item) => {
+    if (normalizeToken(item?.type) === "usermessage") {
+      return [];
+    }
+    const itemID = readString(item?.id) || readString(item?.itemId) || readString(item?.item_id);
+    return itemID ? [itemID] : [];
+  }));
+}
+
+function turnPromptSignature(turn) {
+  const paramsInput = Array.isArray(turn?.params?.input) ? turn.params.input : [];
+  let prompt = renderUserInputText(paramsInput);
+  if (!prompt) {
+    const userItem = (Array.isArray(turn?.items) ? turn.items : []).find((item) => (
+      normalizeToken(item?.type) === "usermessage"
+    ));
+    prompt = renderUserInputText(userItem?.content);
+  }
+  return prompt.trim().replace(/\s+/g, " ");
+}
+
+function turnStartIdentity(turn) {
+  const value = turn?.startedAt
+    ?? turn?.started_at
+    ?? turn?.turnStartedAtMs
+    ?? turn?.turn_started_at_ms;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return `number:${value}`;
+  }
+  const text = readString(value);
+  return text ? `text:${text}` : "";
+}
+
 function findTurn(turns, turnId) {
   return turns.find((turn) => turn.id === turnId) || null;
 }
@@ -824,6 +1042,12 @@ function projectItemForMobile(item, itemType = normalizeToken(item?.type)) {
   }
 
   const projected = cloneJSON(item);
+  // Desktop/Litter stores internal update_plan snapshots as todo-list items.
+  // They are progress state, not user-actionable proposed-plan results. Preserve
+  // that semantic across both thread/read projection and lifecycle notifications.
+  if (itemType === "todolist") {
+    projected.remodexProgressPlan = true;
+  }
   if (!isGenericToolCallItemType(itemType)) {
     return projected;
   }
@@ -972,7 +1196,42 @@ function normalizeTimestamp(value) {
   return Number.isFinite(numeric) && numeric > 0 ? numeric : 0;
 }
 
+function latestThreadGoal(rawState, threadId) {
+  const candidates = [rawState?.threadGoal, rawState?.completedThreadGoal]
+    .map((goal) => normalizeProjectedThreadGoal(goal, threadId))
+    .filter(Boolean);
+  return candidates.sort((left, right) => right.updatedAt - left.updatedAt)[0] || null;
+}
+
+function normalizeProjectedThreadGoal(value, fallbackThreadId) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const statusByToken = {
+    active: "active",
+    paused: "paused",
+    blocked: "blocked",
+    usagelimited: "usageLimited",
+    budgetlimited: "budgetLimited",
+    complete: "complete",
+  };
+  const goal = {
+    threadId: readString(value.threadId) || readString(value.thread_id) || fallbackThreadId,
+    objective: readString(value.objective),
+    status: statusByToken[normalizeToken(value.status)] || "",
+    tokenBudget: value.tokenBudget ?? value.token_budget ?? null,
+    tokensUsed: Number(value.tokensUsed ?? value.tokens_used) || 0,
+    timeUsedSeconds: Number(value.timeUsedSeconds ?? value.time_used_seconds) || 0,
+    createdAt: Number(value.createdAt ?? value.created_at) || 0,
+    updatedAt: Number(value.updatedAt ?? value.updated_at) || 0,
+  };
+  return goal.threadId && goal.objective && goal.status ? goal : null;
+}
+
 module.exports = {
   createDesktopConversationProjector,
+  desktopTurnsShareLogicalIdentity,
+  matchDesktopTurnIdentityContinuities,
+  projectDesktopConversationStateToGoal,
   projectDesktopConversationStateToThread,
 };

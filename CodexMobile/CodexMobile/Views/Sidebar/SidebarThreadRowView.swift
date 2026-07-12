@@ -10,8 +10,6 @@ struct SidebarThreadRowView: View {
     let thread: CodexThread
     let isSelected: Bool
     let runBadgeState: CodexThreadRunBadgeState?
-    let timingLabel: String?
-    let showsTimestampRefreshIndicator: Bool
     let isPinned: Bool
     let pinnedProjectLabel: String?
     let childSubagentCount: Int
@@ -130,7 +128,7 @@ struct SidebarThreadRowView: View {
 
             expansionToggleButton
 
-            SidebarThreadStatusIcon(thread: thread, pointSize: 12)
+            SidebarThreadStatusIcon(thread: thread, pointSize: 17)
 
             if let pinnedProjectLabel, !pinnedProjectLabel.isEmpty {
                 Text(pinnedProjectLabel)
@@ -140,14 +138,9 @@ struct SidebarThreadRowView: View {
                     .truncationMode(.tail)
             }
 
-            // Snapshot-only pinned rows need an honest metadata hint until opening refreshes them.
             if let runBadgeState, runBadgeState.isVisibleInSidebar {
                 SidebarThreadRunBadgeView(state: runBadgeState)
                     .frame(width: 28, alignment: .trailing)
-            } else if showsTimestampRefreshIndicator {
-                SidebarTimestampRefreshIndicator(size: .parent)
-            } else if let timingLabel {
-                SidebarTimingLabel(text: timingLabel, size: .parent)
             }
         }
     }
@@ -175,13 +168,7 @@ struct SidebarThreadRowView: View {
         HStack(spacing: 4) {
             expansionToggleButton
 
-            SidebarThreadStatusIcon(thread: thread, pointSize: 11)
-
-            if showsTimestampRefreshIndicator {
-                SidebarTimestampRefreshIndicator(size: .subagent)
-            } else if let timingLabel {
-                SidebarTimingLabel(text: timingLabel, size: .subagent)
-            }
+            SidebarThreadStatusIcon(thread: thread, pointSize: 17)
         }
     }
 
@@ -192,9 +179,9 @@ struct SidebarThreadRowView: View {
         if childSubagentCount > 0, let onToggleSubagents {
             HapticButton(action: onToggleSubagents) {
                 RemodexIcon.image(systemName: isSubagentExpanded ? "chevron.down" : "chevron.right")
-                    .font(AppFont.system(size: 11, weight: .semibold))
+                    .font(AppFont.system(size: 15, weight: .semibold))
                     .foregroundStyle(.secondary)
-                    .frame(width: 18, height: 18)
+                    .frame(width: 22, height: 22)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -271,12 +258,6 @@ private enum SidebarRowPreviewFixtures {
         "t3": .ready,
     ]
 
-    static func timingLabel(for thread: CodexThread) -> String? {
-        guard let updated = thread.updatedAt else { return nil }
-        let seconds = Int(now.timeIntervalSince(updated))
-        if seconds < 60 { return "\(seconds)s" }
-        return "\(seconds / 60)m"
-    }
 }
 
 #Preview("Sidebar with Subagents") {
@@ -287,7 +268,6 @@ private enum SidebarRowPreviewFixtures {
         groups: SidebarRowPreviewFixtures.groups,
         selectedThread: SidebarRowPreviewFixtures.allThreads[2], // Locke selected
         bottomContentInset: 80,
-        timingLabelProvider: SidebarRowPreviewFixtures.timingLabel,
         runBadgeStateByThreadID: SidebarRowPreviewFixtures.runBadges,
         onSelectThread: { _ in },
         onCreateThreadInProjectGroup: { _ in },

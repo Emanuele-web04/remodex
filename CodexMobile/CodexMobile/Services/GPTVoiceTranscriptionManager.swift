@@ -67,11 +67,16 @@ final class GPTVoiceTranscriptionManager: ObservableObject {
     private static let wavMimeType = "audio/wav"
     private static let m4aMimeType = "audio/mp4"
     private static let maxRecordingDurationSeconds = CodexVoiceTranscriptionPreflight.maxDurationSeconds
-    // Keeps enough metering history for the capsule to resample across the full composer width.
+    // Keeps enough metering history for the capsule to fill the composer width.
     private static let maxAudioLevels = 240
+    // One waveform bar per fixed time window. Aggregating tap buffers into
+    // windows keeps the bar cadence deterministic: iOS treats installTap's
+    // bufferSize as a hint, so real devices deliver buffers of varying size.
+    static let meterWindowSeconds: TimeInterval = 0.08
 
     private var engine: AVAudioEngine?
     private let collector = AudioSampleCollector()
+    private let meterAccumulator = MeterWindowAccumulator()
     private var captureSampleRate: Double = 0
     private var isRecording = false
     private var isStarting = false
@@ -146,22 +151,18 @@ final class GPTVoiceTranscriptionManager: ObservableObject {
 
             resetMeteringState()
 
+            meterAccumulator.beginSession(sampleRate: format.sampleRate)
+
             // Copy tap samples immediately; AVAudioEngine owns the callback buffer lifetime.
-            inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { [collector, weak self] buffer, _ in
+            inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { [collector, meterAccumulator, weak self] buffer, _ in
                 guard let samples = collector.append(buffer, sessionID: sessionID) else { return }
 
-                // Compute RMS power for waveform visualization.
-                var sumOfSquares: Float = 0
-                for sample in samples {
-                    sumOfSquares += sample * sample
-                }
-                let rms = sqrt(sumOfSquares / Float(samples.count))
-                let dB = 20 * log10(max(rms, 1e-6))
-                let normalized = CGFloat(max(0, min(1, (dB + 50) / 50)))
+                let newLevels = meterAccumulator.append(samples)
+                guard !newLevels.isEmpty else { return }
 
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
-                    self.audioLevels.append(normalized)
+                    self.audioLevels.append(contentsOf: newLevels)
                     if self.audioLevels.count > Self.maxAudioLevels {
                         self.audioLevels.removeFirst(self.audioLevels.count - Self.maxAudioLevels)
                     }
@@ -715,6 +716,54 @@ extension GPTVoiceTranscriptionManager {
 }
 
 // ─── Thread-safe sample collector ────────────────────────────────
+
+// Converts the audio-thread sample stream into one normalized waveform level
+// per fixed time window (`meterWindowSeconds`), independent of how iOS sizes
+// the tap buffers. Each emitted level is the RMS power of exactly one window,
+// so a bar's height is the decibel reading of that moment and never changes.
+private final class MeterWindowAccumulator: @unchecked Sendable {
+    private let lock = NSLock()
+    private var windowSampleCount = 1
+    private var sumOfSquares: Float = 0
+    private var sampleCount = 0
+
+    func beginSession(sampleRate: Double) {
+        lock.lock()
+        windowSampleCount = max(1, Int(sampleRate * GPTVoiceTranscriptionManager.meterWindowSeconds))
+        sumOfSquares = 0
+        sampleCount = 0
+        lock.unlock()
+    }
+
+    /// Feeds tap samples and returns the levels for every window completed by
+    /// this buffer (usually zero or one; more when a large buffer spans several).
+    func append(_ samples: [Float]) -> [CGFloat] {
+        lock.lock()
+        defer { lock.unlock() }
+
+        var levels: [CGFloat] = []
+        var index = 0
+        while index < samples.count {
+            let needed = windowSampleCount - sampleCount
+            let take = min(needed, samples.count - index)
+            for offset in index..<(index + take) {
+                let sample = samples[offset]
+                sumOfSquares += sample * sample
+            }
+            sampleCount += take
+            index += take
+
+            if sampleCount >= windowSampleCount {
+                let rms = sqrt(sumOfSquares / Float(sampleCount))
+                let dB = 20 * log10(max(rms, 1e-6))
+                levels.append(CGFloat(max(0, min(1, (dB + 50) / 50))))
+                sumOfSquares = 0
+                sampleCount = 0
+            }
+        }
+        return levels
+    }
+}
 
 private final class AudioSampleCollector: @unchecked Sendable {
     private let lock = NSLock()

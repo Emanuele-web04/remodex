@@ -8,10 +8,21 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   isContextualUserText,
+  responseItemMessageText,
   sanitizeUserInputEntries,
   sanitizeUserRoleItem,
   visibleUserPromptText,
 } = require("../src/desktop-ipc-shared");
+
+test("response item text preserves nested data text parts", () => {
+  assert.equal(
+    responseItemMessageText({
+      role: "assistant",
+      content: [{ type: "output_text", data: { text: "Nested assistant text" } }],
+    }),
+    "Nested assistant text"
+  );
+});
 
 // Payload shapes below are lifted verbatim from real rollout files, so these
 // tests break when the runtime changes its injected-context format again.
@@ -152,6 +163,20 @@ test("extracts the real request from review-guideline prompts", () => {
     + "## My request for Codex:\nPlease review my uncommitted changes";
   assert.equal(isContextualUserText(text), false);
   assert.equal(visibleUserPromptText(text), "Please review my uncommitted changes");
+});
+
+test("keeps a real review prompt when its trailing request delimiter is empty", () => {
+  const text = "# Diff comments:\n\nFix the invalid dependency.\n\n## My request for Codex:\n";
+  assert.equal(isContextualUserText(text), false);
+  assert.equal(visibleUserPromptText(text), "# Diff comments:\n\nFix the invalid dependency.");
+});
+
+test("does not leak hidden runtime context with an empty trailing request delimiter", () => {
+  const hiddenEnvironment = "<environment_context>\n<cwd>/private</cwd>\n</environment_context>\n\n## My request for Codex:\n";
+  const hiddenAgents = "# AGENTS.md instructions\n\n<INSTRUCTIONS>\nprivate rules\n</INSTRUCTIONS>\n\n## My request for Codex:\n";
+
+  assert.equal(visibleUserPromptText(hiddenEnvironment), "");
+  assert.equal(visibleUserPromptText(hiddenAgents), "");
 });
 
 test("keeps image-only user messages alive as attachment-only items", () => {

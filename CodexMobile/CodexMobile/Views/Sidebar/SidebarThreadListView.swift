@@ -16,8 +16,6 @@ struct SidebarThreadListView: View {
     var emptyStateTitle: String = "No conversations"
     var emptyFilterTitle: String = "No matching conversations"
     var projectlessRootPaths: [String] = []
-    let timingLabelProvider: (CodexThread) -> String?
-    var showsTimestampRefreshIndicator: (CodexThread) -> Bool = { _ in false }
     let runBadgeStateByThreadID: [String: CodexThreadRunBadgeState]
     let onSelectThread: (CodexThread) -> Void
     let onCreateThreadInProjectGroup: (SidebarThreadGroup) -> Void
@@ -310,8 +308,6 @@ struct SidebarThreadListView: View {
             thread: thread,
             isSelected: isSelected,
             runBadgeState: runBadgeStateByThreadID[thread.id],
-            timingLabel: timingLabelProvider(thread),
-            showsTimestampRefreshIndicator: showsTimestampRefreshIndicator(thread),
             isPinned: codex.isThreadPinned(thread.id),
             pinnedProjectLabel: isPinnedRow && !SidebarThreadGrouping.isRootlessChatThread(
                 thread,
@@ -592,14 +588,6 @@ private enum SidebarThreadListPreviewFixtures {
         "br-2": .ready,
     ]
 
-    static func timingLabel(for thread: CodexThread) -> String? {
-        guard let updated = thread.updatedAt else { return nil }
-        let seconds = Int(now.timeIntervalSince(updated))
-        if seconds < 60 { return "\(seconds)s" }
-        let minutes = seconds / 60
-        if minutes < 60 { return "\(minutes)m" }
-        return "\(minutes / 60)h"
-    }
 }
 
 @MainActor
@@ -613,7 +601,6 @@ private func sidebarThreadBlockPreviewBody() -> some View {
             groups: SidebarThreadListPreviewFixtures.groups,
             selectedThread: SidebarThreadListPreviewFixtures.omnaraThreads[2],
             bottomContentInset: 80,
-            timingLabelProvider: SidebarThreadListPreviewFixtures.timingLabel,
             runBadgeStateByThreadID: SidebarThreadListPreviewFixtures.runBadges,
             onSelectThread: { _ in },
             onCreateThreadInProjectGroup: { _ in },

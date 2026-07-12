@@ -7,7 +7,7 @@
 import CryptoKit
 import Foundation
 
-let codexSecureProtocolVersion = 1
+let codexSecureProtocolVersion = 2
 let codexPairingQRVersion = 2
 let codexSecureHandshakeTag = "remodex-e2ee-v1"
 let codexSecureHandshakeLabel = "client-auth"
@@ -105,6 +105,7 @@ struct SecureServerHello: Codable, Sendable {
     let macEphemeralPublicKey: String
     let serverNonce: String
     let keyEpoch: Int
+    let bridgeReplayEpoch: String?
     let expiresAtForTranscript: Int64
     let macSignature: String
     let clientNonce: String?
@@ -145,17 +146,20 @@ struct SecureResumeState: Codable, Sendable {
     let sessionId: String
     let keyEpoch: Int
     let lastAppliedBridgeOutboundSeq: Int
+    let bridgeReplayEpoch: String?
 
     init(
         kind: String = "resumeState",
         sessionId: String,
         keyEpoch: Int,
-        lastAppliedBridgeOutboundSeq: Int
+        lastAppliedBridgeOutboundSeq: Int,
+        bridgeReplayEpoch: String? = nil
     ) {
         self.kind = kind
         self.sessionId = sessionId
         self.keyEpoch = keyEpoch
         self.lastAppliedBridgeOutboundSeq = lastAppliedBridgeOutboundSeq
+        self.bridgeReplayEpoch = bridgeReplayEpoch
     }
 }
 

@@ -220,6 +220,34 @@ function applyAppServerMessageToConversationState({
       conversation.updatedAt = now();
       return { threadId, changed: true };
     }
+    case "thread/goal/updated": {
+      const threadId = readThreadIdFromParams(message.params);
+      const goal = normalizeThreadGoal(message.params?.goal, threadId);
+      if (!threadId || !shouldOwnThread(threadId) || !goal) {
+        return null;
+      }
+      const conversation = ensureConversationInMap(conversations, threadId, { hostId, now });
+      if (goal.status === "complete") {
+        conversation.threadGoal = null;
+        conversation.completedThreadGoal = goal;
+      } else {
+        conversation.threadGoal = goal;
+        conversation.completedThreadGoal = null;
+      }
+      conversation.updatedAt = now();
+      return { threadId, changed: true };
+    }
+    case "thread/goal/cleared": {
+      const threadId = readThreadIdFromParams(message.params);
+      if (!threadId || !shouldOwnThread(threadId)) {
+        return null;
+      }
+      const conversation = ensureConversationInMap(conversations, threadId, { hostId, now });
+      conversation.threadGoal = null;
+      conversation.completedThreadGoal = null;
+      conversation.updatedAt = now();
+      return { threadId, changed: true };
+    }
     case "turn/started":
     case "turn/completed": {
       const threadId = readThreadIdFromParams(message.params);
@@ -287,6 +315,7 @@ function applyAppServerMessageToConversationState({
           type: "todo-list",
           explanation: explanation || null,
           plan,
+          remodexProgressPlan: true,
         });
       }
       conversation.updatedAt = now();
@@ -411,6 +440,7 @@ function buildConversationStateFromThread(thread, {
     title: readString(thread?.name) || previous?.title || null,
     latestModel,
     latestReasoningEffort: previous?.latestReasoningEffort || null,
+    latestServiceTier: previous?.latestServiceTier || null,
     previousTurnModel: previous?.previousTurnModel || null,
     latestCollaborationMode: previous?.latestCollaborationMode || {
       mode: "default",
@@ -508,6 +538,7 @@ function createEmptyConversationState(threadId, {
     title: null,
     latestModel: "",
     latestReasoningEffort: null,
+    latestServiceTier: null,
     previousTurnModel: null,
     latestCollaborationMode: {
       mode: "default",
@@ -641,6 +672,7 @@ function applyTurnRuntimeMetadata(conversation, turnParams) {
   }
   const model = readString(turnParams.model);
   const effort = readString(turnParams.effort);
+  const serviceTier = readString(turnParams.serviceTier) || null;
   if (model) {
     conversation.previousTurnModel = conversation.latestModel || null;
     conversation.latestModel = model;
@@ -648,6 +680,7 @@ function applyTurnRuntimeMetadata(conversation, turnParams) {
   if (effort) {
     conversation.latestReasoningEffort = effort;
   }
+  conversation.latestServiceTier = serviceTier;
   if (turnParams.collaborationMode && typeof turnParams.collaborationMode === "object") {
     conversation.latestCollaborationMode = cloneJSON(turnParams.collaborationMode);
     return;
@@ -1098,6 +1131,36 @@ function timestampSecondsToMs(value) {
   return Number.isFinite(value) && value > 0 ? Math.round(value * 1000) : 0;
 }
 
+function normalizeThreadGoal(value, fallbackThreadId = "") {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const threadId = readString(value.threadId) || readString(value.thread_id) || readString(fallbackThreadId);
+  const objective = readString(value.objective);
+  const statusByToken = {
+    active: "active",
+    paused: "paused",
+    blocked: "blocked",
+    usagelimited: "usageLimited",
+    budgetlimited: "budgetLimited",
+    complete: "complete",
+  };
+  const status = statusByToken[normalizeToken(value.status)] || "";
+  if (!threadId || !objective || !status) {
+    return null;
+  }
+  return {
+    threadId,
+    objective,
+    status,
+    tokenBudget: value.tokenBudget ?? value.token_budget ?? null,
+    tokensUsed: Number(value.tokensUsed ?? value.tokens_used) || 0,
+    timeUsedSeconds: Number(value.timeUsedSeconds ?? value.time_used_seconds) || 0,
+    createdAt: Number(value.createdAt ?? value.created_at) || 0,
+    updatedAt: Number(value.updatedAt ?? value.updated_at) || 0,
+  };
+}
+
 const REQUEST_METHODS_WITH_THREAD = new Set([
   "item/commandExecution/requestApproval",
   "item/fileChange/requestApproval",
@@ -1118,6 +1181,7 @@ module.exports = {
   createEmptyConversationState,
   ensureConversationInMap,
   mergeConversationTurnsFromThread,
+  normalizeThreadGoal,
   readThreadIdFromParams,
   readTurnIdFromParams,
   readTurnIdFromTurn,

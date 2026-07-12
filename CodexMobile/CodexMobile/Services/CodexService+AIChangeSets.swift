@@ -55,8 +55,8 @@ extension CodexService {
             return changeSet
         }
 
-        if let turnId = normalizedIdentifier(message.turnId),
-           let changeSetId = aiChangeSetIDByTurnID[turnId] {
+        if let turnKey = AIChangeSetTurnKey(threadId: message.threadId, turnId: message.turnId),
+           let changeSetId = aiChangeSetIDByTurnKey[turnKey] {
             return aiChangeSetsByID[changeSetId]
         }
 
@@ -269,9 +269,9 @@ extension CodexService {
         turnId: String?,
         assistantMessageId: String
     ) {
-        guard let normalizedTurnId = normalizedIdentifier(turnId),
+        guard let turnKey = AIChangeSetTurnKey(threadId: threadId, turnId: turnId),
               let normalizedAssistantMessageId = normalizedIdentifier(assistantMessageId),
-              let changeSetId = aiChangeSetIDByTurnID[normalizedTurnId],
+              let changeSetId = aiChangeSetIDByTurnKey[turnKey],
               var changeSet = aiChangeSetsByID[changeSetId] else {
             return
         }
@@ -286,9 +286,9 @@ extension CodexService {
     }
 
     // Finalizes the change set once the turn has finished, even if the diff arrives slightly later.
-    func noteTurnFinished(turnId: String?) {
-        guard let normalizedTurnId = normalizedIdentifier(turnId),
-              let changeSetId = aiChangeSetIDByTurnID[normalizedTurnId] else {
+    func noteTurnFinished(threadId: String, turnId: String?) {
+        guard let turnKey = AIChangeSetTurnKey(threadId: threadId, turnId: turnId),
+              let changeSetId = aiChangeSetIDByTurnKey[turnKey] else {
             return
         }
 
@@ -408,20 +408,19 @@ private extension CodexService {
         patch: String,
         source: AIChangeSetSource
     ) {
-        let normalizedTurnId = turnId.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalizedTurnId.isEmpty,
+        guard let turnKey = AIChangeSetTurnKey(threadId: threadId, turnId: turnId),
               let normalizedPatch = normalizedUnifiedPatchPayload(patch) else {
             return
         }
 
         let analysis = AIUnifiedPatchParser.analyze(normalizedPatch)
-        let changeSetId = aiChangeSetIDByTurnID[normalizedTurnId] ?? UUID().uuidString
+        let changeSetId = aiChangeSetIDByTurnKey[turnKey] ?? UUID().uuidString
         var changeSet = aiChangeSetsByID[changeSetId] ?? AIChangeSet(
             id: changeSetId,
             repoRoot: gitWorkingDirectory(for: threadId),
             threadId: threadId,
-            turnId: normalizedTurnId,
-            assistantMessageId: latestAssistantMessageId(for: threadId, turnId: normalizedTurnId),
+            turnId: turnKey.turnId,
+            assistantMessageId: latestAssistantMessageId(for: threadId, turnId: turnKey.turnId),
             source: source
         )
 
@@ -431,7 +430,10 @@ private extension CodexService {
 
         changeSet.threadId = threadId
         changeSet.repoRoot = changeSet.repoRoot ?? gitWorkingDirectory(for: threadId)
-        changeSet.assistantMessageId = changeSet.assistantMessageId ?? latestAssistantMessageId(for: threadId, turnId: normalizedTurnId)
+        changeSet.assistantMessageId = changeSet.assistantMessageId ?? latestAssistantMessageId(
+            for: threadId,
+            turnId: turnKey.turnId
+        )
         changeSet.source = source
 
         if source == .fileChangeFallback {
@@ -451,7 +453,7 @@ private extension CodexService {
         changeSet.status = .collecting
 
         aiChangeSetsByID[changeSetId] = changeSet
-        aiChangeSetIDByTurnID[normalizedTurnId] = changeSetId
+        aiChangeSetIDByTurnKey[turnKey] = changeSetId
         if let assistantMessageId = changeSet.assistantMessageId {
             aiChangeSetIDByAssistantMessageID[assistantMessageId] = changeSetId
         }
@@ -593,7 +595,10 @@ private extension CodexService {
             return
         }
 
-        guard turnTerminalState(for: changeSet.turnId) != nil else {
+        guard turnTerminalState(
+            for: changeSet.turnId,
+            threadId: changeSet.threadId
+        ) != nil else {
             aiChangeSetsByID[changeSetId] = changeSet
             return
         }

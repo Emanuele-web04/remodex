@@ -7,6 +7,7 @@
 
 import Foundation
 import SwiftUI
+import UIKit
 
 struct UserBubbleInlineMarkdownText: View {
     let rawText: String
@@ -27,6 +28,64 @@ struct UserBubbleInlineMarkdownText: View {
                 .foregroundStyle(foreground)
                 .tint(foreground)
         }
+    }
+}
+
+struct UserBubbleInlineSkillText: View {
+    let segments: [UserBubbleInlineSegment]
+    let foreground: Color
+    let skillForeground: Color
+    @ScaledMetric(relativeTo: .body) private var skillIconSide: CGFloat = 17
+
+    init(_ segments: [UserBubbleInlineSegment], foreground: Color, skillForeground: Color) {
+        self.segments = segments
+        self.foreground = foreground
+        self.skillForeground = skillForeground
+    }
+
+    var body: some View {
+        renderedText
+            .foregroundStyle(foreground)
+            .tint(foreground)
+    }
+
+    private var renderedText: Text {
+        segments.reduce(Text("")) { partial, segment in
+            partial + text(for: segment)
+        }
+    }
+
+    private func text(for segment: UserBubbleInlineSegment) -> Text {
+        switch segment {
+        case .text(let rawText):
+            switch UserBubbleInlineMarkdownRenderer.render(rawText) {
+            case .plain:
+                return Text(rawText)
+            case .rich(let attributed):
+                return Text(attributed)
+            }
+        case .skillMention(_, let displayLabel):
+            let iconText = Text(Image(uiImage: skillIcon))
+                .baselineOffset(skillIconBaselineOffset)
+            return (iconText + Text("\u{00A0}\(displayLabel)"))
+                .foregroundColor(skillForeground)
+        }
+    }
+
+    private var skillIconBaselineOffset: CGFloat {
+        let bodyFont = AppFont.uiFont(size: 15, textStyle: .body)
+        return (bodyFont.ascender + bodyFont.descender - skillIconSide) / 2
+    }
+
+    private var skillIcon: UIImage {
+        guard let base = RemodexIcon.uiImage(systemName: "remodex.skill") else { return UIImage() }
+        let format = UIGraphicsImageRendererFormat.default()
+        format.opaque = false
+        let size = CGSize(width: skillIconSide, height: skillIconSide)
+        let image = UIGraphicsImageRenderer(size: size, format: format).image { _ in
+            base.draw(in: CGRect(origin: .zero, size: size))
+        }
+        return image.withRenderingMode(.alwaysTemplate)
     }
 }
 

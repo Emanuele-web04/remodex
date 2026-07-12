@@ -44,6 +44,7 @@ extension CodexService {
     func loadLocalState(for macDeviceId: String?) {
         let normalizedMacDeviceId = normalizedMacScopedDeviceId(macDeviceId)
         let includeLegacyFallback = shouldLoadLegacyLocalStateFallback(for: normalizedMacDeviceId)
+        loadThreadListSnapshot(for: macDeviceId)
         withApplyingMacScopedState {
             let loadedMessages = messagePersistence.load(
                 macDeviceId: normalizedMacDeviceId,
@@ -58,6 +59,11 @@ extension CodexService {
 
             CodexMessageOrderCounter.seed(from: loadedMessages)
             messagesByThread = loadedMessages
+            let potentiallyPoisonedHistoryThreadIDs = threadsWithAuthoritativeLocalHistoryStart
+                .union(exhaustedOlderThreadHistoryCursorByThreadID.keys)
+            for threadId in potentiallyPoisonedHistoryThreadIDs {
+                repairEmptyThreadHistoryLoadStateIfNeeded(threadId: threadId)
+            }
             composerDraftsByThreadID = composerDraftPersistence.load(
                 macDeviceId: normalizedMacDeviceId,
                 includeLegacyFallback: includeLegacyFallback
@@ -81,8 +87,14 @@ extension CodexService {
             aiChangeSetsByID = loadedChangeSets.reduce(into: [:]) { partialResult, changeSet in
                 partialResult[changeSet.id] = changeSet
             }
-            aiChangeSetIDByTurnID = loadedChangeSets.reduce(into: [:]) { partialResult, changeSet in
-                partialResult[changeSet.turnId] = changeSet.id
+            aiChangeSetIDByTurnKey = loadedChangeSets.reduce(into: [:]) { partialResult, changeSet in
+                guard let turnKey = AIChangeSetTurnKey(
+                    threadId: changeSet.threadId,
+                    turnId: changeSet.turnId
+                ) else {
+                    return
+                }
+                partialResult[turnKey] = changeSet.id
             }
             aiChangeSetIDByAssistantMessageID = loadedChangeSets.reduce(into: [:]) { partialResult, changeSet in
                 if let assistantMessageId = changeSet.assistantMessageId {
@@ -180,7 +192,9 @@ extension CodexService {
                    [String: CodexTurnTerminalState].self,
                    from: savedTurnTerminalStates
                ) {
-                terminalStateByTurnID = decodedTurnTerminalStates
+                terminalStateByTurnID = decodedTurnTerminalStates.filter { turnId, _ in
+                    !CodexSyntheticIdentifiers.isProjectedDesktopTurnID(turnId)
+                }
             } else {
                 terminalStateByTurnID = [:]
             }
@@ -242,6 +256,7 @@ extension CodexService {
     func clearInMemoryMacScopedState() {
         withApplyingMacScopedState {
             threads = []
+            restoredThreadSnapshotIDs.removeAll()
             activeThreadId = nil
             activeTurnId = nil
             activeTurnIdByThread.removeAll()
@@ -258,7 +273,7 @@ extension CodexService {
             recentActivityLineByThread.removeAll()
             contextWindowUsageByThread.removeAll()
             aiChangeSetsByID.removeAll()
-            aiChangeSetIDByTurnID.removeAll()
+            aiChangeSetIDByTurnKey.removeAll()
             aiChangeSetIDByAssistantMessageID.removeAll()
             clearAllRunningState()
             readyThreadIDs.removeAll()
@@ -411,6 +426,73 @@ extension CodexService {
 
         return migratedDefaults
     }
+
+    // Coalesces the several field-level thread mutations that commonly happen
+    // in one event into one encrypted write after the current actor turn.
+    func scheduleCurrentMacThreadListSnapshotPersistence() {
+        guard !suspendAutomaticMacScopedPersistence,
+              !isApplyingMacScopedState else {
+            return
+        }
+
+        let capturedThreads = threads
+        let capturedMacDeviceId = currentMacScopedPersistenceDeviceId
+        threadListSnapshotPersistenceTask?.cancel()
+        threadListSnapshotPersistenceTask = Task { @MainActor [weak self] in
+            await Task.yield()
+            guard let self, !Task.isCancelled else { return }
+            self.threadListSnapshotPersistenceTask = nil
+            let snapshot = Array(
+                self.sortThreads(capturedThreads).prefix(self.recentActiveThreadListLimit)
+            )
+            self.threadListPersistence.save(snapshot, macDeviceId: capturedMacDeviceId)
+        }
+    }
+
+    // Immediately flushes the last verified sidebar metadata when a caller
+    // needs a durable snapshot before yielding or constructing a new service.
+    func persistCurrentMacThreadListSnapshot() {
+        guard !suspendAutomaticMacScopedPersistence,
+              !isApplyingMacScopedState else {
+            return
+        }
+
+        threadListSnapshotPersistenceTask?.cancel()
+        threadListSnapshotPersistenceTask = nil
+        let snapshot = Array(sortThreads(threads).prefix(recentActiveThreadListLimit))
+        threadListPersistence.save(
+            snapshot,
+            macDeviceId: currentMacScopedPersistenceDeviceId
+        )
+    }
+
+    // Restores only cached sidebar metadata. Message bodies remain controlled by
+    // the separate encrypted message cache and manual-switch policy.
+    func loadThreadListSnapshot(for macDeviceId: String?) {
+        let normalizedMacDeviceId = normalizedMacScopedDeviceId(macDeviceId)
+        let includeLegacyFallback = shouldLoadLegacyLocalStateFallback(for: normalizedMacDeviceId)
+        let cachedThreads = threadListPersistence.load(
+            macDeviceId: normalizedMacDeviceId,
+            includeLegacyFallback: includeLegacyFallback
+        )
+        let deletedThreadIDs = locallyDeletedThreadIDs
+        let archivedThreadIDs = locallyArchivedThreadIDs
+
+        withApplyingMacScopedState {
+            threads = sortThreads(cachedThreads.compactMap { cachedThread in
+                guard !deletedThreadIDs.contains(cachedThread.id) else {
+                    return nil
+                }
+                var restoredThread = cachedThread
+                restoredThread.syncState = archivedThreadIDs.contains(restoredThread.id)
+                    ? .archivedLocal
+                    : .live
+                applyPersistedThreadRename(to: &restoredThread)
+                return restoredThread
+            })
+            restoredThreadSnapshotIDs = Set(threads.map(\.id))
+        }
+    }
 }
 
 private extension CodexService {
@@ -474,6 +556,7 @@ private extension CodexService {
 
         migratedCaches = mergeMacScopedMessages(from: sourceDeviceIds, to: targetDeviceId) || migratedCaches
         migratedCaches = mergeMacScopedComposerDrafts(from: sourceDeviceIds, to: targetDeviceId) || migratedCaches
+        migratedCaches = mergeMacScopedThreadListSnapshots(from: sourceDeviceIds, to: targetDeviceId) || migratedCaches
         migratedCaches = mergeMacScopedChangeSets(from: sourceDeviceIds, to: targetDeviceId) || migratedCaches
 
         return migratedCaches
@@ -677,6 +760,33 @@ private extension CodexService {
         }
 
         return changed
+    }
+
+    func mergeMacScopedThreadListSnapshots(
+        from sourceDeviceIds: [String],
+        to targetDeviceId: String
+    ) -> Bool {
+        var mergedByID = Dictionary(
+            threadListPersistence.load(macDeviceId: targetDeviceId).map { ($0.id, $0) },
+            uniquingKeysWith: { existing, _ in existing }
+        )
+        var changed = false
+
+        for sourceDeviceId in sourceDeviceIds {
+            defer { threadListPersistence.delete(macDeviceId: sourceDeviceId) }
+            for sourceThread in threadListPersistence.load(macDeviceId: sourceDeviceId) {
+                guard mergedByID[sourceThread.id] == nil else { continue }
+                mergedByID[sourceThread.id] = sourceThread
+                changed = true
+            }
+        }
+
+        guard changed else { return false }
+        threadListPersistence.save(
+            Array(sortThreads(Array(mergedByID.values)).prefix(recentActiveThreadListLimit)),
+            macDeviceId: targetDeviceId
+        )
+        return true
     }
 
     func migrateMacScopedOpaqueDefaultIfEmpty(fromKey sourceKey: String, toKey targetKey: String) -> Bool {

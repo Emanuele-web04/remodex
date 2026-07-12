@@ -9,6 +9,7 @@ import Foundation
 private struct AssistantEventIdentity {
     let turnId: String?
     let itemId: String?
+    let sourceItemKey: String?
     let phase: String?
 }
 
@@ -38,7 +39,10 @@ extension CodexService {
         if let directThreadId = extractThreadID(from: paramsObject),
            !directThreadId.isEmpty,
            !isReplayedEvent,
-           turnTerminalState(for: extractTurnID(from: paramsObject)) == nil {
+           turnTerminalState(
+               for: extractTurnID(from: paramsObject),
+               threadId: directThreadId
+           ) == nil {
             markThreadAsRunning(directThreadId)
         }
 
@@ -51,7 +55,8 @@ extension CodexService {
             return
         }
 
-        if !isReplayedEvent, turnTerminalState(for: turnId) == nil {
+        if !isReplayedEvent,
+           turnTerminalState(for: turnId, threadId: context.threadId) == nil {
             markThreadAsRunning(context.threadId)
             if activeTurnID(for: context.threadId) == nil {
                 setActiveTurnID(turnId, for: context.threadId)
@@ -147,6 +152,7 @@ extension CodexService {
                 threadId: context.threadId,
                 turnId: turnId,
                 itemId: context.identity.itemId,
+                sourceItemKey: context.identity.sourceItemKey,
                 assistantPhase: context.identity.phase,
                 text: text
             )
@@ -196,6 +202,7 @@ extension CodexService {
                 threadId: context.threadId,
                 turnId: context.identity.turnId,
                 itemId: context.identity.itemId,
+                sourceItemKey: context.identity.sourceItemKey,
                 assistantPhase: context.identity.phase,
                 text: text
             )
@@ -227,6 +234,7 @@ extension CodexService {
             threadId: context.threadId,
             turnId: turnId,
             itemId: context.identity.itemId,
+            sourceItemKey: context.identity.sourceItemKey,
             assistantPhase: context.identity.phase,
             text: text
         )
@@ -289,8 +297,13 @@ extension CodexService {
             return
         }
 
+        let lifecycleTurnID = extractTurnID(from: paramsObject)
+        let lifecycleThreadID = resolveThreadID(
+            from: paramsObject,
+            turnIdHint: lifecycleTurnID
+        )
         // Replayed item lifecycle events for finished turns must not revive running UI.
-        if turnTerminalState(for: extractTurnID(from: paramsObject)) != nil {
+        if turnTerminalState(for: lifecycleTurnID, threadId: lifecycleThreadID) != nil {
             return
         }
 
@@ -442,12 +455,33 @@ private extension CodexService {
         return AssistantEventIdentity(
             turnId: turnId,
             itemId: itemId,
+            sourceItemKey: extractRemodexSourceItemKey(
+                paramsObject: paramsObject,
+                eventObject: eventObject,
+                itemObject: itemObject
+            ),
             phase: extractAssistantPhase(
                 paramsObject: paramsObject,
                 eventObject: eventObject,
                 itemObject: itemObject
             )
         )
+    }
+
+    // The local bridge derives this from the source turn plus message content. It is not a
+    // provider id and is used only to reconcile the same assistant item across source handoffs.
+    func extractRemodexSourceItemKey(
+        paramsObject: IncomingParamsObject,
+        eventObject: IncomingParamsObject?,
+        itemObject: IncomingParamsObject?
+    ) -> String? {
+        firstNonEmptyString([
+            paramsObject["remodexSourceItemKey"]?.stringValue,
+            eventObject?["remodexSourceItemKey"]?.stringValue,
+            itemObject?["remodexSourceItemKey"]?.stringValue,
+            paramsObject["item"]?.objectValue?["remodexSourceItemKey"]?.stringValue,
+            eventObject?["item"]?.objectValue?["remodexSourceItemKey"]?.stringValue,
+        ])
     }
 
     // Resolves assistant event context and preserves turn->thread mapping when available.

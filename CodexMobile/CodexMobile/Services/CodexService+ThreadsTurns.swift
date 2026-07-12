@@ -6,7 +6,7 @@
 
 import Foundation
 
-private enum ThreadTurnStateSnapshotPolicy {
+enum ThreadTurnStateSnapshotPolicy {
     static let recentTurnLimit = 8
     static let requestTimeoutNanoseconds: UInt64 = 30_000_000_000
 }
@@ -151,15 +151,28 @@ extension CodexService {
         runtimeOverride: CodexThreadRuntimeOverride? = nil
     ) async throws -> CodexThread {
         let normalizedPreferredProjectPath = CodexThreadStartProjectBinding.normalizedProjectPath(preferredProjectPath)
+        let runtimeOverrideModel = runtimeOverride?.modelId.flatMap { modelId in
+            availableModels.first { $0.id == modelId || $0.model == modelId }
+        }
+        let explicitModelIdentifier = runtimeOverride?.overridesModel == true
+            ? (runtimeOverrideModel?.model ?? runtimeOverride?.modelId)
+            : runtimeModelIdentifierForTurn()
         // Brand-new chats start from app defaults; per-chat overrides are inherited only on continuation.
-        let explicitServiceTier = runtimeOverride?.overridesServiceTier == true
-            ? normalizedServiceTierForSelectedModel(runtimeOverride?.serviceTier)?.rawValue
-            : runtimeServiceTierForTurn()
+        let explicitServiceTier: String? = {
+            guard runtimeOverride?.overridesServiceTier == true else {
+                return runtimeServiceTierForTurn()
+            }
+            guard let requestedTier = runtimeOverride?.serviceTier else {
+                return nil
+            }
+            let model = runtimeOverrideModel ?? selectedModelOption()
+            return model?.supportsServiceTier(requestedTier) == false ? nil : requestedTier.rawValue
+        }()
         var includesServiceTier = explicitServiceTier != nil
 
         while true {
             let params = CodexThreadStartProjectBinding.makeThreadStartParams(
-                modelIdentifier: runtimeModelIdentifierForTurn(),
+                modelIdentifier: explicitModelIdentifier,
                 preferredProjectPath: normalizedPreferredProjectPath,
                 serviceTier: includesServiceTier ? explicitServiceTier : nil
             )
@@ -1273,7 +1286,7 @@ extension CodexService {
         let requestedSignature = CodexThreadResumeRequestSignature(
             projectPath: CodexThreadStartProjectBinding.normalizedProjectPath(preferredProjectPath)
                 ?? thread(for: threadId)?.gitWorkingDirectory,
-            modelIdentifier: modelIdentifierOverride ?? runtimeModelIdentifierForTurn()
+            modelIdentifier: modelIdentifierOverride ?? runtimeModelIdentifierForTurn(threadId: threadId)
         )
         let refreshGeneration = currentPerThreadRefreshGeneration(for: threadId)
         if let existingTask = threadResumeTaskByThreadID[threadId] {
@@ -1361,6 +1374,7 @@ extension CodexService {
                         )
                         let existingMessages = messagesByThread[threadId] ?? []
                         let activeThreadIDs = Set(activeTurnIdByThread.keys)
+                        let activeTurnIDs = Set(activeTurnIdByThread.values)
                         let runningIDs = runningThreadIDs
                         let usedRecentWindow = threadHasActiveOrRunningTurn(threadId)
                             && Self.shouldPreferRecentHistoryWindow(
@@ -1377,6 +1391,7 @@ extension CodexService {
                             existing: existingMessages,
                             history: historyMessages,
                             activeThreadIDs: activeThreadIDs,
+                            activeTurnIDs: activeTurnIDs,
                             runningThreadIDs: runningIDs,
                             preferRecentWindow: usedRecentWindow
                         )
@@ -1468,10 +1483,21 @@ extension CodexService {
                 }
 
                 if let runningTurnID = snapshot.interruptibleTurnID,
-                   turnTerminalState(for: runningTurnID) != nil {
+                   turnTerminalState(for: runningTurnID, threadId: normalizedThreadID) != nil {
+                    let currentActiveTurnID = activeTurnID(for: normalizedThreadID)
+                    let isStaleDesktopCandidateForDifferentActiveTurn = currentActiveTurnID != nil
+                        && currentActiveTurnID != runningTurnID
+                        && (CodexSyntheticIdentifiers.isProjectedDesktopTurnID(runningTurnID)
+                            || isDesktopMirroredRunning(normalizedThreadID))
+                    // A stale Litter/app-server probe can still report completed A
+                    // after live mirroring has already promoted B. Recognizing A as
+                    // terminal must not tear down the different, newer active turn.
+                    if isStaleDesktopCandidateForDifferentActiveTurn {
+                        return true
+                    }
                     clearRunningState(for: normalizedThreadID)
                     setProtectedRunningFallback(false, for: normalizedThreadID)
-                    if let existingTurnID = activeTurnID(for: normalizedThreadID) {
+                    if let existingTurnID = currentActiveTurnID {
                         setActiveTurnID(nil, for: normalizedThreadID)
                         if threadIdByTurnID[existingTurnID] == normalizedThreadID {
                             threadIdByTurnID.removeValue(forKey: existingTurnID)
@@ -2203,7 +2229,7 @@ extension CodexService {
         if resolution == .completed {
             recordTurnTerminalState(threadId: threadId, turnId: turnId, state: .completed)
         }
-        noteTurnFinished(turnId: turnId)
+        noteTurnFinished(threadId: threadId, turnId: turnId)
         markTurnCompleted(threadId: threadId, turnId: turnId)
     }
 
@@ -2323,27 +2349,15 @@ extension CodexService {
         return inputItems
     }
 
-    // Keeps the local bubble human-only; the turn/start payload still carries legacy text
-    // fallbacks so desktop Codex can read structured mentions.
+    // Keeps canonical skill tokens in the local bubble for inline rendering; the
+    // turn/start payload still carries the same legacy text and structured mentions.
     private func displayTextForOutgoingTurn(
         userInput: String,
-        skillMentions: [CodexTurnSkillMention],
+        skillMentions _: [CodexTurnSkillMention],
         mentionMentions: [CodexTurnMention]
     ) -> String {
         var trimmedInput = userInput.trimmingCharacters(in: .whitespacesAndNewlines)
         var humanTextProbe = trimmedInput
-
-        for mention in skillMentions {
-            let rawName = mention.name ?? mention.id
-            let normalizedName = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !normalizedName.isEmpty else { continue }
-            let displayName = Self.displayNameForMentionToken(normalizedName)
-            humanTextProbe = Self.removeBoundedMentionToken("$\(normalizedName)", from: humanTextProbe)
-            humanTextProbe = Self.removeBoundedMentionToken("/\(normalizedName)", from: humanTextProbe)
-            humanTextProbe = Self.removeBoundedMentionToken(displayName, from: humanTextProbe)
-            trimmedInput = Self.replacingBoundedMentionToken("$\(normalizedName)", with: displayName, in: trimmedInput)
-            trimmedInput = Self.replacingBoundedMentionToken("/\(normalizedName)", with: displayName, in: trimmedInput)
-        }
 
         for mention in mentionMentions {
             let normalizedName = mention.name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2504,7 +2518,7 @@ extension CodexService {
         ]
         // Keep the legacy top-level fields populated so plan-mode turns still honor
         // the user's selected model on runtimes that do not read collaboration settings.
-        if let modelIdentifier = runtimeModelIdentifierForTurn() {
+        if let modelIdentifier = runtimeModelIdentifierForTurn(threadId: threadId) {
             params["model"] = .string(modelIdentifier)
         }
         if let effort = selectedReasoningEffortForSelectedModel(threadId: threadId) {
@@ -2532,8 +2546,8 @@ extension CodexService {
             return nil
         }
 
-        let resolvedModel = runtimeModelIdentifierForTurn()
-            ?? selectedModelOption()?.model
+        let resolvedModel = runtimeModelIdentifierForTurn(threadId: threadId)
+            ?? selectedModelOption(threadId: threadId)?.model
             ?? availableModels.first?.model
             ?? selectedModelId
         guard let resolvedModel,

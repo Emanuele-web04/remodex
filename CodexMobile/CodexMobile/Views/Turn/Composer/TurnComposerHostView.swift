@@ -11,11 +11,13 @@ struct TurnComposerHostView: View {
 
     let codex: CodexService
     let thread: CodexThread
+    let usesThreadRuntimeSettings: Bool
     let activeTurnID: String?
     let isThreadRunning: Bool
     let isEmptyThread: Bool
     let isWorktreeProject: Bool
     var activeFileChangeStatus: FileChangeStatusSnapshot? = nil
+    var threadGoal: CodexThreadGoal? = nil
     let canForkLocally: Bool
     let isInputFocused: Binding<Bool>
     let orderedModelOptions: [CodexModelOption]
@@ -32,6 +34,12 @@ struct TurnComposerHostView: View {
     let onOpenWorktreeHandoff: () -> Void
     let onOpenFeedbackMail: () -> Void
     let onShowStatus: () -> Void
+    // Opens the thread goal sheet; receives any remaining composer draft as an objective prefill.
+    var allowsGoalCommand: Bool = true
+    var onShowGoal: (String?) -> Void = { _ in }
+    var onRemoveGoal: () -> Void = {}
+    var onResumeGoal: () -> Void = {}
+    var onPauseGoal: () -> Void = {}
     let voiceButtonPresentation: TurnComposerVoiceButtonPresentation
     var isVoiceInputActive: Bool = false
     let isVoiceRecording: Bool
@@ -65,7 +73,8 @@ struct TurnComposerHostView: View {
                     hasSubagentsSelection: viewModel.isSubagentsSelectionArmed,
                     isPlanModeArmed: viewModel.isPlanModeArmed
                 )
-                    && !availableForkDestinations.isEmpty
+                    && !availableForkDestinations.isEmpty,
+                allowsGoalCommand: allowsGoalCommand && codex.supportsThreadGoals
             ),
             fileAutocompleteItems: viewModel.fileAutocompleteItems,
             isFileAutocompleteVisible: viewModel.isFileAutocompleteVisible,
@@ -105,13 +114,15 @@ struct TurnComposerHostView: View {
             voiceAudioLevels: voiceAudioLevels,
             voiceRecordingDuration: voiceRecordingDuration
         )
+        let runtimeThreadId = usesThreadRuntimeSettings ? thread.id : nil
         let runtimeState = TurnComposerRuntimeState.resolve(
             codex: codex,
+            threadId: runtimeThreadId,
             reasoningDisplayOptions: reasoningDisplayOptions
         )
-        let runtimeActions = TurnComposerRuntimeActions.resolve(codex: codex)
-        let selectedModelID = codex.visibleSelectedModelIDForComposer()
-        let isRuntimeSelectionLoading = codex.isRuntimeSelectionLoadingForComposer()
+        let runtimeActions = TurnComposerRuntimeActions.resolve(codex: codex, threadId: runtimeThreadId)
+        let selectedModelID = codex.visibleSelectedModelIDForComposer(threadId: runtimeThreadId)
+        let isRuntimeSelectionLoading = codex.isRuntimeSelectionLoadingForComposer(threadId: runtimeThreadId)
         let hasComposerWorkingDirectory = thread.gitWorkingDirectory != nil
             && !SidebarThreadGrouping.isRootlessChatThread(thread)
         let gitState = TurnComposerGitState(
@@ -159,6 +170,11 @@ struct TurnComposerHostView: View {
             hasWorkingDirectory: hasComposerWorkingDirectory,
             isWorktreeProject: isWorktreeProject,
             activeFileChangeStatus: activeFileChangeStatus,
+            threadGoal: threadGoal,
+            onEditGoal: { onShowGoal(nil) },
+            onRemoveGoal: onRemoveGoal,
+            onResumeGoal: onResumeGoal,
+            onPauseGoal: onPauseGoal,
             orderedModelOptions: orderedModelOptions,
             selectedModelID: selectedModelID,
             selectedModelTitle: selectedModelTitle,
@@ -256,6 +272,12 @@ struct TurnComposerHostView: View {
                         command,
                         availableForkDestinations: availableForkDestinations
                     )
+                case .goal:
+                    viewModel.onSelectSlashCommand(command)
+                    // No prefill from leftover draft here: unrelated text ending in `/goal`
+                    // must not become an objective. Inline `/goal <text>` (send path) is
+                    // the explicit way to prefill.
+                    onShowGoal(nil)
                 case .status:
                     viewModel.onSelectSlashCommand(command)
                     onShowStatus()
@@ -280,10 +302,6 @@ struct TurnComposerHostView: View {
             onCloseSlashCommandPanel: viewModel.closeSlashCommandPanel,
             onRemoveMentionedFile: { mentionID in
                 viewModel.removeMentionedFile(id: mentionID)
-                viewModel.saveLocalDraft(codex: codex, threadID: thread.id)
-            },
-            onRemoveMentionedSkill: { mentionID in
-                viewModel.removeMentionedSkill(id: mentionID)
                 viewModel.saveLocalDraft(codex: codex, threadID: thread.id)
             },
             onRemoveMentionedPlugin: { mentionID in

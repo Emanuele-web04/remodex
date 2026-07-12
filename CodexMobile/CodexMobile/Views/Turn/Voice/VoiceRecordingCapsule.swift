@@ -57,23 +57,13 @@ struct VoiceRecordingCapsule: View {
     }
 
     private var waveformView: some View {
-        GeometryReader { geometry in
-            let renderedLevels = displayedLevels(for: geometry.size.width)
-            let barWidth = renderedBarWidth(for: geometry.size.width, slotCount: renderedLevels.count)
-
-            Canvas { context, size in
-                let midY = size.height / 2
-                for (index, level) in renderedLevels.enumerated() {
-                    let h = barHeight(for: level)
-                    let x = CGFloat(index) * (barWidth + barSpacing)
-                    let rect = CGRect(x: x, y: midY - h / 2, width: barWidth, height: h)
-                    context.fill(
-                        Path(roundedRect: rect, cornerRadius: 1),
-                        with: .color(.primary.opacity(0.15 + level * 0.65))
-                    )
-                }
-            }
-        }
+        ScrollingWaveformLane(
+            levels: audioLevels,
+            barWidth: idealBarWidth,
+            barSpacing: barSpacing,
+            minHeight: barMinHeight,
+            maxHeight: barMaxHeight
+        )
         .frame(maxWidth: .infinity, alignment: .leading)
         .layoutPriority(1)
     }
@@ -104,41 +94,158 @@ struct VoiceRecordingCapsule: View {
 
     // MARK: - Helpers
 
-    private func barHeight(for level: CGFloat) -> CGFloat {
-        barMinHeight + (barMaxHeight - barMinHeight) * level
-    }
-
-    // Resamples the rolling meter history to the number of bars that fit on screen.
-    // When the clip is still short, leading slots stay quiet so the capsule width is still occupied.
-    private func displayedLevels(for availableWidth: CGFloat) -> [CGFloat] {
-        let slotCount = max(1, Int((max(availableWidth, 0) + barSpacing) / (idealBarWidth + barSpacing)))
-        guard !audioLevels.isEmpty else { return Array(repeating: 0, count: slotCount) }
-
-        let tail = Array(audioLevels.suffix(slotCount * 3))
-        if tail.count <= slotCount {
-            return Array(repeating: 0, count: slotCount - tail.count) + tail
-        }
-
-        return (0..<slotCount).map { index in
-            let start = Int((Double(index) / Double(slotCount)) * Double(tail.count))
-            let end = max(start + 1, Int((Double(index + 1) / Double(slotCount)) * Double(tail.count)))
-            let bucket = tail[start..<min(end, tail.count)]
-            return bucket.max() ?? 0
-        }
-    }
-
-    // Uses the full waveform lane width instead of letting the bars stop at their intrinsic content size.
-    private func renderedBarWidth(for availableWidth: CGFloat, slotCount: Int) -> CGFloat {
-        guard slotCount > 0 else { return idealBarWidth }
-        let totalSpacing = CGFloat(slotCount - 1) * barSpacing
-        return max(1, (max(availableWidth, 0) - totalSpacing) / CGFloat(slotCount))
-    }
-
     private var formattedDuration: String {
         let totalSeconds = Int(duration)
         let minutes = totalSeconds / 60
         let seconds = totalSeconds % 60
         return String(format: "%d:%02d", minutes, seconds)
+    }
+}
+
+// MARK: - Scrolling waveform lane
+
+// Treadmill-style waveform: every meter sample becomes one bar whose height is
+// frozen at append time. The whole strip glides left continuously so new bars
+// slide in from the right edge, instead of re-bucketing history on every sample
+// (which made existing bars jump around).
+//
+// Levels are produced on a fixed audio-time grid but reach the main thread in
+// irregular lumps (buffer boundaries, runloop coalescing can deliver two at
+// once). Scrolling therefore never keys off arrival timestamps: a free-running
+// clock advances at the nominal rate and is softly servo-corrected toward the
+// true sample count, so delivery jitter is absorbed instead of shown as a snap.
+private struct ScrollingWaveformLane: View {
+    let levels: [CGFloat]
+    let barWidth: CGFloat
+    let barSpacing: CGFloat
+    let minHeight: CGFloat
+    let maxHeight: CGFloat
+
+    // Levels are emitted at a fixed cadence (one per meter window), so the
+    // strip scrolls at a constant, known speed.
+    private let sampleInterval: TimeInterval = GPTVoiceTranscriptionManager.meterWindowSeconds
+
+    // Reference type on purpose: it mutates every frame inside the Canvas
+    // renderer, where @State writes are not allowed (and no invalidation is
+    // needed — TimelineView already redraws continuously).
+    @State private var clock = WaveformScrollClock()
+
+    var body: some View {
+        GeometryReader { geometry in
+            TimelineView(.animation) { timeline in
+                Canvas { context, size in
+                    draw(in: context, size: size, now: timeline.date)
+                }
+            }
+            .frame(width: geometry.size.width, height: geometry.size.height)
+            .clipped()
+        }
+        // Observes the array (not just its count): once the rolling buffer is
+        // full, appends keep the count constant while contents shift.
+        .onChange(of: levels) { oldLevels, newLevels in
+            clock.register(oldLevels: oldLevels, newLevels: newLevels)
+        }
+        .onAppear {
+            clock.attach(levelCount: levels.count)
+        }
+    }
+
+    private func draw(in context: GraphicsContext, size: CGSize, now: Date) {
+        guard size.width > 0 else { return }
+        let head = clock.currentHead(now: now, interval: sampleInterval)
+        let slotWidth = barWidth + barSpacing
+        let midY = size.height / 2
+
+        // Absolute sample index of levels[0]; older samples were trimmed.
+        let baseIndex = clock.totalAppended - levels.count
+
+        // Newest sample first, marching left until off screen. Indices outside
+        // the available history render as quiet baseline bars.
+        var index = clock.totalAppended - 1
+        while true {
+            let distance = head - Double(index)
+            let minX = size.width - CGFloat(distance) * slotWidth
+            if minX + barWidth <= 0 { break }
+            defer { index -= 1 }
+            guard minX < size.width else { continue }
+
+            let arrayIndex = index - baseIndex
+            let level = (0..<levels.count).contains(arrayIndex) ? levels[arrayIndex] : 0
+            let height = minHeight + (maxHeight - minHeight) * level
+            let rect = CGRect(x: minX, y: midY - height / 2, width: barWidth, height: height)
+            context.fill(
+                Path(roundedRect: rect, cornerRadius: 1),
+                with: .color(.primary.opacity(0.15 + level * 0.65))
+            )
+        }
+    }
+}
+
+// Free-running scroll clock with a soft servo toward the real sample count.
+// `displayedHead` is the fractional absolute sample index currently anchored
+// at the lane's right edge; it advances one slot per meter window.
+private final class WaveformScrollClock {
+    private(set) var totalAppended = 0
+    private var displayedHead: Double = 0
+    private var lastFrameTime: Date?
+
+    // How much of the remaining drift is corrected per second. Low enough to
+    // spread a lumpy two-sample delivery over ~a third of a second.
+    private static let correctionRate: Double = 3
+    // Steady-state cushion (in slots) behind the newest sample, so ordinary
+    // arrival jitter never forces the head to stall against the data edge.
+    private static let cushion: Double = 0.5
+
+    func attach(levelCount: Int) {
+        guard totalAppended == 0 else { return }
+        totalAppended = levelCount
+        displayedHead = Double(levelCount) - Self.cushion
+        lastFrameTime = nil
+    }
+
+    func register(oldLevels: [CGFloat], newLevels: [CGFloat]) {
+        if newLevels.isEmpty {
+            totalAppended = 0
+            displayedHead = 0
+            lastFrameTime = nil
+            return
+        }
+        totalAppended += Self.appendedCount(oldLevels: oldLevels, newLevels: newLevels)
+    }
+
+    func currentHead(now: Date, interval: TimeInterval) -> Double {
+        guard totalAppended > 0 else {
+            lastFrameTime = now
+            return 0
+        }
+
+        let dt = lastFrameTime.map { max(0, min(now.timeIntervalSince($0), 0.1)) } ?? 0
+        lastFrameTime = now
+
+        // Nominal advance keeps pace with the audio clock; the servo trims the
+        // residual drift toward the cushion point without visible jumps.
+        displayedHead += dt / interval
+        let target = Double(totalAppended) - Self.cushion
+        displayedHead += (target - displayedHead) * min(1, dt * Self.correctionRate)
+
+        // Hard bounds: never scroll past real data, never fall far behind.
+        displayedHead = min(displayedHead, Double(totalAppended))
+        displayedHead = max(displayedHead, Double(totalAppended) - 3)
+        return displayedHead
+    }
+
+    // The rolling buffer keeps a constant count once full, so growth alone
+    // can't measure appends; align the shifted contents to count them exactly.
+    private static func appendedCount(oldLevels: [CGFloat], newLevels: [CGFloat]) -> Int {
+        if newLevels.count > oldLevels.count {
+            return newLevels.count - oldLevels.count
+        }
+        guard newLevels.count == oldLevels.count, !newLevels.isEmpty else { return 0 }
+        for shift in 1...min(8, newLevels.count) where
+            oldLevels.dropFirst(shift).elementsEqual(newLevels.dropLast(shift)) {
+            return shift
+        }
+        return 1
     }
 }
 
@@ -164,7 +271,11 @@ private struct VoiceRecordingCapsulePreview: View {
     @State private var levels: [CGFloat] = []
     @State private var elapsed: TimeInterval = 0
     @State private var isRecording = false
-    private let timer = Timer.publish(every: 0.09, on: .main, in: .common).autoconnect()
+    private let timer = Timer.publish(
+        every: GPTVoiceTranscriptionManager.meterWindowSeconds,
+        on: .main,
+        in: .common
+    ).autoconnect()
 
     var body: some View {
         VStack {
@@ -243,7 +354,7 @@ private struct VoiceRecordingCapsulePreview: View {
         .animation(.easeInOut(duration: 0.18), value: isRecording)
         .onReceive(timer) { _ in
             guard isRecording else { return }
-            elapsed += 0.09
+            elapsed += GPTVoiceTranscriptionManager.meterWindowSeconds
             let base: CGFloat = 0.15
             let voiceBurst = CGFloat.random(in: 0...1) > 0.7 ? CGFloat.random(in: 0.4...0.95) : 0
             let level = min(1, base + CGFloat.random(in: 0...0.3) + voiceBurst)

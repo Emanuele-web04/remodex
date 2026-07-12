@@ -83,7 +83,7 @@ struct ContentView: View {
     @State private var activeNewChatDraftRoute: NewChatDraftRoute?
     @State private var isOpeningNewChatFromSidebar = false
     @State private var pendingQuickAction: RemodexQuickAction?
-    @State private var threadIDsPendingInitialAssistantAnchor: Set<String> = []
+    @State private var threadIDsAwaitingInitialAssistantResponse: Set<String> = []
     // Settings is presented as a `fullScreenCover` instead of being pushed
     // onto `navigationPath` so the gear button works even when the sidebar
     // header is hosted inside an iOS 26 `safeAreaBar`, whose Liquid Glass
@@ -740,9 +740,9 @@ struct ContentView: View {
             TurnView(
                 thread: thread,
                 isWakingMacDisplayRecovery: isWakingSavedMacDisplay,
-                initialShouldAnchorToAssistantResponse: threadIDsPendingInitialAssistantAnchor.contains(thread.id),
-                onInitialAssistantAnchorConsumed: {
-                    threadIDsPendingInitialAssistantAnchor.remove(thread.id)
+                initiallyAwaitingAssistantResponse: threadIDsAwaitingInitialAssistantResponse.contains(thread.id),
+                onInitialAssistantResponseTrackingConsumed: {
+                    threadIDsAwaitingInitialAssistantResponse.remove(thread.id)
                 },
                 onOpenTerminal: { workingDirectory in
                     openTerminal(preferredWorkingDirectory: workingDirectory)
@@ -807,9 +807,9 @@ struct ContentView: View {
             TurnView(
                 thread: thread,
                 isWakingMacDisplayRecovery: isWakingSavedMacDisplay,
-                initialShouldAnchorToAssistantResponse: threadIDsPendingInitialAssistantAnchor.contains(thread.id),
-                onInitialAssistantAnchorConsumed: {
-                    threadIDsPendingInitialAssistantAnchor.remove(thread.id)
+                initiallyAwaitingAssistantResponse: threadIDsAwaitingInitialAssistantResponse.contains(thread.id),
+                onInitialAssistantResponseTrackingConsumed: {
+                    threadIDsAwaitingInitialAssistantResponse.remove(thread.id)
                 },
                 onOpenTerminal: { workingDirectory in
                     openTerminal(preferredWorkingDirectory: workingDirectory)
@@ -1316,7 +1316,7 @@ struct ContentView: View {
 
     private func openThreadFromNewChatDraft(_ thread: CodexThread) {
         isOpeningNewChatFromSidebar = false
-        threadIDsPendingInitialAssistantAnchor.insert(thread.id)
+        threadIDsAwaitingInitialAssistantResponse.insert(thread.id)
         selectedThread = thread
         codex.activeThreadId = thread.id
         codex.markThreadAsViewed(thread.id)

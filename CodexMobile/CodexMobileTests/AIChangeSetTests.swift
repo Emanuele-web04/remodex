@@ -76,7 +76,7 @@ final class AIChangeSetTests: XCTestCase {
             """
         )
         service.recordTurnTerminalState(threadId: threadID, turnId: turnID, state: .completed)
-        service.noteTurnFinished(turnId: turnID)
+        service.noteTurnFinished(threadId: threadID, turnId: turnID)
 
         let assistantMessage = try XCTUnwrap(service.messages(for: threadID).last(where: { $0.role == .assistant }))
         let changeSet = try XCTUnwrap(service.readyChangeSet(forAssistantMessage: assistantMessage))
@@ -86,6 +86,93 @@ final class AIChangeSetTests: XCTestCase {
         XCTAssertEqual(changeSet.assistantMessageId, assistantMessage.id)
         XCTAssertEqual(changeSet.status, .ready)
         XCTAssertEqual(changeSet.repoRoot, "/tmp/repo")
+    }
+
+    func testProjectedTurnChangeSetsStaySeparateAcrossThreads() throws {
+        let service = makeService()
+        let firstThreadID = "thread-first"
+        let secondThreadID = "thread-second"
+        let projectedTurnID = "ipc-turn-0"
+        service.threads = [
+            CodexThread(id: firstThreadID, title: "First", cwd: "/tmp/first-repo"),
+            CodexThread(id: secondThreadID, title: "Second", cwd: "/tmp/second-repo"),
+        ]
+
+        service.completeAssistantMessage(
+            threadId: firstThreadID,
+            turnId: projectedTurnID,
+            itemId: nil,
+            text: "Changed the first repository."
+        )
+        service.recordTurnDiffChangeSet(
+            threadId: firstThreadID,
+            turnId: projectedTurnID,
+            diff: """
+            diff --git a/Sources/First.swift b/Sources/First.swift
+            index 1111111..2222222 100644
+            --- a/Sources/First.swift
+            +++ b/Sources/First.swift
+            @@ -1 +1,2 @@
+             struct First {}
+            +let firstOnly = true
+            """
+        )
+
+        service.completeAssistantMessage(
+            threadId: secondThreadID,
+            turnId: projectedTurnID,
+            itemId: nil,
+            text: "Changed the second repository."
+        )
+        service.recordTurnDiffChangeSet(
+            threadId: secondThreadID,
+            turnId: projectedTurnID,
+            diff: """
+            diff --git a/Sources/Second.swift b/Sources/Second.swift
+            index 3333333..4444444 100644
+            --- a/Sources/Second.swift
+            +++ b/Sources/Second.swift
+            @@ -1 +1,2 @@
+             struct Second {}
+            +let secondOnly = true
+            """
+        )
+
+        service.recordTurnTerminalState(
+            threadId: firstThreadID,
+            turnId: projectedTurnID,
+            state: .completed
+        )
+        service.noteTurnFinished(threadId: firstThreadID, turnId: projectedTurnID)
+        service.recordTurnTerminalState(
+            threadId: secondThreadID,
+            turnId: projectedTurnID,
+            state: .completed
+        )
+        service.noteTurnFinished(threadId: secondThreadID, turnId: projectedTurnID)
+
+        let firstAssistant = try XCTUnwrap(
+            service.messages(for: firstThreadID).last(where: { $0.role == .assistant })
+        )
+        let secondAssistant = try XCTUnwrap(
+            service.messages(for: secondThreadID).last(where: { $0.role == .assistant })
+        )
+        // Exercise the turn-scoped assistant fallback rather than the primary
+        // assistant-message index, which already has globally stable IDs.
+        service.aiChangeSetIDByAssistantMessageID.removeAll()
+        let firstChangeSet = try XCTUnwrap(service.readyChangeSet(forAssistantMessage: firstAssistant))
+        let secondChangeSet = try XCTUnwrap(service.readyChangeSet(forAssistantMessage: secondAssistant))
+
+        XCTAssertNotEqual(firstChangeSet.id, secondChangeSet.id)
+        XCTAssertEqual(firstChangeSet.threadId, firstThreadID)
+        XCTAssertEqual(secondChangeSet.threadId, secondThreadID)
+        XCTAssertEqual(firstChangeSet.repoRoot, "/tmp/first-repo")
+        XCTAssertEqual(secondChangeSet.repoRoot, "/tmp/second-repo")
+        XCTAssertTrue(firstChangeSet.forwardUnifiedPatch.contains("firstOnly"))
+        XCTAssertFalse(firstChangeSet.forwardUnifiedPatch.contains("secondOnly"))
+        XCTAssertTrue(secondChangeSet.forwardUnifiedPatch.contains("secondOnly"))
+        XCTAssertFalse(secondChangeSet.forwardUnifiedPatch.contains("firstOnly"))
+        XCTAssertEqual(service.aiChangeSetIDByTurnKey.count, 2)
     }
 
     func testWorkspaceCheckpointDoesNotReplaceTurnDiffWhenFileScopeMatches() throws {
@@ -113,7 +200,7 @@ final class AIChangeSetTests: XCTestCase {
             """
         )
         service.recordTurnTerminalState(threadId: threadID, turnId: turnID, state: .completed)
-        service.noteTurnFinished(turnId: turnID)
+        service.noteTurnFinished(threadId: threadID, turnId: turnID)
         service.recordWorkspaceCheckpointChangeSet(
             threadId: threadID,
             turnId: turnID,
@@ -162,7 +249,7 @@ final class AIChangeSetTests: XCTestCase {
             """
         )
         service.recordTurnTerminalState(threadId: threadID, turnId: turnID, state: .completed)
-        service.noteTurnFinished(turnId: turnID)
+        service.noteTurnFinished(threadId: threadID, turnId: turnID)
         service.recordWorkspaceCheckpointChangeSet(
             threadId: threadID,
             turnId: turnID,
@@ -237,7 +324,7 @@ final class AIChangeSetTests: XCTestCase {
             """
         )
         service.recordTurnTerminalState(threadId: threadID, turnId: turnID, state: .completed)
-        service.noteTurnFinished(turnId: turnID)
+        service.noteTurnFinished(threadId: threadID, turnId: turnID)
 
         let assistantMessage = try XCTUnwrap(service.messages(for: threadID).last(where: { $0.role == .assistant }))
         let changeSet = try XCTUnwrap(service.readyChangeSet(forAssistantMessage: assistantMessage))
@@ -286,7 +373,7 @@ final class AIChangeSetTests: XCTestCase {
             """
         )
         service.recordTurnTerminalState(threadId: threadID, turnId: turnID, state: .completed)
-        service.noteTurnFinished(turnId: turnID)
+        service.noteTurnFinished(threadId: threadID, turnId: turnID)
 
         let assistantMessage = try XCTUnwrap(service.messages(for: threadID).last(where: { $0.role == .assistant }))
         let changeSet = try XCTUnwrap(service.aiChangeSet(forAssistantMessage: assistantMessage))
@@ -517,7 +604,7 @@ final class AIChangeSetTests: XCTestCase {
             """
         )
         service.recordTurnTerminalState(threadId: threadID, turnId: turnID, state: .completed)
-        service.noteTurnFinished(turnId: turnID)
+        service.noteTurnFinished(threadId: threadID, turnId: turnID)
 
         let assistantMessage = try XCTUnwrap(service.messages(for: threadID).last(where: { $0.role == .assistant }))
         let presentation = try XCTUnwrap(
@@ -580,7 +667,7 @@ final class AIChangeSetTests: XCTestCase {
             """
         )
         service.recordTurnTerminalState(threadId: threadID, turnId: turnID, state: .completed)
-        service.noteTurnFinished(turnId: turnID)
+        service.noteTurnFinished(threadId: threadID, turnId: turnID)
         return try! XCTUnwrap(service.messages(for: threadID).last(where: { $0.role == .assistant }))
     }
 

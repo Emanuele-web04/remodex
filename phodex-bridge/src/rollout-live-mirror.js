@@ -19,7 +19,10 @@ const {
 } = require("./rollout-turn-semantics");
 const {
   hasVisiblePlanUpdate,
+  buildRemodexSourceItemKey,
   visibleUserPromptFromInputEntries,
+  visibleUserPromptText,
+  responseItemMessageText,
 } = require("./desktop-ipc-shared");
 
 // The phone batches each poll tick's notifications and settles its timeline
@@ -34,6 +37,14 @@ const DEFAULT_ACTIVITY_HEARTBEAT_MS = 5_000;
 // (aborted/killed desktop runs never write task_complete).
 const DEFAULT_STALE_ACTIVE_RUN_MAX_AGE_MS = 10 * 60_000;
 const DEFAULT_SYNTHETIC_TERMINAL_GRACE_MS = 1_000;
+// Rollouts can be tens of megabytes. They are a live-delta fallback, not the
+// durable conversation history, so bootstrap must never synchronously parse
+// the entire file just to discover an active turn.
+const DEFAULT_BOOTSTRAP_METADATA_HEAD_BYTES = 256 * 1024;
+const DEFAULT_BOOTSTRAP_TAIL_BYTES = 4 * 1024 * 1024;
+// Keep a hard bound, but match the JSONL history reader's 64MB recovery window
+// so a long active turn does not degrade permanently to no live context.
+const DEFAULT_BOOTSTRAP_MAX_BYTES = 64 * 1024 * 1024;
 const DESKTOP_RESUME_METHODS = new Set(["thread/read", "thread/resume"]);
 
 // Observes desktop-authored rollout files and replays the currently active run as
@@ -77,17 +88,22 @@ function createRolloutLiveMirrorController({
     }
 
     let mirror;
+    let suppressionContext = {};
+    const isThreadSuppressed = () => Boolean(shouldSuppressThread?.(threadId, suppressionContext));
     mirror = createThreadRolloutLiveMirror({
       threadId,
       sendApplicationResponse: typeof shouldSuppressThread === "function"
         ? (rawNotification) => {
-          if (!shouldSuppressThread(threadId)) {
+          if (!isThreadSuppressed()) {
             sendApplicationResponse(rawNotification);
           }
         }
         : sendApplicationResponse,
       isSuppressed: typeof shouldSuppressThread === "function"
-        ? () => Boolean(shouldSuppressThread(threadId))
+        ? (context) => {
+          suppressionContext = context || {};
+          return isThreadSuppressed();
+        }
         : () => false,
       logPrefix,
       fsModule,
@@ -168,20 +184,6 @@ function createThreadRolloutLiveMirror({
     try {
       const currentTime = now();
 
-      // While another live source streams this thread the tail keeps consuming
-      // rollout lines with its emissions muted. When that source goes quiet and
-      // the mute lifts, everything consumed meanwhile was never mirrored: re-run
-      // the bootstrap catch-up so the phone backfills the gap instead of
-      // resuming from a cursor past content it never saw.
-      const suppressed = isSuppressed();
-      if (wasSuppressed && !suppressed && didBootstrap) {
-        lastSize = 0;
-        partialLine = "";
-        didBootstrap = false;
-        resetRunState(state);
-      }
-      wasSuppressed = suppressed;
-
       if (!rolloutPath) {
         if (currentTime - startedAt >= lookupTimeoutMs) {
           stop();
@@ -197,7 +199,22 @@ function createThreadRolloutLiveMirror({
         }
       }
 
-      const fileSize = readFileSize(rolloutPath, fsModule);
+      const rolloutStat = fsModule.statSync(rolloutPath);
+      const fileSize = rolloutStat.size;
+      // While another live source streams this thread the tail keeps consuming
+      // rollout lines with its emissions muted. Compare per-thread activity so
+      // a quiet Desktop turn stays owned, while newer rollout growth can recover
+      // from a stale connected snapshot.
+      const suppressed = isSuppressed({
+        fallbackActivityAt: Number(rolloutStat.mtimeMs) || 0,
+      });
+      if (wasSuppressed && !suppressed && didBootstrap) {
+        lastSize = 0;
+        partialLine = "";
+        didBootstrap = false;
+        resetRunState(state);
+      }
+      wasSuppressed = suppressed;
       if (!didBootstrap) {
         didBootstrap = true;
         bootstrapFromExistingRollout({
@@ -233,13 +250,15 @@ function createThreadRolloutLiveMirror({
       }
 
       if (fileSize > lastSize) {
+        // A capped bootstrap has no verified active-turn opener. Never append
+        // arbitrary deltas to that unknown state: wait for growth, then retry
+        // a bounded coherent bootstrap. A new task_started+prompt near EOF
+        // recovers immediately; an old huge run remains canonical-history only.
         const chunk = readFileSlice(rolloutPath, lastSize, fileSize, fsModule);
         lastSize = fileSize;
         lastActivityAt = currentTime;
         lastGrowthAt = currentTime;
         lastHeartbeatAt = currentTime;
-        // Real growth proves the run is alive again; resume normal mirroring.
-        state.suppressLiveActivityUntilGrowth = false;
         if (!chunk) {
           return;
         }
@@ -253,6 +272,14 @@ function createThreadRolloutLiveMirror({
           searchStart = nlIndex + 1;
         }
         partialLine = searchStart < combined.length ? combined.substring(searchStart) : "";
+        if (state.awaitingCoherentBoundary) {
+          if (processAwaitingCoherentBoundary(lines, state, sendApplicationResponse, currentTime)) {
+            state.awaitingCoherentBoundary = false;
+          }
+          return;
+        }
+        // Real growth proves the run is alive again; resume normal mirroring.
+        state.suppressLiveActivityUntilGrowth = false;
         processRolloutLines(lines, state, sendApplicationResponse, { nowMs: currentTime });
         return;
       }
@@ -346,7 +373,52 @@ function bootstrapFromExistingRollout({
   nowMs = Date.now(),
   staleActiveRunMaxAgeMs = DEFAULT_STALE_ACTIVE_RUN_MAX_AGE_MS,
 }) {
-  const initialContents = readFileSlice(rolloutPath, 0, fileSize, fsModule);
+  // Read metadata independently from the tail. session_meta is written at the
+  // beginning, while the active run lives at the end. This keeps reopening a
+  // 30MB rollout bounded and avoids treating a partial tail as history.
+  const metadataContents = readFileSlice(
+    rolloutPath,
+    0,
+    Math.min(fileSize, DEFAULT_BOOTSTRAP_METADATA_HEAD_BYTES),
+    fsModule
+  );
+  for (const rawLine of metadataContents.split("\n")) {
+    const parsed = safeParseJSON(rawLine.trim());
+    if (parsed?.type === "session_meta") {
+      populateSessionMetaState(state, parsed.payload);
+      break;
+    }
+  }
+  if (!isDesktopRolloutOrigin(state.sessionMeta)) {
+    state.isDesktopOrigin = false;
+    return;
+  }
+  state.isDesktopOrigin = true;
+
+  const bootstrapWindow = readCoherentBootstrapWindow({
+    rolloutPath,
+    fileSize,
+    fsModule,
+  });
+  if (!bootstrapWindow) {
+    // The active run starts outside the bounded bootstrap window. Do not emit
+    // a plausible-looking tail: canonical history remains the baseline and
+    // this mirror will still consume future growth normally.
+    state.awaitingCoherentBoundary = true;
+    return;
+  }
+  const { tailStart, contents: bootstrapContents } = bootstrapWindow;
+  let initialContents = bootstrapContents;
+  if (!initialContents) {
+    return;
+  }
+  // The first bytes may be the end of a JSON record. Drop that fragment rather
+  // than guessing, because an incomplete task_started record would lose the
+  // user opener and recreate the exact tail-only regression we are fixing.
+  if (tailStart > 0) {
+    const firstNewline = initialContents.indexOf("\n");
+    initialContents = firstNewline >= 0 ? initialContents.slice(firstNewline + 1) : "";
+  }
   if (!initialContents) {
     return;
   }
@@ -369,14 +441,20 @@ function bootstrapFromExistingRollout({
       continue;
     }
 
-    if (parsed.type === "session_meta") {
-      populateSessionMetaState(state, parsed.payload);
-    }
-
     const taskEventType = parsed?.type === "event_msg"
       ? readString(parsed?.payload?.type)
       : "";
-    if (taskEventType === "user_message") {
+    const eventUserMessage = taskEventType === "user_message"
+      && Boolean(visibleUserPromptFromInputEntries(
+        readString(parsed?.payload?.message) || readString(parsed?.payload?.text)
+      ));
+    const responseUserMessage = parsed?.type === "response_item"
+      && readString(parsed?.payload?.role).toLowerCase() === "user"
+      && Boolean(
+        visibleUserPromptFromInputEntries(extractResponseItemMessageText(parsed?.payload || {}))
+        || responseItemHasUserImage(parsed?.payload)
+      );
+    if (eventUserMessage || responseUserMessage) {
       pendingUserPreludeLine = line;
     }
     if (taskEventType === "task_started") {
@@ -413,13 +491,6 @@ function bootstrapFromExistingRollout({
     }
   }
 
-  if (!isDesktopRolloutOrigin(state.sessionMeta)) {
-    state.isDesktopOrigin = false;
-    return;
-  }
-
-  state.isDesktopOrigin = true;
-
   if (activeRunLines.length === 0 && latestTerminalRun) {
     sendApplicationResponse(JSON.stringify(terminalCatchUpNotification(state.threadId, latestTerminalRun)));
     return;
@@ -434,8 +505,11 @@ function bootstrapFromExistingRollout({
     activeRunLines.length > 0
     && isRolloutFileStale(rolloutPath, fsModule, nowMs, staleActiveRunMaxAgeMs)
   ) {
-    state.suppressLiveActivityUntilGrowth = true;
     processRolloutLines(activeRunLines, state, () => {});
+    // task_started resets per-run state while hydrating. Apply the stale-run
+    // suppression afterwards so it survives until real file growth proves the
+    // desktop process is alive again.
+    state.suppressLiveActivityUntilGrowth = true;
     return;
   }
 
@@ -453,6 +527,174 @@ function bootstrapFromExistingRollout({
       remodexRolloutBootstrapComplete: true,
     })));
   }
+}
+
+// Expands backwards only until the newest active task has its opening user
+// message. Every expansion reads just the newly needed prefix, so a 30MB file
+// is read at most once rather than once per retry. The hard cap keeps bootstrap
+// work/memory bounded; no coherent opener means no replay.
+function readCoherentBootstrapWindow({ rolloutPath, fileSize, fsModule }) {
+  const maxBytes = Math.min(fileSize, DEFAULT_BOOTSTRAP_MAX_BYTES);
+  let windowBytes = Math.min(fileSize, DEFAULT_BOOTSTRAP_TAIL_BYTES);
+  let tailStart = Math.max(0, fileSize - windowBytes);
+  let contents = readFileSlice(rolloutPath, tailStart, fileSize, fsModule);
+  if (!contents) {
+    return null;
+  }
+
+  while (true) {
+    const alignedContents = alignedBootstrapContents(contents, tailStart);
+    const boundary = inspectBootstrapRunBoundary(alignedContents);
+    // When the window already reaches byte zero it is the complete rollout:
+    // some legitimate system/continuation turns have no materialized user row.
+    // The opener requirement only protects a truncated tail.
+    if (!boundary.hasActiveRun || boundary.hasOpeningUser || tailStart === 0) {
+      return { tailStart, contents };
+    }
+    if (windowBytes >= maxBytes || tailStart === 0) {
+      return null;
+    }
+
+    const nextWindowBytes = Math.min(maxBytes, windowBytes * 2);
+    const nextTailStart = Math.max(0, fileSize - nextWindowBytes);
+    const prefix = readFileSlice(rolloutPath, nextTailStart, tailStart, fsModule);
+    if (!prefix) {
+      return null;
+    }
+    contents = `${prefix}${contents}`;
+    windowBytes = nextWindowBytes;
+    tailStart = nextTailStart;
+  }
+}
+
+function alignedBootstrapContents(contents, tailStart) {
+  if (tailStart === 0) {
+    return contents;
+  }
+  const firstNewline = contents.indexOf("\n");
+  return firstNewline >= 0 ? contents.slice(firstNewline + 1) : "";
+}
+
+function inspectBootstrapRunBoundary(contents) {
+  let activeTurnId = "";
+  let hasOpeningUser = false;
+  let hasTurnOutputSinceStart = false;
+  let pendingUserBeforeStart = false;
+  // A tail can begin after task_started. In that case activity without a
+  // closing terminal is evidence of an unknown active boundary, not permission
+  // to replay a partial conversation.
+  let unboundedActivitySinceTerminal = false;
+
+  for (const rawLine of contents.split("\n")) {
+    const parsed = safeParseJSON(rawLine.trim());
+    if (!parsed) {
+      continue;
+    }
+    const taskEventType = parsed?.type === "event_msg"
+      ? readString(parsed?.payload?.type)
+      : "";
+    const isUser = taskEventType === "user_message"
+      || (parsed?.type === "response_item" && readString(parsed?.payload?.role).toLowerCase() === "user");
+    const isResponseUser = parsed?.type === "response_item"
+      && readString(parsed?.payload?.role).toLowerCase() === "user";
+    const userText = isResponseUser
+      ? extractResponseItemMessageText(parsed?.payload || {})
+      : firstNonEmptyString([readString(parsed?.payload?.message), readString(parsed?.payload?.text)]);
+    const isVisibleUser = isUser && Boolean(
+      visibleUserPromptText(userText).trim()
+      || (isResponseUser && responseItemHasUserImage(parsed?.payload))
+    );
+    if (taskEventType === "task_started") {
+      activeTurnId = readString(parsed?.payload?.turn_id)
+        || readString(parsed?.payload?.turnId)
+        || "synthetic-active-turn";
+      hasOpeningUser = pendingUserBeforeStart;
+      hasTurnOutputSinceStart = false;
+      pendingUserBeforeStart = false;
+      continue;
+    }
+    if (!activeTurnId) {
+      const isNeutral = isBootstrapNeutralRecord(parsed, taskEventType)
+        || (isUser && !isVisibleUser);
+      if (TERMINAL_TASK_EVENT_TYPES.has(taskEventType)) {
+        unboundedActivitySinceTerminal = false;
+      } else if (!isNeutral) {
+        unboundedActivitySinceTerminal = true;
+      }
+      if (isVisibleUser) {
+        pendingUserBeforeStart = true;
+      } else if (!isNeutral) {
+        pendingUserBeforeStart = false;
+      }
+      continue;
+    }
+    // The only user item that can certify a truncated active run is the one
+    // adjacent to task_started, before any assistant/tool output. Later user
+    // messages are steering/follow-up input and must never turn a partial tail
+    // into a valid bootstrap baseline.
+    if (isVisibleUser && !hasTurnOutputSinceStart) {
+      hasOpeningUser = true;
+    }
+    if (TERMINAL_TASK_EVENT_TYPES.has(taskEventType)) {
+      const terminalTurnId = readString(parsed?.payload?.turn_id)
+        || readString(parsed?.payload?.turnId);
+      if (terminalEventClosesTrackedTurn(terminalTurnId, activeTurnId)) {
+        activeTurnId = "";
+        hasOpeningUser = false;
+        hasTurnOutputSinceStart = false;
+        pendingUserBeforeStart = false;
+        unboundedActivitySinceTerminal = false;
+      }
+    } else if (!isUser && !isBootstrapNeutralRecord(parsed, taskEventType)) {
+      hasTurnOutputSinceStart = true;
+    }
+  }
+
+  return {
+    hasActiveRun: Boolean(activeTurnId) || unboundedActivitySinceTerminal,
+    hasOpeningUser,
+  };
+}
+
+// These records describe the runtime envelope around a turn. They are neither
+// visible assistant output nor tool activity, so they must not turn the first
+// real user prompt into a later steer during a bounded bootstrap scan.
+function isBootstrapNeutralRecord(entry, taskEventType = "") {
+  const entryType = readString(entry?.type).toLowerCase();
+  return entryType === "session_meta"
+    || entryType === "world_state"
+    || entryType === "turn_context"
+    || taskEventType === "context_updated";
+}
+
+// After a bounded bootstrap cannot reach the old opener, consume only new
+// bytes. A later real user+task_started boundary safely starts a new live run;
+// everything before it remains canonical-history territory.
+function processAwaitingCoherentBoundary(lines, state, sendApplicationResponse, nowMs) {
+  for (let index = 0; index < lines.length; index += 1) {
+    const rawLine = lines[index];
+    const line = rawLine.trim();
+    const parsed = safeParseJSON(line);
+    if (!parsed) continue;
+    const eventType = parsed?.type === "event_msg" ? readString(parsed?.payload?.type) : "";
+    const responseUser = parsed?.type === "response_item"
+      && readString(parsed?.payload?.role).toLowerCase() === "user";
+    const visibleUser = eventType === "user_message"
+      ? Boolean(visibleUserPromptFromInputEntries(readString(parsed?.payload?.message) || readString(parsed?.payload?.text)))
+      : responseUser && Boolean(visibleUserPromptFromInputEntries(extractResponseItemMessageText(parsed?.payload || {})) || responseItemHasUserImage(parsed?.payload));
+    if (visibleUser) state.awaitingBoundaryPreludeLine = line;
+    if (eventType !== "task_started" || !state.awaitingBoundaryPreludeLine) continue;
+    const boundaryLines = [state.awaitingBoundaryPreludeLine, line];
+    state.awaitingBoundaryPreludeLine = "";
+    resetRunState(state);
+    processRolloutLines(boundaryLines, state, sendApplicationResponse, { nowMs });
+    // The boundary and its first output frequently land in the same filesystem
+    // read. Replay the remainder immediately so recovery never drops that
+    // assistant/tool burst while changing modes.
+    processRolloutLines(lines.slice(index + 1), state, sendApplicationResponse, { nowMs });
+    return true;
+  }
+  return false;
 }
 
 function isRolloutFileStale(rolloutPath, fsModule, nowMs, staleActiveRunMaxAgeMs) {
@@ -557,6 +799,26 @@ function synthesizeNotificationsFromRolloutEntry(entry, state, { nowMs = Date.no
     const payload = entry.payload || {};
     const eventType = readString(payload.type);
 
+    if (eventType === "thread_goal_updated") {
+      const goal = payload.goal && typeof payload.goal === "object" ? payload.goal : null;
+      const threadId = readString(payload.threadId) || readString(goal?.threadId) || state.threadId;
+      if (!goal || !threadId) {
+        return [];
+      }
+      return [createNotification("thread/goal/updated", {
+        threadId,
+        turnId: readString(payload.turnId) || readString(payload.turn_id) || null,
+        goal,
+      })];
+    }
+
+    if (eventType === "thread_goal_cleared") {
+      const threadId = readString(payload.threadId) || readString(payload.thread_id) || state.threadId;
+      return threadId
+        ? [createNotification("thread/goal/cleared", { threadId })]
+        : [];
+    }
+
     if (eventType === "task_started") {
       notifications.push(...finalizePendingSyntheticTerminal(state));
       const explicitTurnId = readString(payload.turn_id) || readString(payload.turnId);
@@ -565,6 +827,8 @@ function synthesizeNotificationsFromRolloutEntry(entry, state, { nowMs = Date.no
       state.activeTurnIdIsSynthetic = !explicitTurnId;
       state.reasoningItemId = buildSyntheticItemId("thinking", state.threadId, turnId);
       state.hasThinking = false;
+      state.hasReasoningContent = false;
+      state.emittedReasoningSummaryKeys.clear();
       state.commandCalls.clear();
       state.applyPatchCalls.clear();
       state.emittedPatchApplyEndCalls.clear();
@@ -589,30 +853,7 @@ function synthesizeNotificationsFromRolloutEntry(entry, state, { nowMs = Date.no
     if (eventType === "user_message") {
       // Rollouts persist injected context (AGENTS.md instructions, IDE prompt
       // wrappers) as user_message events; only the real request is a bubble.
-      const message = visibleUserPromptFromInputEntries(
-        readString(payload.message) || readString(payload.text)
-      );
-      if (!message) {
-        return [];
-      }
-
-      const turnId = resolveRolloutEventTurnId(state, payload);
-      if (!turnId) {
-        state.pendingUserMessages.push({
-          id: readString(payload.id),
-          message,
-          timestamp: readUserMessageTimestamp(entry, payload),
-        });
-        return [];
-      }
-
-      notifications.push(createNotification("codex/event/user_message", {
-        threadId: state.threadId,
-        turnId,
-        message,
-        ...(readString(payload.id) ? { id: readString(payload.id) } : {}),
-        ...timestampParams(readUserMessageTimestamp(entry, payload)),
-      }));
+      notifications.push(...userMessageNotifications(state, entry, payload));
       return notifications;
     }
 
@@ -749,12 +990,32 @@ function reasoningNotifications(state, text) {
     return [];
   }
 
-  const delta = readString(text);
-  if (!delta) {
+  const rawText = readString(text);
+  if (!rawText) {
     return ensureThinkingNotifications(state);
   }
 
+  const summaryEntries = summaryOnlyReasoningEntries(rawText);
+  let visibleText = rawText;
+  if (summaryEntries) {
+    const unseenEntries = summaryEntries.filter((entry) => {
+      if (state.emittedReasoningSummaryKeys.has(entry.key)) {
+        return false;
+      }
+      state.emittedReasoningSummaryKeys.add(entry.key);
+      return true;
+    });
+    if (unseenEntries.length === 0) {
+      return [];
+    }
+    visibleText = unseenEntries
+      .map((entry) => `**${entry.title}**\n\n<!-- -->`)
+      .join("\n\n");
+  }
+
   state.hasThinking = true;
+  const delta = `${state.hasReasoningContent ? "\n\n" : ""}${visibleText}`;
+  state.hasReasoningContent = true;
   return [
     createNotification("item/reasoning/textDelta", {
       threadId: state.threadId,
@@ -765,8 +1026,40 @@ function reasoningNotifications(state, text) {
   ];
 }
 
+// Newer Codex rollouts write the same cumulative reasoning summaries through
+// both event_msg and response_item records. Recognize only title/comment-only
+// payloads here; detailed reasoning remains a separate opaque stream.
+function summaryOnlyReasoningEntries(text) {
+  const entries = [];
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || /^<!--.*-->$/.test(line)) {
+      continue;
+    }
+    const match = /^\*\*(.+?)\*\*$/.exec(line);
+    if (!match) {
+      return null;
+    }
+    const title = match[1].trim();
+    if (!title) {
+      return null;
+    }
+    entries.push({
+      title,
+      key: title.replace(/\s+/g, " ").toLowerCase(),
+    });
+  }
+  return entries.length > 0 ? entries : null;
+}
+
 function responseItemMessageNotifications(state, entry, payload) {
   const role = readString(payload?.role).toLowerCase();
+  if (role === "user") {
+    return userMessageNotifications(state, entry, payload, {
+      rawMessage: extractResponseItemMessageText(payload),
+      isResponseItem: true,
+    });
+  }
   if (role && role !== "assistant") {
     return [];
   }
@@ -785,6 +1078,84 @@ function responseItemMessageNotifications(state, entry, payload) {
   });
 }
 
+function userMessageNotifications(state, entry, payload, {
+  rawMessage = "",
+  isResponseItem = false,
+} = {}) {
+  const imagePlaceholder = responseItemHasUserImage(payload) ? "Image attachment" : "";
+  const message = visibleUserPromptFromInputEntries(
+    rawMessage || readString(payload?.message) || readString(payload?.text) || imagePlaceholder
+  );
+  if (!message) {
+    return [];
+  }
+  const turnId = resolveRolloutEventTurnId(state, payload);
+  const itemId = readString(payload?.id) || readString(payload?.itemId) || readString(payload?.item_id);
+  const timestamp = readUserMessageTimestamp(entry, payload);
+  if (!turnId) {
+    // response_item(user) can precede task_started. Hold it exactly like the
+    // event_msg form so task_started flushes the opener before thinking/output.
+    const pendingKey = `${itemId || ""}:${message}`;
+    if (!state.pendingUserMessages.some((pending) => `${pending.id || ""}:${pending.message}` === pendingKey)) {
+      state.pendingUserMessages.push({ id: itemId, message, timestamp, isResponseItem });
+    }
+    return [];
+  }
+
+  const dedupeKey = userMessageOccurrenceKey(state, turnId, message, { isResponseItem });
+  if (state.emittedUserMessageKeys.has(dedupeKey)) {
+    return [];
+  }
+  state.emittedUserMessageKeys.add(dedupeKey);
+  return [createNotification("codex/event/user_message", {
+    threadId: state.threadId,
+    turnId,
+    message,
+    ...(itemId ? { id: itemId } : {}),
+    ...timestampParams(timestamp),
+  })];
+}
+
+// Rollouts commonly persist one user message twice as an event_msg and a
+// response_item pair, in either order: desktop-started turns log event_msg
+// first, phone/app-server-started turns log response_item first. Pair the two
+// shapes by occurrence in both directions instead of collapsing every
+// identical text in the turn, because repeated steers are legitimate.
+function userMessageOccurrenceKey(state, turnId, message, { isResponseItem = false } = {}) {
+  const baseKey = buildRemodexSourceItemKey(turnId, message);
+  const unpairedMap = isResponseItem
+    ? state.pendingEventUserMessageOccurrencesByBaseKey
+    : state.pendingResponseItemUserMessageOccurrencesByBaseKey;
+  const ownPendingMap = isResponseItem
+    ? state.pendingResponseItemUserMessageOccurrencesByBaseKey
+    : state.pendingEventUserMessageOccurrencesByBaseKey;
+
+  const unpaired = unpairedMap.get(baseKey) || [];
+  if (unpaired.length > 0) {
+    const occurrence = unpaired.shift();
+    if (unpaired.length === 0) {
+      unpairedMap.delete(baseKey);
+    } else {
+      unpairedMap.set(baseKey, unpaired);
+    }
+    return `user:${baseKey}:${occurrence}`;
+  }
+
+  const occurrence = (state.userMessageOccurrencesByBaseKey.get(baseKey) || 0) + 1;
+  state.userMessageOccurrencesByBaseKey.set(baseKey, occurrence);
+  const ownPending = ownPendingMap.get(baseKey) || [];
+  ownPending.push(occurrence);
+  ownPendingMap.set(baseKey, ownPending);
+  return `user:${baseKey}:${occurrence}`;
+}
+
+function responseItemHasUserImage(payload) {
+  return Array.isArray(payload?.content) && payload.content.some((part) => {
+    const type = readString(part?.type).toLowerCase();
+    return type === "input_image" || type === "image" || type === "image_url";
+  });
+}
+
 function agentMessageNotifications(state, entry, payload) {
   const message = readString(payload?.message) || readString(payload?.text);
   if (!message) {
@@ -792,7 +1163,19 @@ function agentMessageNotifications(state, entry, payload) {
   }
 
   const turnId = resolveRolloutEventTurnId(state, payload);
-  const dedupeKey = agentMessageDedupeKey(turnId, message);
+  const baseKey = agentMessageDedupeKey(turnId, message);
+  const providerItemId = readString(payload?.itemId);
+  const nextOccurrence = (state.agentMessageOccurrencesByBaseKey.get(baseKey) || 0) + 1;
+  const occurrence = providerItemId && state.pendingEventAgentMessageOccurrencesByBaseKey.has(baseKey)
+    ? state.pendingEventAgentMessageOccurrencesByBaseKey.get(baseKey)
+    : nextOccurrence;
+  state.agentMessageOccurrencesByBaseKey.set(baseKey, Math.max(nextOccurrence, occurrence));
+  if (providerItemId) {
+    state.pendingEventAgentMessageOccurrencesByBaseKey.delete(baseKey);
+  } else {
+    state.pendingEventAgentMessageOccurrencesByBaseKey.set(baseKey, occurrence);
+  }
+  const dedupeKey = `${baseKey}:${occurrence}`;
   if (state.emittedAgentMessageKeys.has(dedupeKey)) {
     return [];
   }
@@ -805,7 +1188,12 @@ function agentMessageNotifications(state, entry, payload) {
   const params = {
     threadId: state.threadId,
     turnId,
-    itemId: readString(payload?.itemId) || buildAgentMessageItemId(state.threadId, turnId, entry, message),
+    itemId: providerItemId || buildAgentMessageItemId(state.threadId, turnId, entry, message),
+    // The same assistant item may first arrive as event_msg (without Codex's
+    // item id) and later as response_item/history (with one). Preserve a
+    // stable source alias across bootstrap/reconnect so the phone can merge
+    // those representations without using unsafe global text deduplication.
+    ...(occurrence === 1 ? { remodexSourceItemKey: baseKey } : {}),
     message,
   };
   const phase = readString(payload?.phase);
@@ -817,15 +1205,7 @@ function agentMessageNotifications(state, entry, payload) {
 }
 
 function extractResponseItemMessageText(payload) {
-  if (!payload || typeof payload !== "object") {
-    return "";
-  }
-
-  const content = Array.isArray(payload.content) ? payload.content : [];
-  const parts = content
-    .map((part) => readString(part?.text) || readString(part?.content) || readString(part?.message))
-    .filter(Boolean);
-  return parts.join("\n");
+  return responseItemMessageText(payload);
 }
 
 function toolStartNotifications(state, payload) {
@@ -1246,10 +1626,18 @@ function createMirrorState(threadId) {
     activeTurnId: null,
     reasoningItemId: null,
     hasThinking: false,
+    hasReasoningContent: false,
+    emittedReasoningSummaryKeys: new Set(),
     commandCalls: new Map(),
     applyPatchCalls: new Map(),
     emittedPatchApplyEndCalls: new Set(),
     emittedAgentMessageKeys: new Set(),
+    agentMessageOccurrencesByBaseKey: new Map(),
+    pendingEventAgentMessageOccurrencesByBaseKey: new Map(),
+    emittedUserMessageKeys: new Set(),
+    userMessageOccurrencesByBaseKey: new Map(),
+    pendingEventUserMessageOccurrencesByBaseKey: new Map(),
+    pendingResponseItemUserMessageOccurrencesByBaseKey: new Map(),
     pendingUserMessages: [],
     pendingSyntheticTerminalTurnId: null,
     pendingSyntheticTerminalStartedAt: 0,
@@ -1259,6 +1647,8 @@ function createMirrorState(threadId) {
     // True after a stale bootstrap: run context is hydrated but nothing is
     // emitted (including heartbeats) until the rollout file grows again.
     suppressLiveActivityUntilGrowth: false,
+    awaitingCoherentBoundary: false,
+    awaitingBoundaryPreludeLine: "",
   };
 }
 
@@ -1435,6 +1825,16 @@ function flushPendingUserMessageNotifications(state, turnId) {
   return messages
     .map((pending) => ({ ...pending, message: visibleUserPromptFromInputEntries(pending.message) }))
     .filter((pending) => pending.message)
+    .filter((pending) => {
+      const dedupeKey = userMessageOccurrenceKey(state, resolvedTurnId, pending.message, {
+        isResponseItem: pending.isResponseItem === true,
+      });
+      if (state.emittedUserMessageKeys.has(dedupeKey)) {
+        return false;
+      }
+      state.emittedUserMessageKeys.add(dedupeKey);
+      return true;
+    })
     .map((pending) => createNotification("codex/event/user_message", {
       threadId: state.threadId,
       // An empty turnId reads as "no turn identity" on the phone and blocks
@@ -1526,12 +1926,7 @@ function buildAgentMessageItemId(threadId, turnId, entry, message) {
 // Legitimately repeated identical prose in one turn is rare and the phone's
 // item-scoped dedup covers the remainder.
 function agentMessageDedupeKey(turnId, message) {
-  const messageHash = crypto
-    .createHash("sha256")
-    .update(readString(message))
-    .digest("hex")
-    .slice(0, 16);
-  return `${turnId || "turnless"}:${messageHash}`;
+  return buildRemodexSourceItemKey(turnId, message);
 }
 
 function generatedImagePathForRolloutItem(threadId, callId) {
@@ -1552,16 +1947,27 @@ function resetRunState(state) {
   state.activeTurnId = null;
   state.reasoningItemId = null;
   state.hasThinking = false;
+  state.hasReasoningContent = false;
+  state.emittedReasoningSummaryKeys.clear();
   state.commandCalls.clear();
   state.applyPatchCalls.clear();
   state.emittedPatchApplyEndCalls.clear();
   state.emittedAgentMessageKeys.clear();
+  state.agentMessageOccurrencesByBaseKey.clear();
+  state.pendingEventAgentMessageOccurrencesByBaseKey.clear();
+  state.emittedUserMessageKeys.clear();
+  state.userMessageOccurrencesByBaseKey.clear();
+  state.pendingEventUserMessageOccurrencesByBaseKey.clear();
+  state.pendingResponseItemUserMessageOccurrencesByBaseKey.clear();
   state.pendingUserMessages.length = 0;
   state.pendingSyntheticTerminalTurnId = null;
   state.pendingSyntheticTerminalStartedAt = 0;
   state.pendingSyntheticTerminalStatus = "";
   state.pendingSyntheticTerminalErrorMessage = "";
   state.activeTurnIdIsSynthetic = false;
+  state.suppressLiveActivityUntilGrowth = false;
+  state.awaitingCoherentBoundary = false;
+  state.awaitingBoundaryPreludeLine = "";
 }
 
 function readThreadId(params) {
@@ -1569,10 +1975,6 @@ function readThreadId(params) {
     readString(params?.threadId),
     readString(params?.thread_id),
   ]) || "";
-}
-
-function readFileSize(filePath, fsModule) {
-  return fsModule.statSync(filePath).size;
 }
 
 function readFileSlice(filePath, start, endExclusive, fsModule) {

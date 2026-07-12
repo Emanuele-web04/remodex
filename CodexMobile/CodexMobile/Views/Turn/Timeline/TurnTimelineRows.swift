@@ -154,7 +154,7 @@ private struct TurnTimelineMessageRow: View {
     let currentWorkingDirectory: String?
     let planMatchingFingerprint: Int
     let newestStreamingMessageID: String?
-    let autoScrollMode: TurnAutoScrollMode
+    let autoScrollMode: TurnScrollOwnership
     let showsGlobalRunningIndicator: Bool
     let movesCopyAndRunningToGroupFooter: Bool
     let onRetryUserMessage: (String) -> Void
@@ -173,7 +173,7 @@ private struct TurnTimelineMessageRow: View {
             threadMessagesForPlanMatching: threadMessagesForPlanMatching,
             currentWorkingDirectory: currentWorkingDirectory,
             planMatchingFingerprint: planMatchingFingerprint,
-            showsStreamingAnimations: autoScrollMode == .followBottom
+            showsStreamingAnimations: autoScrollMode.allowsStreamingAnimations
                 && message.id == newestStreamingMessageID,
             inlineCommitAndPushAction: inlineCommitAndPushAction,
             inlineCommitAndPushPhase: inlineCommitAndPushPhase,
@@ -206,7 +206,7 @@ private struct TurnTimelineToolBurstView: View {
     let currentWorkingDirectory: String?
     let planMatchingFingerprint: Int
     let newestStreamingMessageID: String?
-    let autoScrollMode: TurnAutoScrollMode
+    let autoScrollMode: TurnScrollOwnership
     let showsGlobalRunningIndicator: Bool
     let onRetryUserMessage: (String) -> Void
     let onTapAssistantRevert: (CodexMessage) -> Void
@@ -267,6 +267,7 @@ private struct TurnTimelineToolBurstView: View {
                 )
             }
         }
+        .id(group.id)
     }
 
     private func toolMessageRow(_ message: CodexMessage) -> some View {
@@ -302,7 +303,7 @@ private struct TurnTimelinePreviousMessagesView: View {
     let currentWorkingDirectory: String?
     let planMatchingFingerprint: Int
     let newestStreamingMessageID: String?
-    let autoScrollMode: TurnAutoScrollMode
+    let autoScrollMode: TurnScrollOwnership
     let showsGlobalRunningIndicator: Bool
     let onRetryUserMessage: (String) -> Void
     let onTapAssistantRevert: (CodexMessage) -> Void
@@ -383,7 +384,7 @@ private struct TurnTimelineCommandGroupView: View {
     let currentWorkingDirectory: String?
     let planMatchingFingerprint: Int
     let newestStreamingMessageID: String?
-    let autoScrollMode: TurnAutoScrollMode
+    let autoScrollMode: TurnScrollOwnership
     let showsGlobalRunningIndicator: Bool
     let onRetryUserMessage: (String) -> Void
     let onTapAssistantRevert: (CodexMessage) -> Void
@@ -462,12 +463,14 @@ struct TurnTimelineRowsSection: View {
     let currentWorkingDirectory: String?
     let planMatchingFingerprint: Int
     let newestStreamingMessageID: String?
-    let autoScrollMode: TurnAutoScrollMode
+    let autoScrollMode: TurnScrollOwnership
     let onRetryUserMessage: (String) -> Void
     let onTapAssistantRevert: (CodexMessage) -> Void
     let onTapSubagent: (CodexSubagentThreadPresentation) -> Void
     let onLoadEarlierMessages: () -> Void
     let pendingStreamingAssistantPlaceholderID: String?
+
+    private static let runningIndicatorRowID = "turn-timeline-running-indicator-row"
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -578,9 +581,13 @@ struct TurnTimelineRowsSection: View {
                 }
             }
 
-            if let pendingStreamingAssistantPlaceholderID {
-                StreamingAssistantPlaceholderSlot()
-                    .id(pendingStreamingAssistantPlaceholderID)
+            if showsGlobalRunningIndicator {
+                // The running indicator is a real timeline row, not a floating overlay,
+                // so it can never draw over scrolled prose. It adopts the hidden empty
+                // streaming assistant row's ID so assistant-response scroll anchoring
+                // still resolves during the pre-first-delta gap.
+                TerminalRunningIndicator()
+                    .id(pendingStreamingAssistantPlaceholderID ?? Self.runningIndicatorRowID)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

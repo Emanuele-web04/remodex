@@ -58,6 +58,10 @@ test("conversation adapter ignores empty plan updates but keeps explanation-only
     conversations.get(threadId).turns[0].items[0].explanation,
     "Keep the last meaningful plan visible."
   );
+  assert.equal(
+    conversations.get(threadId).turns[0].items[0].remodexProgressPlan,
+    true
+  );
 });
 
 test("live owner broadcasts Remodex-owned thread snapshots over Desktop IPC", async (t) => {
@@ -153,8 +157,8 @@ test("live owner broadcasts Remodex-owned thread snapshots over Desktop IPC", as
     frames,
     (frame) => frame.type === "broadcast" && frame.method === "thread-stream-state-changed"
   );
-  assert.equal(broadcast.version, 8);
-  assert.equal(broadcast.params.version, 8);
+  assert.equal(broadcast.version, 11);
+  assert.equal(broadcast.params.version, 11);
   assert.equal(broadcast.params.conversationId, "thread-live-owner");
     assert.equal(broadcast.params.remodexOwnerSource, "desktop-ipc-live-owner");
   assert.equal(broadcast.params.change.type, "snapshot");
@@ -264,8 +268,8 @@ test("live owner broadcasts patches after the first owned thread snapshot", asyn
         && JSON.stringify(patch.path) === JSON.stringify(["turns", 0])
       ))
   );
-  assert.equal(turnPatchBroadcast.version, 8);
-  assert.equal(turnPatchBroadcast.params.version, 8);
+  assert.equal(turnPatchBroadcast.version, 11);
+  assert.equal(turnPatchBroadcast.params.version, 11);
 
   owner.observeOutbound(JSON.stringify({
     method: "item/agentMessage/delta",
@@ -358,8 +362,8 @@ test("live owner starts a local IPC router when no Codex IPC socket exists", asy
       && frame.params?.conversationId === "thread-router-owned"
       && frame.params?.change?.type === "snapshot"
   );
-  assert.equal(snapshot.version, 8);
-  assert.equal(snapshot.params.version, 8);
+  assert.equal(snapshot.version, 11);
+  assert.equal(snapshot.params.version, 11);
   assert.equal(snapshot.params.change.conversationState.id, "thread-router-owned");
 
   writeFrame(desktopSocket, {
@@ -2177,7 +2181,7 @@ test("live owner broadcasts a removed snapshot before archive cleanup", async (t
       && frame.params?.remodexOwnerReleased === true
   );
   assert.equal(removed.params.remodexOwnerSource, "desktop-ipc-live-owner");
-  assert.equal(removed.params.version, 8);
+  assert.equal(removed.params.version, 11);
   assert.equal(removed.params.change.type, "snapshot");
   assert.deepEqual(removed.params.change.conversationState.turns, []);
   assert.deepEqual(removed.params.change.conversationState.requests, []);
@@ -2552,6 +2556,17 @@ test("live owner applies Desktop runtime overrides to later follower turn starts
 
   const owner = createDesktopIpcLiveOwner({
     socketPath,
+    runtimeSettingsStore: {
+      get(threadId) {
+        return threadId === "thread-overrides"
+          ? { model: "gpt-persisted", reasoningEffort: "medium", serviceTier: "fast" }
+          : null;
+      },
+      commit() {
+        return null;
+      },
+      attachToConversation() {},
+    },
     async sendCodexRequest(method, params) {
       codexRequests.push({ method, params });
       return { ok: true };
@@ -2606,6 +2621,7 @@ test("live owner applies Desktop runtime overrides to later follower turn starts
       input: [{ type: "text", text: "use my desktop model" }],
       model: "gpt-desktop-pick",
       effort: "high",
+      serviceTier: "fast",
     },
   }]);
 });
@@ -2700,7 +2716,7 @@ test("live owner serves follower load-complete-history with a fresh snapshot rev
   ));
   assert.ok(snapshot, "expected snapshot broadcast with the returned revision");
   assert.equal(snapshot.params.hostId, "local");
-  assert.equal(snapshot.version, 8);
+  assert.equal(snapshot.version, 11);
   const turnIds = snapshot.params.change.conversationState.turns.map((turn) => turn.turnId);
   assert.ok(turnIds.includes("turn-history-1"));
 });
@@ -2767,6 +2783,7 @@ test("live owner applies Desktop thread settings and broadcasts phone read state
       threadSettings: {
         model: "gpt-desktop-settings",
         effort: "high",
+        serviceTier: "fast",
       },
     },
   });
@@ -2804,6 +2821,7 @@ test("live owner applies Desktop thread settings and broadcasts phone read state
   const startedTurn = codexRequests.filter((request) => request.method === "turn/start").at(-1);
   assert.equal(startedTurn.params.model, "gpt-desktop-settings");
   assert.equal(startedTurn.params.effort, "high");
+  assert.equal(startedTurn.params.serviceTier, "fast");
 
   // Reading the thread from the phone broadcasts the read state to Desktop.
   owner.observeInbound(JSON.stringify({

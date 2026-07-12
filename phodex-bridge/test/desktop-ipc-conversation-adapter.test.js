@@ -14,6 +14,53 @@ const {
   buildConversationStatePatches,
 } = require("../src/desktop-ipc-state-patches");
 
+test("conversation adapter mirrors goal updates and clears as metadata", () => {
+  const conversations = new Map();
+  const apply = (message) => applyAppServerMessageToConversationState({
+    conversations,
+    message,
+    shouldOwnThread: (threadId) => threadId === "thread-goal",
+    now: () => 42,
+  });
+  apply({
+    method: "thread/goal/updated",
+    params: {
+      threadId: "thread-goal",
+      turnId: null,
+      goal: {
+        threadId: "thread-goal",
+        objective: "Ship live goal sync",
+        status: "usage_limited",
+        tokensUsed: 1200,
+        timeUsedSeconds: 90,
+        createdAt: 1,
+        updatedAt: 2,
+      },
+    },
+  });
+  assert.equal(conversations.get("thread-goal").threadGoal.status, "usageLimited");
+  assert.equal(conversations.get("thread-goal").threadGoal.objective, "Ship live goal sync");
+
+  apply({
+    method: "thread/goal/updated",
+    params: {
+      threadId: "thread-goal",
+      goal: {
+        threadId: "thread-goal",
+        objective: "Ship live goal sync",
+        status: "complete",
+        updatedAt: 3,
+      },
+    },
+  });
+  assert.equal(conversations.get("thread-goal").threadGoal, null);
+  assert.equal(conversations.get("thread-goal").completedThreadGoal.status, "complete");
+
+  apply({ method: "thread/goal/cleared", params: { threadId: "thread-goal" } });
+  assert.equal(conversations.get("thread-goal").threadGoal, null);
+  assert.equal(conversations.get("thread-goal").completedThreadGoal, null);
+});
+
 test("conversation adapter strips injected context user items from hydrated turns", () => {
   const agentsText = "# AGENTS.md instructions for /Users/me/proj\n\n<INSTRUCTIONS>\nrules\n</INSTRUCTIONS>";
   const envText = "<environment_context>\n  <cwd>/Users/me/proj</cwd>\n</environment_context>";
@@ -764,6 +811,7 @@ test("conversation adapter propagates phone turn model and effort to composer fi
         input: [{ type: "input_text", text: "use my model" }],
         model: "gpt-5.5",
         effort: "medium",
+        serviceTier: "fast",
       },
     }],
   ]]);
@@ -793,6 +841,7 @@ test("conversation adapter propagates phone turn model and effort to composer fi
   const conversation = conversations.get("thread-model-meta");
   assert.equal(conversation.latestModel, "gpt-5.5");
   assert.equal(conversation.latestReasoningEffort, "medium");
+  assert.equal(conversation.latestServiceTier, "fast");
   assert.equal(conversation.latestCollaborationMode.settings.model, "gpt-5.5");
   assert.equal(conversation.latestCollaborationMode.settings.reasoning_effort, "medium");
 });

@@ -108,6 +108,7 @@ extension CodexService {
             isConnected = true
             lastErrorMessage = nil
             try await initializeSession()
+            flushPendingReplayDiscontinuityHistoryRefresh()
             shouldAutoReconnectOnForeground = false
             connectionRecoveryState = .idle
             trustedReconnectFailureCount = 0
@@ -167,7 +168,7 @@ extension CodexService {
         }
         assistantCompletionFingerprintByThread.removeAll()
         recentActivityLineByThread.removeAll()
-        removeAllThreadTimelineState()
+        removeAllThreadTimelineState(preserveRunLifecycle: true)
         assistantRevertStateCacheByThread.removeAll()
         assistantRevertStateRevision = 0
         workspaceCheckpointCopyTaskByTurnID.values.forEach { $0.cancel() }
@@ -178,6 +179,7 @@ extension CodexService {
         supportedBridgeVoiceTranscriptionFormats = ["wav"]
         supportsThreadFork = true
         supportsTurnPagination = true
+        supportsThreadGoals = true
         hasPresentedThreadForkBridgeUpdatePrompt = false
         hasPresentedMinimumBridgePackageUpdatePrompt = false
         lastPresentedAvailableBridgePackageVersion = nil
@@ -242,12 +244,14 @@ extension CodexService {
         SecureStore.deleteValue(for: CodexSecureKeys.relayMacIdentityPublicKey)
         SecureStore.deleteValue(for: CodexSecureKeys.relayProtocolVersion)
         SecureStore.deleteValue(for: CodexSecureKeys.relayLastAppliedBridgeOutboundSeq)
+        SecureStore.deleteValue(for: CodexSecureKeys.relayBridgeReplayEpoch)
         relaySessionId = nil
         relayUrl = nil
         relayMacDeviceId = nil
         relayMacIdentityPublicKey = nil
         relayProtocolVersion = codexSecureProtocolVersion
         lastAppliedBridgeOutboundSeq = 0
+        lastAppliedBridgeReplayEpoch = nil
         shouldForceQRBootstrapOnNextHandshake = false
         trustedReconnectFailureCount = 0
         if let trustedMac = currentTrustedMacRecord {
@@ -271,8 +275,10 @@ extension CodexService {
 
         SecureStore.deleteValue(for: CodexSecureKeys.relaySessionId)
         SecureStore.deleteValue(for: CodexSecureKeys.relayLastAppliedBridgeOutboundSeq)
+        SecureStore.deleteValue(for: CodexSecureKeys.relayBridgeReplayEpoch)
         relaySessionId = nil
         lastAppliedBridgeOutboundSeq = 0
+        lastAppliedBridgeReplayEpoch = nil
         shouldForceQRBootstrapOnNextHandshake = false
         trustedReconnectFailureCount = 0
         secureConnectionState = .liveSessionUnresolved
@@ -542,9 +548,11 @@ extension CodexService {
     // never block thread sync on bridges where model/list is slow.
     func performPostConnectSyncPass(preferredThreadId: String? = nil) async {
         await syncThreadsList()
+        flushPendingReplayDiscontinuityHistoryRefresh()
         if await routePendingNotificationOpenIfPossible(refreshIfNeeded: false) {
             scheduleCompleteThreadListHydration()
             scheduleRuntimeOptionRefresh()
+            scheduleThreadGoalHydration()
             return
         }
         let resolvedPreferredThreadId = normalizedInterruptIdentifier(preferredThreadId)
@@ -577,6 +585,15 @@ extension CodexService {
         }
         scheduleCompleteThreadListHydration()
         scheduleRuntimeOptionRefresh()
+        scheduleThreadGoalHydration()
+    }
+
+    // Repaints sidebar goal badges off the critical reconnect path.
+    private func scheduleThreadGoalHydration() {
+        Task { @MainActor [weak self] in
+            guard let self, self.isConnected else { return }
+            await self.hydrateThreadGoalsSnapshot()
+        }
     }
 
     // Refreshes capped sidebar metadata without keeping initial reconnect in the loading state.
@@ -682,6 +699,8 @@ extension CodexService {
         supportedBridgeVoiceTranscriptionFormats = ["wav"]
         supportsThreadFork = true
         supportsTurnPagination = true
+        supportsThreadGoals = true
+        goalByThreadID.removeAll()
         hasPresentedThreadForkBridgeUpdatePrompt = false
         hasPresentedMinimumBridgePackageUpdatePrompt = false
         lastPresentedAvailableBridgePackageVersion = nil

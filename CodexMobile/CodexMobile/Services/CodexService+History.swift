@@ -2,8 +2,9 @@
 // Purpose: Parses thread/read history payloads into normalized timeline messages.
 // Layer: Service
 // Exports: CodexService history parsing helpers
-// Depends on: CodexMessage, JSONValue
+// Depends on: CodexMessage, CryptoKit, JSONValue
 
+import CryptoKit
 import Foundation
 import UIKit
 
@@ -15,6 +16,24 @@ fileprivate struct UserMessageSemanticKey: Equatable {
     var hasMentions: Bool {
         !skillMentions.isEmpty || !pluginMentions.isEmpty
     }
+}
+
+fileprivate struct CanonicalAssistantTurnKey: Hashable {
+    let threadId: String
+    let turnId: String
+}
+
+fileprivate struct CanonicalAssistantSourceKey: Hashable {
+    let threadId: String
+    let turnId: String
+    let sourceItemKey: String
+    let text: String
+}
+
+fileprivate struct CanonicalAssistantTurnTextKey: Hashable {
+    let threadId: String
+    let turnId: String
+    let text: String
 }
 
 extension CodexService {
@@ -39,6 +58,7 @@ extension CodexService {
         existing: [CodexMessage],
         history: [CodexMessage],
         activeThreadIDs: Set<String>,
+        activeTurnIDs: Set<String>,
         runningThreadIDs: Set<String>,
         preferRecentWindow: Bool
     ) async throws -> [CodexMessage] {
@@ -48,6 +68,7 @@ extension CodexService {
                     existing,
                     history,
                     activeThreadIDs: activeThreadIDs,
+                    activeTurnIDs: activeTurnIDs,
                     runningThreadIDs: runningThreadIDs,
                     windowSize: 160
                 )
@@ -57,6 +78,7 @@ extension CodexService {
                 existing,
                 history,
                 activeThreadIDs: activeThreadIDs,
+                activeTurnIDs: activeTurnIDs,
                 runningThreadIDs: runningThreadIDs
             )
         }
@@ -98,6 +120,7 @@ extension CodexService {
                     ?? turnTimeZoneIdentifier
                 offset += 0.001
                 let itemID = itemObject["id"]?.stringValue
+                let sourceItemKey = itemObject["remodexSourceItemKey"]?.stringValue
                 let decodedText = decodeItemText(from: itemObject)
                 let skillMentions = decodeHistorySkillMentions(from: itemObject)
                 let pluginMentions = decodeHistoryPluginMentions(from: itemObject)
@@ -112,6 +135,7 @@ extension CodexService {
                         threadId: threadId,
                         turnId: turnID,
                         itemId: itemID,
+                        sourceItemKey: sourceItemKey,
                         createdAt: timestamp,
                         timeZoneIdentifier: timeZoneIdentifier,
                         skillMentions: skillMentions,
@@ -129,6 +153,7 @@ extension CodexService {
                         threadId: threadId,
                         turnId: turnID,
                         itemId: itemID,
+                        sourceItemKey: sourceItemKey,
                         createdAt: timestamp,
                         timeZoneIdentifier: timeZoneIdentifier,
                         attachments: imageAttachments
@@ -149,6 +174,7 @@ extension CodexService {
                         threadId: threadId,
                         turnId: turnID,
                         itemId: itemID,
+                        sourceItemKey: sourceItemKey,
                         createdAt: timestamp,
                         timeZoneIdentifier: timeZoneIdentifier,
                         skillMentions: mappedRole == .user ? skillMentions : [],
@@ -297,7 +323,7 @@ extension CodexService {
                     ) else {
                         continue
                     }
-                    let isJsonlProgressPlan = itemObject["remodexJsonlProgressPlan"]?.boolValue == true
+                    let isProgressPlan = CodexPlanItemPresentationPolicy.isProgressItem(itemObject)
                     appendHistoryMessage(
                         to: &result,
                         role: .system,
@@ -309,7 +335,7 @@ extension CodexService {
                         createdAt: timestamp,
                         timeZoneIdentifier: timeZoneIdentifier,
                         planState: finalizedHistoryPlanState(decodedPlanState, turnCompleted: turnCompleted),
-                        planPresentation: isJsonlProgressPlan || itemID == nil
+                        planPresentation: isProgressPlan || itemID == nil
                             ? .progress
                             : (turnCompleted ? .resultReady : .resultClosed)
                     )
@@ -647,21 +673,239 @@ extension CodexService {
 
     func mergeHistoryMessages(_ existing: [CodexMessage], _ history: [CodexMessage]) -> [CodexMessage] {
         let activeThreadIDs = Set(activeTurnIdByThread.keys)
+        let activeTurnIDs = Set(activeTurnIdByThread.values)
         let runningIDs = runningThreadIDs
-        return (try? Self.mergeHistoryMessages(existing, history, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningIDs)) ?? existing
+        return (try? Self.mergeHistoryMessages(
+            existing,
+            history,
+            activeThreadIDs: activeThreadIDs,
+            activeTurnIDs: activeTurnIDs,
+            runningThreadIDs: runningIDs
+        )) ?? existing
+    }
+
+    // Cold/inactive hydration and thread/replaced source handoffs can repair the
+    // mirrored tail. Prune only stale mirror-minted rows inside the canonical
+    // page's anchored tail: older cached pages and unsent local prompts remain
+    // intact, while absent synthetic findings/tools cannot leak forward.
+    nonisolated static func existingMessagesForCanonicalSourceReplacement(
+        _ existing: [CodexMessage],
+        history: [CodexMessage]
+    ) -> [CodexMessage] {
+        guard !existing.isEmpty, !history.isEmpty else {
+            return existing
+        }
+
+        func kindsAreCompatible(_ first: CodexMessage, _ second: CodexMessage) -> Bool {
+            first.kind == second.kind || first.kind == .chat || second.kind == .chat
+        }
+
+        var canonicalTurnByLocalProvisionalTurn: [String: String] = [:]
+        for local in existing where local.role == .user {
+            guard let localTurnID = normalizedHistoryIdentifier(local.turnId),
+                  isProvisionalHistoryTurnIdentifier(localTurnID) else {
+                continue
+            }
+            let canonicalMatches = history.filter { canonical in
+                guard canonical.role == .user,
+                      let canonicalTurnID = normalizedHistoryIdentifier(canonical.turnId),
+                      !isProvisionalHistoryTurnIdentifier(canonicalTurnID) else {
+                    return false
+                }
+                return userMessagesMatchForHistory(local, canonical)
+                    && userMessageMetadataLooksCompatible(
+                        localMessage: local,
+                        serverMessage: canonical,
+                        allowAttachmentCountFallback: local.deliveryState == .pending
+                    )
+            }
+            let localOccurrences = existing.filter { candidate in
+                candidate.role == .user && userMessagesMatchForHistory(candidate, local)
+            }
+            if canonicalMatches.count == 1,
+               localOccurrences.count == 1,
+               let canonicalTurnID = normalizedHistoryIdentifier(canonicalMatches[0].turnId) {
+                canonicalTurnByLocalProvisionalTurn[localTurnID] = canonicalTurnID
+            }
+        }
+
+        func turnsAreCompatible(_ first: CodexMessage, _ second: CodexMessage) -> Bool {
+            let firstTurnID = normalizedHistoryIdentifier(first.turnId)
+            let secondTurnID = normalizedHistoryIdentifier(second.turnId)
+            if firstTurnID == secondTurnID {
+                return true
+            }
+            guard let firstTurnID, let secondTurnID else {
+                return false
+            }
+            return canonicalTurnByLocalProvisionalTurn[firstTurnID] == secondTurnID
+        }
+
+        func hasCanonicalCounterpart(_ local: CodexMessage) -> Bool {
+            let localItemID = normalizedHistoryIdentifier(local.itemId)
+            return history.contains { canonical in
+                guard canonical.role == local.role, kindsAreCompatible(local, canonical) else {
+                    return false
+                }
+                if let localItemID,
+                   localItemID == normalizedHistoryIdentifier(canonical.itemId) {
+                    if CodexSyntheticIdentifiers.isProjectedDesktopUserItemID(localItemID) {
+                        return userMessagesMatchForHistory(local, canonical)
+                            && turnsAreCompatible(local, canonical)
+                    }
+                    if CodexSyntheticIdentifiers.isJSONLLineFallbackItemID(localItemID) {
+                        return normalizedMessageText(local.text) == normalizedMessageText(canonical.text)
+                            && turnsAreCompatible(local, canonical)
+                    }
+                    return !CodexSyntheticIdentifiers.isMirrorMintedItemID(localItemID)
+                        || turnsAreCompatible(local, canonical)
+                }
+                if local.role == .system,
+                   local.kind == .plan,
+                   local.resolvedPlanPresentation == .progress,
+                   canonical.resolvedPlanPresentation == .progress,
+                   turnsAreCompatible(local, canonical) {
+                    return true
+                }
+                let localText = normalizedMessageText(local.text)
+                return !localText.isEmpty
+                    && localText == normalizedMessageText(canonical.text)
+                    && turnsAreCompatible(local, canonical)
+            }
+        }
+
+        func hasStrongCanonicalAnchor(_ local: CodexMessage) -> Bool {
+            let localItemID = normalizedHistoryIdentifier(local.itemId)
+            return history.contains { canonical in
+                guard canonical.role == local.role, kindsAreCompatible(local, canonical) else {
+                    return false
+                }
+                if let localItemID,
+                   localItemID == normalizedHistoryIdentifier(canonical.itemId),
+                   !CodexSyntheticIdentifiers.isMirrorMintedItemID(localItemID) {
+                    return true
+                }
+                guard turnsAreCompatible(local, canonical) else {
+                    return false
+                }
+                let localTurnID = normalizedHistoryIdentifier(local.turnId)
+                let canonicalTurnID = normalizedHistoryIdentifier(canonical.turnId)
+                let hasRealSharedTurn = localTurnID == canonicalTurnID
+                    && localTurnID.map { !isProvisionalHistoryTurnIdentifier($0) } == true
+                let hasMappedPromptTurn = local.role == .user
+                    && localTurnID.flatMap { canonicalTurnByLocalProvisionalTurn[$0] } == canonicalTurnID
+                guard hasRealSharedTurn || hasMappedPromptTurn else {
+                    return false
+                }
+                return normalizedMessageText(local.text) == normalizedMessageText(canonical.text)
+            }
+        }
+
+        let anchoredMessages = existing.filter(hasStrongCanonicalAnchor)
+        let anchoredTurnIDs = Set(
+            anchoredMessages.compactMap { normalizedHistoryIdentifier($0.turnId) }
+        )
+        let canonicalTailCandidates = existing.filter { message in
+            hasStrongCanonicalAnchor(message)
+                || normalizedHistoryIdentifier(message.turnId).map { anchoredTurnIDs.contains($0) } == true
+        }
+        guard let canonicalTailStartOrder = canonicalTailCandidates.map(\.orderIndex).min() else {
+            // With no cross-source proof, ordinary merge is safer than deleting
+            // a locally cached transcript merely because the new page is sparse.
+            return existing
+        }
+
+        return existing.filter { message in
+            guard message.orderIndex >= canonicalTailStartOrder else {
+                return true
+            }
+            if message.role == .user, message.deliveryState != .confirmed {
+                return true
+            }
+            let hasMirrorItemID = normalizedHistoryIdentifier(message.itemId)
+                .map { CodexSyntheticIdentifiers.isMirrorMintedItemID($0) }
+                ?? false
+            let hasMirrorTurnID = isProvisionalHistoryTurnIdentifier(message.turnId)
+            guard hasMirrorItemID || hasMirrorTurnID else {
+                return true
+            }
+            return hasCanonicalCounterpart(message)
+        }
+    }
+
+    // When one provisional turn has exactly one local opener and exactly one
+    // canonical opener, that prompt is safe proof for the whole turn block.
+    // Promote every row together so plans/findings/copy ownership cannot remain
+    // split across synthetic and real turn ids after reopen.
+    nonisolated static func canonicalizeUniqueProvisionalTurnMappings(
+        in messages: inout [CodexMessage],
+        history: [CodexMessage]
+    ) {
+        let localUsersByTurn = Dictionary(
+            grouping: messages.filter { message in
+                message.role == .user && isProvisionalHistoryTurnIdentifier(message.turnId)
+            },
+            by: { normalizedHistoryIdentifier($0.turnId) ?? "" }
+        )
+        for (localTurnID, localUsers) in localUsersByTurn {
+            guard !localTurnID.isEmpty, localUsers.count == 1, let localUser = localUsers.first else {
+                continue
+            }
+            let matchingLocalUsers = messages.filter { candidate in
+                candidate.role == .user
+                    && userMessagesMatchForHistory(candidate, localUser)
+                    && userMessageMetadataLooksCompatible(
+                        localMessage: candidate,
+                        serverMessage: localUser,
+                        allowAttachmentCountFallback: candidate.deliveryState == .pending
+                    )
+            }
+            guard matchingLocalUsers.count == 1 else {
+                // A partial canonical page cannot tell which repeated local
+                // prompt it represents. Leave both turn blocks untouched.
+                continue
+            }
+            let canonicalUsers = history.filter { canonical in
+                guard canonical.role == .user,
+                      let canonicalTurnID = normalizedHistoryIdentifier(canonical.turnId),
+                      !isProvisionalHistoryTurnIdentifier(canonicalTurnID) else {
+                    return false
+                }
+                return userMessagesMatchForHistory(localUser, canonical)
+                    && userMessageMetadataLooksCompatible(
+                        localMessage: localUser,
+                        serverMessage: canonical,
+                        allowAttachmentCountFallback: localUser.deliveryState == .pending
+                    )
+            }
+            guard canonicalUsers.count == 1,
+                  let canonicalTurnID = normalizedHistoryIdentifier(canonicalUsers[0].turnId) else {
+                continue
+            }
+            for index in messages.indices
+                where normalizedHistoryIdentifier(messages[index].turnId) == localTurnID {
+                messages[index].turnId = canonicalTurnID
+            }
+        }
     }
 
     nonisolated static func mergeHistoryMessages(
         _ existing: [CodexMessage],
         _ history: [CodexMessage],
         activeThreadIDs: Set<String>,
+        activeTurnIDs: Set<String>? = nil,
         runningThreadIDs: Set<String>
     ) throws -> [CodexMessage] {
         if existing.isEmpty {
             // History messages arrive in server order; assign sequential orderIndex values
             // so that the stable sort preserves server-provided chronology.
-            var sorted = AssistantReplayDeduper.dedupeBlockReplays(
-                in: history.sorted(by: { $0.createdAt < $1.createdAt })
+            var sorted = AssistantReplayDeduper.dedupeBlockReplays(in: history)
+            healExactDuplicateProviderRows(
+                in: &sorted,
+                canonicalOrderByMessageID: [:],
+                activeThreadIDs: activeThreadIDs,
+                activeTurnIDs: activeTurnIDs,
+                runningThreadIDs: runningThreadIDs
             )
             for index in sorted.indices {
                 sorted[index].orderIndex = CodexMessageOrderCounter.next()
@@ -670,17 +914,77 @@ extension CodexService {
         }
 
         var merged = existing
+        canonicalizeUniqueProvisionalTurnMappings(in: &merged, history: history)
+        let originalMessageIDs = Set(existing.map(\.id))
         let assistantHistoryCountByTurn = Dictionary(
             grouping: history.filter { $0.role == .assistant }
         ) { $0.turnId ?? "" }
         .mapValues(\.count)
         var processedHistoryMessages = 0
+        // Canonical payload order is authoritative for every represented row,
+        // including a running thread recovering from a truncated reconnect.
+        // Local-only live rows retain their occupied slots below.
+        let shouldApplyCanonicalHistoryOrder = true
+        var canonicalOrderByMessageID: [String: Int] = [:]
+
+        func recordCanonicalOrder(at index: Int) {
+            guard shouldApplyCanonicalHistoryOrder, merged.indices.contains(index) else {
+                return
+            }
+            canonicalOrderByMessageID[merged[index].id] = processedHistoryMessages
+        }
+
+        func reconcileMessage(at index: Int, with message: CodexMessage) {
+            merged[index] = reconcileExistingMessage(
+                merged[index],
+                with: message,
+                activeThreadIDs: activeThreadIDs,
+                activeTurnIDs: activeTurnIDs,
+                runningThreadIDs: runningThreadIDs
+            )
+            recordCanonicalOrder(at: index)
+        }
 
         for message in history {
             processedHistoryMessages &+= 1
             if processedHistoryMessages.isMultiple(of: 32),
                Task.isCancelled {
                 throw CancellationError()
+            }
+
+            if let incomingSourceItemKey = normalizedHistoryIdentifier(message.sourceItemKey),
+               let incomingTurnID = normalizedHistoryIdentifier(message.turnId) {
+                let eligibleAliasIndices = merged.indices.filter { index in
+                    let candidate = merged[index]
+                    return candidate.role == message.role
+                        && normalizedHistoryIdentifier(candidate.turnId) == incomingTurnID
+                        && normalizedHistoryIdentifier(candidate.sourceItemKey) == incomingSourceItemKey
+                        && sourceItemIdentityAllowsReconcile(candidate.itemId, message.itemId)
+                        && (candidate.kind == message.kind || candidate.kind == .chat || message.kind == .chat)
+                }
+                if eligibleAliasIndices.count == 1, let index = eligibleAliasIndices.first {
+                    reconcileMessage(at: index, with: message)
+                    continue
+                }
+            }
+
+            if let incomingItemId = normalizedHistoryIdentifier(message.itemId),
+               let index = merged.firstIndex(where: { candidate in
+                   normalizedHistoryIdentifier(candidate.itemId) == incomingItemId
+                       && candidate.role == message.role
+                       && (
+                           candidate.kind == message.kind
+                               || candidate.kind == .chat
+                               || message.kind == .chat
+                       )
+                       && exactHistoryItemIdentityAllowsReconcile(
+                           candidate,
+                           with: message,
+                           itemId: incomingItemId
+                       )
+               }) {
+                reconcileMessage(at: index, with: message)
+                continue
             }
 
             if message.role == .assistant,
@@ -690,7 +994,7 @@ extension CodexService {
                    message: message,
                    turnId: turnId
                ) {
-                merged[index] = reconcileExistingMessage(merged[index], with: message, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningThreadIDs)
+                reconcileMessage(at: index, with: message)
                 continue
             }
 
@@ -704,12 +1008,13 @@ extension CodexService {
                    candidate.role == .assistant
                        && candidate.turnId == turnId
                        && candidate.isStreaming
+                       && lineFallbackIdentityAllowsTurnScopedReconcile(candidate, with: message)
                        && assistantHistoryIdentityAllowsRunningReconcile(
                            localMessage: candidate,
                            serverMessage: message
                        )
                }) {
-                merged[index] = reconcileExistingMessage(merged[index], with: message, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningThreadIDs)
+                reconcileMessage(at: index, with: message)
                 continue
             }
 
@@ -743,6 +1048,7 @@ extension CodexService {
                     return candidate.role == .assistant
                         && candidate.turnId == turnId
                         && !candidate.isStreaming
+                        && lineFallbackIdentityAllowsTurnScopedReconcile(candidate, with: message)
                 }
 
                 if candidateIndices.count == 1,
@@ -751,13 +1057,9 @@ extension CodexService {
                         merged[index],
                         with: message
                     ) {
-                        merged[index] = reconcileExistingMessage(
-                            merged[index],
-                            with: message,
-                            activeThreadIDs: activeThreadIDs,
-                            runningThreadIDs: runningThreadIDs
-                        )
+                        reconcileMessage(at: index, with: message)
                     }
+                    recordCanonicalOrder(at: index)
                     continue
                 }
             }
@@ -769,8 +1071,59 @@ extension CodexService {
                    message: message,
                    turnId: turnId
                ) {
-                merged[index] = reconcileExistingMessage(merged[index], with: message, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningThreadIDs)
+                reconcileMessage(at: index, with: message)
                 continue
+            }
+
+            // Resolve the remaining composite/text identity before any broad
+            // same-turn fallback so identity-less rows still reconcile safely.
+            let exactKey = historyMessageKey(for: message)
+            if let index = merged.firstIndex(where: { candidate in
+                guard historyMessageKey(for: candidate) == exactKey else {
+                    return false
+                }
+                guard let itemId = normalizedHistoryIdentifier(message.itemId),
+                      itemId == normalizedHistoryIdentifier(candidate.itemId) else {
+                    return true
+                }
+                return exactHistoryItemIdentityAllowsReconcile(
+                    candidate,
+                    with: message,
+                    itemId: itemId
+                )
+            }) {
+                reconcileMessage(at: index, with: message)
+                continue
+            }
+
+            // Progress is one mutable plan snapshot per turn. Live Desktop
+            // updates use a turn placeholder while history uses todo-list IDs;
+            // reconcile the unique progress row instead of duplicating the card.
+            if message.role == .system,
+               message.kind == .plan,
+               message.resolvedPlanPresentation == .progress,
+               let turnId = message.turnId, !turnId.isEmpty {
+                let candidateIndices = merged.indices.filter { index in
+                    let candidate = merged[index]
+                    return candidate.role == .system
+                        && candidate.kind == .plan
+                        && candidate.turnId == turnId
+                        && candidate.resolvedPlanPresentation == .progress
+                }
+                if let index = candidateIndices.min(by: {
+                    merged[$0].orderIndex < merged[$1].orderIndex
+                }) {
+                    let keeperID = merged[index].id
+                    reconcileMessage(at: index, with: message)
+                    merged.removeAll { candidate in
+                        candidate.id != keeperID
+                            && candidate.role == .system
+                            && candidate.kind == .plan
+                            && candidate.turnId == turnId
+                            && candidate.resolvedPlanPresentation == .progress
+                    }
+                    continue
+                }
             }
 
             // Reconcile turn-scoped thinking snapshots even when the streamed row
@@ -778,14 +1131,22 @@ extension CodexService {
             // from the server's real itemId or nil.
             if message.role == .system,
                message.kind == .thinking,
-               let turnId = message.turnId, !turnId.isEmpty,
-               let index = merged.lastIndex(where: { candidate in
-                   candidate.role == .system
-                       && candidate.kind == .thinking
-                       && candidate.turnId == turnId
-               }) {
-                merged[index] = reconcileExistingMessage(merged[index], with: message, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningThreadIDs)
-                continue
+               let turnId = message.turnId, !turnId.isEmpty {
+                let candidateIndices = merged.indices.filter { index in
+                    let candidate = merged[index]
+                    return candidate.role == .system
+                        && candidate.kind == .thinking
+                        && candidate.turnId == turnId
+                        && (
+                            isProvisionalThinkingIdentifier(candidate.itemId)
+                                || isProvisionalThinkingIdentifier(message.itemId)
+                        )
+                        && lineFallbackIdentityAllowsTurnScopedReconcile(candidate, with: message)
+                }
+                if candidateIndices.count == 1, let index = candidateIndices.first {
+                    reconcileMessage(at: index, with: message)
+                    continue
+                }
             }
 
             // Reconcile turn-scoped file change items even when the streamed row
@@ -796,10 +1157,13 @@ extension CodexService {
                message.kind == .fileChange,
                let turnId = message.turnId, !turnId.isEmpty {
                 let turnBlockRange = Self.contiguousTurnBlockRange(in: merged, turnId: turnId)
-                if let index = merged.indices.last(where: { candidateIndex in
+                let candidateIndices = merged.indices.filter { candidateIndex in
                     let candidate = merged[candidateIndex]
                     guard candidate.role == .system,
-                          candidate.kind == .fileChange else {
+                          candidate.kind == .fileChange,
+                          lineFallbackIdentityAllowsTurnScopedReconcile(candidate, with: message),
+                          isProvisionalSystemItemIdentifier(candidate.itemId)
+                            || isProvisionalSystemItemIdentifier(message.itemId) else {
                         return false
                     }
                     if candidate.turnId == turnId {
@@ -814,8 +1178,9 @@ extension CodexService {
                         turnId: turnId,
                         turnBlockRange: turnBlockRange
                     )
-                }) {
-                    merged[index] = reconcileExistingMessage(merged[index], with: message, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningThreadIDs)
+                }
+                if candidateIndices.count == 1, let index = candidateIndices.first {
+                    reconcileMessage(at: index, with: message)
                     continue
                 }
             }
@@ -835,8 +1200,9 @@ extension CodexService {
                     let candidateItemId = normalizedHistoryIdentifier(merged[index].itemId)
                     let incomingItemId = normalizedHistoryIdentifier(message.itemId)
                     return candidateItemId != nil && candidateItemId == incomingItemId
+                        && lineFallbackIdentityAllowsTurnScopedReconcile(merged[index], with: message)
                 }) {
-                    merged[itemIndex] = reconcileExistingMessage(merged[itemIndex], with: message, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningThreadIDs)
+                    reconcileMessage(at: itemIndex, with: message)
                     continue
                 }
 
@@ -848,7 +1214,7 @@ extension CodexService {
                     with: message,
                     requiresExactText: false
                    ) {
-                    merged[index] = reconcileExistingMessage(merged[index], with: message, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningThreadIDs)
+                    reconcileMessage(at: index, with: message)
                     continue
                 }
 
@@ -863,7 +1229,7 @@ extension CodexService {
 
                     if reconcilableIndices.count == 1,
                        let index = reconcilableIndices.last {
-                        merged[index] = reconcileExistingMessage(merged[index], with: message, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningThreadIDs)
+                        reconcileMessage(at: index, with: message)
                         continue
                     }
                 }
@@ -873,38 +1239,46 @@ extension CodexService {
             if message.role == .system,
                message.kind == .commandExecution,
                let turnId = message.turnId, !turnId.isEmpty,
-               let incomingCommandKey = normalizedCommandExecutionPreviewKey(from: message.text),
-               let index = merged.lastIndex(where: { candidate in
+               let incomingCommandKey = normalizedCommandExecutionPreviewKey(from: message.text) {
+                let candidateIndices = merged.indices.filter { index in
+                    let candidate = merged[index]
                    guard candidate.role == .system,
                          candidate.kind == .commandExecution,
                          candidate.turnId == turnId,
+                         lineFallbackIdentityAllowsTurnScopedReconcile(candidate, with: message),
+                         isProvisionalSystemItemIdentifier(candidate.itemId)
+                            || isProvisionalSystemItemIdentifier(message.itemId),
                          let candidateCommandKey = normalizedCommandExecutionPreviewKey(from: candidate.text) else {
                        return false
                    }
                    return candidateCommandKey == incomingCommandKey
-               }) {
-                merged[index] = reconcileExistingMessage(merged[index], with: message, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningThreadIDs)
-                continue
+                }
+                if candidateIndices.count == 1, let index = candidateIndices.first {
+                    reconcileMessage(at: index, with: message)
+                    continue
+                }
             }
 
             // Reconcile turn-scoped command execution items by turnId when text-based
             // dedup above did not match (e.g. synthetic vs real itemId).
             if message.role == .system,
                message.kind == .commandExecution,
-               let turnId = message.turnId, !turnId.isEmpty,
-               let index = merged.lastIndex(where: { candidate in
-                   candidate.role == .system
-                       && candidate.kind == .commandExecution
-                       && candidate.turnId == turnId
-               }) {
-                merged[index] = reconcileExistingMessage(merged[index], with: message, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningThreadIDs)
-                continue
-            }
-
-            let key = historyMessageKey(for: message)
-            if let index = merged.firstIndex(where: { historyMessageKey(for: $0) == key }) {
-                merged[index] = reconcileExistingMessage(merged[index], with: message, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningThreadIDs)
-                continue
+               let turnId = message.turnId, !turnId.isEmpty {
+                let candidateIndices = merged.indices.filter { index in
+                    let candidate = merged[index]
+                    return candidate.role == .system
+                        && candidate.kind == .commandExecution
+                        && candidate.turnId == turnId
+                        && lineFallbackIdentityAllowsTurnScopedReconcile(candidate, with: message)
+                        && (
+                            isProvisionalSystemItemIdentifier(candidate.itemId)
+                                || isProvisionalSystemItemIdentifier(message.itemId)
+                        )
+                }
+                if candidateIndices.count == 1, let index = candidateIndices.first {
+                    reconcileMessage(at: index, with: message)
+                    continue
+                }
             }
 
             if message.role == .user {
@@ -914,12 +1288,7 @@ extension CodexService {
                 )
                 if fallbackCandidates.count == 1,
                    let index = fallbackCandidates.first {
-                    merged[index] = reconcileExistingMessage(
-                        merged[index],
-                        with: message,
-                        activeThreadIDs: activeThreadIDs,
-                        runningThreadIDs: runningThreadIDs
-                    )
+                    reconcileMessage(at: index, with: message)
                     continue
                 }
 
@@ -934,8 +1303,8 @@ extension CodexService {
                 // match several real rows are already represented; appending them
                 // duplicates the prompt instead of preserving an intentional repeat.
                 if fallbackCandidates.count > 1,
-                   isSyntheticDesktopTurnIdentifier(message.turnId)
-                    || isSyntheticDesktopUserItemIdentifier(message.itemId) {
+                   isProvisionalHistoryTurnIdentifier(message.turnId)
+                    || isProvisionalUserItemIdentifier(message.itemId) {
                     continue
                 }
             }
@@ -945,7 +1314,7 @@ extension CodexService {
                    in: merged,
                    message: message
                ) {
-                merged[pendingIndex] = reconcileExistingMessage(merged[pendingIndex], with: message, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningThreadIDs)
+                reconcileMessage(at: pendingIndex, with: message)
                 continue
             }
 
@@ -954,16 +1323,491 @@ extension CodexService {
                    in: merged,
                    threadId: message.threadId,
                    turnId: message.turnId,
+                   itemId: message.itemId,
                    text: message.text
                ) {
                 continue
             }
 
             merged.append(message)
+            recordCanonicalOrder(at: merged.index(before: merged.endIndex))
         }
 
+        repairCanonicalAssistantSourceIdentityRotations(
+            in: &merged,
+            history: history,
+            canonicalOrderByMessageID: &canonicalOrderByMessageID,
+            activeThreadIDs: activeThreadIDs,
+            activeTurnIDs: activeTurnIDs,
+            runningThreadIDs: runningThreadIDs
+        )
+
+        if shouldApplyCanonicalHistoryOrder {
+            applyCanonicalHistoryOrder(
+                to: &merged,
+                canonicalOrderByMessageID: canonicalOrderByMessageID,
+                originalMessageIDs: originalMessageIDs
+            )
+        }
+        healExactDuplicateProviderRows(
+            in: &merged,
+            canonicalOrderByMessageID: canonicalOrderByMessageID,
+            activeThreadIDs: activeThreadIDs,
+            activeTurnIDs: activeTurnIDs,
+            runningThreadIDs: runningThreadIDs
+        )
         merged.sort(by: { $0.orderIndex < $1.orderIndex })
         return historyMessagesMergingGeneratedImageArtifacts(merged)
+    }
+
+    // Reorders only the turns represented by the canonical payload. Unmatched
+    // rows stay in their original gap between canonical neighbours, and turns
+    // absent from a partial page remain hard fences instead of being swept to
+    // the end of the timeline.
+    nonisolated static func applyCanonicalHistoryOrder(
+        to messages: inout [CodexMessage],
+        canonicalOrderByMessageID: [String: Int],
+        originalMessageIDs: Set<String>
+    ) {
+        guard !canonicalOrderByMessageID.isEmpty else {
+            return
+        }
+        let slotOrderIndices = messages.map(\.orderIndex).sorted()
+        let orderedMessages = messages.sorted { $0.orderIndex < $1.orderIndex }
+        let canonicalMessages = orderedMessages
+            .filter { canonicalOrderByMessageID[$0.id] != nil }
+            .sorted { lhs, rhs in
+                let lhsOrder = canonicalOrderByMessageID[lhs.id] ?? Int.max
+                let rhsOrder = canonicalOrderByMessageID[rhs.id] ?? Int.max
+                if lhsOrder != rhsOrder {
+                    return lhsOrder < rhsOrder
+                }
+                return lhs.orderIndex < rhs.orderIndex
+            }
+        guard !canonicalMessages.isEmpty else {
+            return
+        }
+
+        var orderedGroupKeys: [String] = []
+        var canonicalMessagesByGroup: [String: [CodexMessage]] = [:]
+        var turnIDByGroup: [String: String] = [:]
+        var groupKeyByCanonicalMessageID: [String: String] = [:]
+        for message in canonicalMessages {
+            let normalizedTurnID = normalizedHistoryIdentifier(message.turnId)
+            let groupKey = normalizedTurnID
+                .map { "turn:\($0)" }
+                ?? "turnless:\(message.id)"
+            if canonicalMessagesByGroup[groupKey] == nil {
+                orderedGroupKeys.append(groupKey)
+            }
+            canonicalMessagesByGroup[groupKey, default: []].append(message)
+            groupKeyByCanonicalMessageID[message.id] = groupKey
+            if let normalizedTurnID {
+                turnIDByGroup[groupKey] = normalizedTurnID
+            }
+        }
+
+        let canonicalMessageIDs = Set(canonicalMessages.map(\.id))
+        let coveredTurnIDs = Set(turnIDByGroup.values)
+        func coveredGroupKey(for message: CodexMessage) -> String? {
+            if let key = groupKeyByCanonicalMessageID[message.id] {
+                return key
+            }
+            guard let turnID = normalizedHistoryIdentifier(message.turnId) else {
+                return nil
+            }
+            guard coveredTurnIDs.contains(turnID) else {
+                return nil
+            }
+            return "turn:\(turnID)"
+        }
+
+        var allMessagesByGroup: [String: [CodexMessage]] = [:]
+        var orderedPositionByMessageID: [String: Int] = [:]
+        for (position, message) in orderedMessages.enumerated() {
+            if orderedPositionByMessageID[message.id] == nil {
+                orderedPositionByMessageID[message.id] = position
+            }
+            if let groupKey = coveredGroupKey(for: message) {
+                allMessagesByGroup[groupKey, default: []].append(message)
+            }
+        }
+
+        // Build each covered turn independently. Canonical rows define the
+        // order, while local-only rows retain the gap they occupied between
+        // original canonical anchors (A, local X, B stays A, X, B).
+        var rebuiltMessagesByGroup: [String: [CodexMessage]] = [:]
+        for groupKey in orderedGroupKeys {
+            guard let groupCanonicalMessages = canonicalMessagesByGroup[groupKey],
+                  !groupCanonicalMessages.isEmpty else {
+                continue
+            }
+            let groupMessages = allMessagesByGroup[groupKey] ?? groupCanonicalMessages
+            var canonicalRankByMessageID: [String: Int] = [:]
+            for (rank, message) in groupCanonicalMessages.enumerated()
+                where canonicalRankByMessageID[message.id] == nil {
+                canonicalRankByMessageID[message.id] = rank
+            }
+            let anchors: [(position: Int, rank: Int)] = groupCanonicalMessages.compactMap { message in
+                guard originalMessageIDs.contains(message.id),
+                      let position = orderedPositionByMessageID[message.id],
+                      let rank = canonicalRankByMessageID[message.id] else {
+                    return nil
+                }
+                return (position, rank)
+            }.sorted { $0.position < $1.position }
+            var localBuckets = Array(
+                repeating: [CodexMessage](),
+                count: groupCanonicalMessages.count + 1
+            )
+
+            for localMessage in groupMessages where !canonicalMessageIDs.contains(localMessage.id) {
+                let localPosition = orderedPositionByMessageID[localMessage.id] ?? Int.max
+                let previousAnchor = anchors.last(where: { $0.position < localPosition })
+                let nextAnchor = anchors.first(where: { $0.position > localPosition })
+                let slot: Int
+                if let previousAnchor, let nextAnchor, previousAnchor.rank < nextAnchor.rank {
+                    slot = nextAnchor.rank
+                } else if let previousAnchor {
+                    slot = min(previousAnchor.rank + 1, groupCanonicalMessages.count)
+                } else if let nextAnchor {
+                    slot = nextAnchor.rank
+                } else if groupCanonicalMessages.first?.role == .user {
+                    slot = min(1, groupCanonicalMessages.count)
+                } else {
+                    slot = 0
+                }
+                localBuckets[slot].append(localMessage)
+            }
+
+            var rebuiltGroup: [CodexMessage] = []
+            for canonicalIndex in groupCanonicalMessages.indices {
+                rebuiltGroup.append(contentsOf: localBuckets[canonicalIndex])
+                rebuiltGroup.append(groupCanonicalMessages[canonicalIndex])
+            }
+            rebuiltGroup.append(contentsOf: localBuckets[groupCanonicalMessages.count])
+            rebuiltMessagesByGroup[groupKey] = rebuiltGroup
+        }
+
+        let uncoveredMessages = orderedMessages.filter { coveredGroupKey(for: $0) == nil }
+        var anchoredSegmentByGroup: [String: Int] = [:]
+        for groupKey in orderedGroupKeys {
+            let originalPositions = (allMessagesByGroup[groupKey] ?? []).compactMap { message -> Int? in
+                guard originalMessageIDs.contains(message.id) else {
+                    return nil
+                }
+                return orderedPositionByMessageID[message.id]
+            }
+            guard let anchorPosition = originalPositions.min() else {
+                continue
+            }
+            anchoredSegmentByGroup[groupKey] = orderedMessages[..<anchorPosition].reduce(into: 0) { count, message in
+                if coveredGroupKey(for: message) == nil {
+                    count += 1
+                }
+            }
+        }
+
+        // A group introduced wholly by history normally follows the cached
+        // transcript. If the only trailing cache is an unsent/failed prompt,
+        // however, that prompt is newer and must remain after recovered history.
+        let firstPendingFence = uncoveredMessages.firstIndex(where: {
+            $0.role == .user && $0.deliveryState != .confirmed
+        })
+        var resolvedSegmentByGroup = anchoredSegmentByGroup
+        for (groupIndex, groupKey) in orderedGroupKeys.enumerated()
+            where resolvedSegmentByGroup[groupKey] == nil {
+            let naturalAnchorPosition = (allMessagesByGroup[groupKey] ?? [])
+                .compactMap { orderedPositionByMessageID[$0.id] }
+                .min()
+                ?? orderedMessages.count
+            let naturalSegment = orderedMessages[..<naturalAnchorPosition].reduce(into: 0) { count, message in
+                if coveredGroupKey(for: message) == nil {
+                    count += 1
+                }
+            }
+            let previousSegment = orderedGroupKeys[..<groupIndex]
+                .reversed()
+                .compactMap { anchoredSegmentByGroup[$0] }
+                .first
+            let followingSegment = orderedGroupKeys[(groupIndex + 1)...]
+                .compactMap { anchoredSegmentByGroup[$0] }
+                .first
+            let canonicalNeighbourSegment = previousSegment == followingSegment
+                ? previousSegment
+                : nil
+            let segmentBeforePending = firstPendingFence.map { min(naturalSegment, $0) }
+                ?? naturalSegment
+            resolvedSegmentByGroup[groupKey] = canonicalNeighbourSegment ?? segmentBeforePending
+        }
+
+        var groupKeysBySegment: [Int: [String]] = [:]
+        for groupKey in orderedGroupKeys {
+            let segment = min(
+                max(resolvedSegmentByGroup[groupKey] ?? uncoveredMessages.count, 0),
+                uncoveredMessages.count
+            )
+            groupKeysBySegment[segment, default: []].append(groupKey)
+        }
+
+        var rebuiltTimeline: [CodexMessage] = []
+        for segment in 0...uncoveredMessages.count {
+            for groupKey in groupKeysBySegment[segment] ?? [] {
+                rebuiltTimeline.append(contentsOf: rebuiltMessagesByGroup[groupKey] ?? [])
+            }
+            if segment < uncoveredMessages.count {
+                rebuiltTimeline.append(uncoveredMessages[segment])
+            }
+        }
+
+        guard rebuiltTimeline.count == slotOrderIndices.count else {
+            return
+        }
+        for index in rebuiltTimeline.indices {
+            rebuiltTimeline[index].orderIndex = slotOrderIndices[index]
+        }
+        messages = rebuiltTimeline
+    }
+
+    // Repairs duplicates already persisted by older reconnect replay. Only an
+    // exact item identity is eligible; semantic similarity never deletes an
+    // intentional repeat with a different provider id.
+    nonisolated static func healExactDuplicateProviderRows(
+        in messages: inout [CodexMessage],
+        canonicalOrderByMessageID: [String: Int],
+        activeThreadIDs: Set<String>,
+        activeTurnIDs: Set<String>? = nil,
+        runningThreadIDs: Set<String>
+    ) {
+        let orderedIndices = messages.indices.sorted { messages[$0].orderIndex < messages[$1].orderIndex }
+        var keeperIndicesByKey: [String: [Int]] = [:]
+        var duplicateIndices: [Int] = []
+
+        for index in orderedIndices {
+            let message = messages[index]
+            guard message.role == .system || message.role == .assistant,
+                  let itemId = normalizedHistoryIdentifier(message.itemId) else {
+                continue
+            }
+            let key = "\(message.threadId)|\(message.role.rawValue)|\(itemId)"
+            let keeperIndex = keeperIndicesByKey[key]?.first(where: { candidateIndex in
+                let candidate = messages[candidateIndex]
+                return candidate.kind == message.kind
+                    || candidate.kind == .chat
+                    || message.kind == .chat
+            })
+            guard let keeperIndex else {
+                keeperIndicesByKey[key, default: []].append(index)
+                continue
+            }
+
+            let keeperIsCanonical = canonicalOrderByMessageID[messages[keeperIndex].id] != nil
+            let duplicateIsCanonical = canonicalOrderByMessageID[message.id] != nil
+            let upgradesGenericKind = messages[keeperIndex].kind == .chat && message.kind != .chat
+            if (
+                !keeperIsCanonical
+                    && (duplicateIsCanonical || message.text.utf8.count > messages[keeperIndex].text.utf8.count)
+            ) || upgradesGenericKind {
+                let preservedOrderIndex = messages[keeperIndex].orderIndex
+                messages[keeperIndex] = reconcileExistingMessage(
+                    messages[keeperIndex],
+                    with: message,
+                    activeThreadIDs: activeThreadIDs,
+                    activeTurnIDs: activeTurnIDs,
+                    runningThreadIDs: runningThreadIDs
+                )
+                messages[keeperIndex].orderIndex = preservedOrderIndex
+            }
+            duplicateIndices.append(index)
+        }
+
+        for index in duplicateIndices.sorted(by: >) {
+            messages.remove(at: index)
+        }
+    }
+
+    // Desktop live state and canonical history can assign different stable provider ids to the
+    // same assistant item. Match them through the bridge's deterministic turn + text source alias;
+    // normal app-server history can derive that alias even though it does not carry the field.
+    // Active turns additionally require the orphan to precede the canonical copy unless the alias
+    // is exact, so a newer intentional same-text item is never folded into history.
+    nonisolated static func repairCanonicalAssistantSourceIdentityRotations(
+        in messages: inout [CodexMessage],
+        history: [CodexMessage],
+        canonicalOrderByMessageID: inout [String: Int],
+        activeThreadIDs: Set<String>,
+        activeTurnIDs: Set<String>? = nil,
+        runningThreadIDs: Set<String>
+    ) {
+        let canonicalAssistantRows = history.filter { message in
+            message.role == .assistant
+                && normalizedHistoryIdentifier(message.turnId) != nil
+                && normalizedHistoryIdentifier(message.itemId) != nil
+                && hasMeaningfulHistoryText(message.text)
+        }
+        guard !canonicalAssistantRows.isEmpty else {
+            return
+        }
+
+        var canonicalItemIDsByTurn: [CanonicalAssistantTurnKey: Set<String>] = [:]
+        for message in history where message.role == .assistant {
+            guard let turnId = normalizedHistoryIdentifier(message.turnId),
+                  let itemId = normalizedHistoryIdentifier(message.itemId) else {
+                continue
+            }
+            canonicalItemIDsByTurn[
+                CanonicalAssistantTurnKey(threadId: message.threadId, turnId: turnId),
+                default: []
+            ].insert(itemId)
+        }
+
+        let canonicalRowsBySource = Dictionary(grouping: canonicalAssistantRows) { message in
+            let turnId = normalizedHistoryIdentifier(message.turnId) ?? ""
+            return CanonicalAssistantSourceKey(
+                threadId: message.threadId,
+                turnId: turnId,
+                sourceItemKey: normalizedHistoryIdentifier(message.sourceItemKey)
+                    ?? remodexAssistantSourceItemKey(turnId: turnId, text: message.text)
+                    ?? "",
+                text: normalizedMessageText(message.text)
+            )
+        }
+        let localIndicesByTurnText = Dictionary(
+            grouping: messages.indices.filter { index in
+                let message = messages[index]
+                return message.role == .assistant
+                    && !message.isStreaming
+                    && normalizedHistoryIdentifier(message.turnId) != nil
+                    && hasMeaningfulHistoryText(message.text)
+            },
+            by: { index in
+                let message = messages[index]
+                return CanonicalAssistantTurnTextKey(
+                    threadId: message.threadId,
+                    turnId: normalizedHistoryIdentifier(message.turnId) ?? "",
+                    text: normalizedMessageText(message.text)
+                )
+            }
+        )
+
+        var repairs: [(orphanMessageId: String, duplicateMessageIds: [String], canonical: CodexMessage)] = []
+        var claimedMessageIDs: Set<String> = []
+
+        for (sourceKey, canonicalRows) in canonicalRowsBySource where canonicalRows.count == 1 {
+            guard !isProvisionalHistoryTurnIdentifier(sourceKey.turnId),
+                  let canonical = canonicalRows.first,
+                  let canonicalItemID = normalizedHistoryIdentifier(canonical.itemId) else {
+                continue
+            }
+
+            let turnKey = CanonicalAssistantTurnKey(
+                threadId: sourceKey.threadId,
+                turnId: sourceKey.turnId
+            )
+            let canonicalTurnItemIDs = canonicalItemIDsByTurn[turnKey] ?? []
+            let turnTextKey = CanonicalAssistantTurnTextKey(
+                threadId: sourceKey.threadId,
+                turnId: sourceKey.turnId,
+                text: sourceKey.text
+            )
+            let matchingLocalIndices = localIndicesByTurnText[turnTextKey] ?? []
+            let canonicalHasExplicitSourceAlias = normalizedHistoryIdentifier(
+                canonical.sourceItemKey
+            ) != nil
+            let orphanIndices = matchingLocalIndices.filter { index in
+                let candidate = messages[index]
+                let candidateItemID = normalizedHistoryIdentifier(candidate.itemId)
+                let candidateSourceKey = normalizedHistoryIdentifier(candidate.sourceItemKey)
+                return candidateItemID != canonicalItemID
+                    && (candidateItemID.map { !canonicalTurnItemIDs.contains($0) } ?? true)
+                    && (canonicalHasExplicitSourceAlias
+                        ? (candidateSourceKey == nil || candidateSourceKey == sourceKey.sourceItemKey)
+                        : candidateSourceKey == sourceKey.sourceItemKey)
+            }
+            guard orphanIndices.count == 1,
+                  let orphanIndex = orphanIndices.first,
+                  !claimedMessageIDs.contains(messages[orphanIndex].id) else {
+                continue
+            }
+
+            let canonicalDuplicateIndices = matchingLocalIndices.filter { index in
+                index != orphanIndex
+                    && normalizedHistoryIdentifier(messages[index].itemId) == canonicalItemID
+            }
+            let orphanSourceKey = normalizedHistoryIdentifier(messages[orphanIndex].sourceItemKey)
+            let turnIsActive = activeThreadIDs.contains(sourceKey.threadId)
+                ? (activeTurnIDs?.contains(sourceKey.turnId) ?? true)
+                : runningThreadIDs.contains(sourceKey.threadId)
+            let hasExactSourceProof = !sourceKey.sourceItemKey.isEmpty
+                && orphanSourceKey == sourceKey.sourceItemKey
+            if turnIsActive, !hasExactSourceProof {
+                guard let earliestCanonicalOrderIndex = canonicalDuplicateIndices
+                    .map({ messages[$0].orderIndex })
+                    .min(),
+                      messages[orphanIndex].orderIndex < earliestCanonicalOrderIndex else {
+                    continue
+                }
+            }
+            let duplicateMessageIDs = canonicalDuplicateIndices.map { messages[$0].id }
+            guard duplicateMessageIDs.allSatisfy({ !claimedMessageIDs.contains($0) }) else {
+                continue
+            }
+
+            claimedMessageIDs.insert(messages[orphanIndex].id)
+            claimedMessageIDs.formUnion(duplicateMessageIDs)
+            repairs.append((
+                orphanMessageId: messages[orphanIndex].id,
+                duplicateMessageIds: duplicateMessageIDs,
+                canonical: canonical
+            ))
+        }
+
+        for repair in repairs {
+            guard let orphanIndex = messages.firstIndex(where: { $0.id == repair.orphanMessageId }),
+                  let canonicalItemID = normalizedHistoryIdentifier(repair.canonical.itemId) else {
+                continue
+            }
+
+            let preservedOrderIndex = messages[orphanIndex].orderIndex
+            var repaired = reconcileExistingMessage(
+                messages[orphanIndex],
+                with: repair.canonical,
+                activeThreadIDs: activeThreadIDs,
+                activeTurnIDs: activeTurnIDs,
+                runningThreadIDs: runningThreadIDs
+            )
+            for duplicateMessageID in repair.duplicateMessageIds {
+                guard let duplicate = messages.first(where: { $0.id == duplicateMessageID }) else {
+                    continue
+                }
+                if repaired.attachments.isEmpty, !duplicate.attachments.isEmpty {
+                    repaired.attachments = duplicate.attachments
+                }
+            }
+            repaired.itemId = canonicalItemID
+            if let canonicalSourceKey = normalizedHistoryIdentifier(repair.canonical.sourceItemKey) {
+                repaired.sourceItemKey = canonicalSourceKey
+            }
+            repaired.orderIndex = preservedOrderIndex
+            messages[orphanIndex] = repaired
+
+            let canonicalOrder = repair.duplicateMessageIds.compactMap {
+                canonicalOrderByMessageID[$0]
+            }.min()
+            if let canonicalOrder {
+                canonicalOrderByMessageID[repair.orphanMessageId] = canonicalOrder
+            }
+            for duplicateMessageID in repair.duplicateMessageIds {
+                canonicalOrderByMessageID.removeValue(forKey: duplicateMessageID)
+            }
+
+            let duplicateIndices = repair.duplicateMessageIds.compactMap { duplicateMessageID in
+                messages.firstIndex(where: { $0.id == duplicateMessageID })
+            }
+            for duplicateIndex in duplicateIndices.sorted(by: >) {
+                messages.remove(at: duplicateIndex)
+            }
+        }
     }
 
     // Keeps running-thread reopen bounded to the recent transcript tail so A/B switching
@@ -972,6 +1816,7 @@ extension CodexService {
         _ existing: [CodexMessage],
         _ history: [CodexMessage],
         activeThreadIDs: Set<String>,
+        activeTurnIDs: Set<String>? = nil,
         runningThreadIDs: Set<String>,
         windowSize: Int
     ) throws -> [CodexMessage] {
@@ -986,6 +1831,7 @@ extension CodexService {
                 existing,
                 history,
                 activeThreadIDs: activeThreadIDs,
+                activeTurnIDs: activeTurnIDs,
                 runningThreadIDs: runningThreadIDs
             )
         }
@@ -998,6 +1844,7 @@ extension CodexService {
             recentExisting,
             recentHistory,
             activeThreadIDs: activeThreadIDs,
+            activeTurnIDs: activeTurnIDs,
             runningThreadIDs: runningThreadIDs
         )
         let boundaryOverlapKeys = Set(stablePrefix.suffix(32).map(Self.historyMessageKey))
@@ -1078,19 +1925,41 @@ extension CodexService {
 
     func reconcileExistingMessage(_ localMessage: CodexMessage, with serverMessage: CodexMessage) -> CodexMessage {
         let activeThreadIDs = Set(activeTurnIdByThread.keys)
+        let activeTurnIDs = Set(activeTurnIdByThread.values)
         let runningIDs = runningThreadIDs
-        return Self.reconcileExistingMessage(localMessage, with: serverMessage, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningIDs)
+        return Self.reconcileExistingMessage(
+            localMessage,
+            with: serverMessage,
+            activeThreadIDs: activeThreadIDs,
+            activeTurnIDs: activeTurnIDs,
+            runningThreadIDs: runningIDs
+        )
     }
 
     nonisolated static func reconcileExistingMessage(
         _ localMessage: CodexMessage,
         with serverMessage: CodexMessage,
         activeThreadIDs: Set<String>,
+        activeTurnIDs: Set<String>? = nil,
         runningThreadIDs: Set<String>
     ) -> CodexMessage {
         var value = localMessage
         let threadIsActive = activeThreadIDs.contains(localMessage.threadId) || runningThreadIDs.contains(localMessage.threadId)
+        let normalizedLocalTurnID = normalizedHistoryIdentifier(localMessage.turnId)
+        let normalizedServerTurnID = normalizedHistoryIdentifier(serverMessage.turnId)
+        let threadHasExplicitActiveTurn = activeThreadIDs.contains(localMessage.threadId)
+        let turnIsActive: Bool
+        if threadHasExplicitActiveTurn, let activeTurnIDs {
+            turnIsActive = normalizedLocalTurnID.map { activeTurnIDs.contains($0) } == true
+                || normalizedServerTurnID.map { activeTurnIDs.contains($0) } == true
+        } else {
+            // turn/started may not provide a usable turn id. In that case the
+            // per-thread running fallback still owns the live presentation.
+            turnIsActive = threadIsActive
+        }
         let preservesRunningPresentation = threadIsActive
+            && turnIsActive
+            && localMessage.isStreaming
             && (
                 localMessage.turnId == nil
                 || serverMessage.turnId == nil
@@ -1100,6 +1969,9 @@ extension CodexService {
         if value.deliveryState == .pending {
             value.deliveryState = .confirmed
         }
+        if value.sourceItemKey == nil {
+            value.sourceItemKey = serverMessage.sourceItemKey
+        }
 
         if CodexTimestampParser.isTrustworthyServerDate(serverMessage.createdAt),
            abs(value.createdAt.timeIntervalSince(serverMessage.createdAt)) > 0.5 {
@@ -1108,28 +1980,49 @@ extension CodexService {
 
         if value.turnId == nil {
             value.turnId = serverMessage.turnId
-        } else if value.role == .user,
-                  let serverTurnId = normalizedHistoryIdentifier(serverMessage.turnId),
-                  isSyntheticDesktopTurnIdentifier(value.turnId),
-                  !isSyntheticDesktopTurnIdentifier(serverTurnId) {
+        } else if let serverTurnId = normalizedServerTurnID,
+                  isProvisionalHistoryTurnIdentifier(value.turnId),
+                  !isProvisionalHistoryTurnIdentifier(serverTurnId) {
             value.turnId = serverTurnId
         }
         let localItemId = normalizedHistoryIdentifier(value.itemId)
         let serverItemId = normalizedHistoryIdentifier(serverMessage.itemId)
         let shouldUpgradeSyntheticUserItemId = value.role == .user
             && serverItemId != nil
-            && isSyntheticDesktopUserItemIdentifier(localItemId)
+            && (
+                isSyntheticDesktopUserItemIdentifier(localItemId)
+                    || localItemId.map { CodexSyntheticIdentifiers.isMirrorMintedItemID($0) } == true
+            )
             && !isSyntheticDesktopUserItemIdentifier(serverItemId)
+            && serverItemId.map { CodexSyntheticIdentifiers.isMirrorMintedItemID($0) } != true
         let shouldAttachMissingItemId = localItemId == nil
+        let shouldUpgradeProvisionalAssistantItemId = value.role == .assistant
+            && serverItemId != nil
+            && localItemId != serverItemId
+            && localItemId.map { CodexSyntheticIdentifiers.isMirrorMintedItemID($0) } == true
+            && serverItemId.map { CodexSyntheticIdentifiers.isMirrorMintedItemID($0) } != true
         let shouldRebindRunningAssistantItem = preservesRunningPresentation
             && value.role == .assistant
             && localMessage.isStreaming
             && serverItemId != nil
             && localItemId != serverItemId
             && !hasStableAssistantIdentity(localItemId)
+        let shouldUpgradeProvisionalSystemItemId = value.role == .system
+            && serverItemId != nil
+            && localItemId != serverItemId
+            && isProvisionalSystemItemIdentifier(localItemId)
+        let shouldRebindProgressPlanItemId = value.role == .system
+            && value.kind == .plan
+            && value.resolvedPlanPresentation == .progress
+            && serverMessage.resolvedPlanPresentation == .progress
+            && serverItemId != nil
+            && localItemId != serverItemId
         if shouldAttachMissingItemId
             || shouldUpgradeSyntheticUserItemId
+            || shouldUpgradeProvisionalAssistantItemId
             || shouldRebindRunningAssistantItem
+            || shouldUpgradeProvisionalSystemItemId
+            || shouldRebindProgressPlanItemId
             || (
                 value.role == .system
                     && value.kind == .toolActivity
@@ -1141,6 +2034,28 @@ extension CodexService {
         }
         if value.kind == .chat && serverMessage.kind != .chat {
             value.kind = serverMessage.kind
+        }
+        if let assistantPhase = serverMessage.assistantPhase {
+            value.assistantPhase = assistantPhase
+        }
+        if let planState = serverMessage.planState {
+            value.planState = planState
+        }
+        if let planPresentation = serverMessage.planPresentation {
+            value.planPresentation = planPresentation
+        }
+        if serverMessage.resolvedPlanPresentation == .progress {
+            // A previously misclassified todo-list can persist a parsed
+            // "Planning..." proposal. Canonical progress state must clear it.
+            value.proposedPlan = nil
+        } else if let proposedPlan = serverMessage.proposedPlan {
+            value.proposedPlan = proposedPlan
+        }
+        if let subagentAction = serverMessage.subagentAction {
+            value.subagentAction = subagentAction
+        }
+        if let structuredUserInputRequest = serverMessage.structuredUserInputRequest {
+            value.structuredUserInputRequest = structuredUserInputRequest
         }
         if value.attachments.isEmpty && !serverMessage.attachments.isEmpty {
             value.attachments = serverMessage.attachments
@@ -1177,7 +2092,7 @@ extension CodexService {
                 }
             }
             value.isStreaming = preservesRunningPresentation
-                ? (localMessage.isStreaming || serverMessage.isStreaming || runningThreadIDs.contains(localMessage.threadId))
+                ? (localMessage.isStreaming || serverMessage.isStreaming)
                 : false
         } else if value.role == .system {
             if hasMeaningfulHistoryText(serverMessage.text) {
@@ -1186,7 +2101,7 @@ extension CodexService {
                     : serverMessage.text
             }
             value.isStreaming = preservesRunningPresentation
-                ? (localMessage.isStreaming || serverMessage.isStreaming || runningThreadIDs.contains(localMessage.threadId))
+                ? (localMessage.isStreaming || serverMessage.isStreaming)
                 : false
         }
 
@@ -1435,6 +2350,22 @@ extension CodexService {
         return CodexTextContentFingerprint.cacheKey(for: text)
     }
 
+    // Mirrors the bridge's source-neutral alias for an event_msg/response_item pair. Normal
+    // app-server history omits remodexSourceItemKey, so deriving it here preserves exact replay
+    // identity without falling back to unsafe turn + text matching on partial history windows.
+    nonisolated static func remodexAssistantSourceItemKey(turnId: String, text: String) -> String? {
+        guard let normalizedTurnId = normalizedHistoryIdentifier(turnId) else {
+            return nil
+        }
+        let normalizedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedText.isEmpty else {
+            return nil
+        }
+        let digest = SHA256.hash(data: Data(normalizedText.utf8))
+        let textHash = digest.prefix(8).map { String(format: "%02x", $0) }.joined()
+        return "\(normalizedTurnId):\(textHash)"
+    }
+
     nonisolated static func normalizedHistoryIdentifier(_ value: String?) -> String? {
         guard let value else {
             return nil
@@ -1526,11 +2457,27 @@ extension CodexService {
         return CodexSyntheticIdentifiers.isProjectedDesktopTurnID(turnId)
     }
 
+    nonisolated static func isProvisionalHistoryTurnIdentifier(_ turnId: String?) -> Bool {
+        guard let turnId = normalizedHistoryIdentifier(turnId) else {
+            return false
+        }
+        return CodexSyntheticIdentifiers.isProjectedDesktopTurnID(turnId)
+            || CodexSyntheticIdentifiers.isBridgeMintedTurnID(turnId)
+    }
+
     nonisolated static func isSyntheticDesktopUserItemIdentifier(_ itemId: String?) -> Bool {
         guard let itemId = normalizedHistoryIdentifier(itemId) else {
             return false
         }
         return CodexSyntheticIdentifiers.isProjectedDesktopUserItemID(itemId)
+    }
+
+    nonisolated static func isProvisionalUserItemIdentifier(_ itemId: String?) -> Bool {
+        guard let itemId = normalizedHistoryIdentifier(itemId) else {
+            return true
+        }
+        return CodexSyntheticIdentifiers.isProjectedDesktopUserItemID(itemId)
+            || CodexSyntheticIdentifiers.isMirrorMintedItemID(itemId)
     }
 
     // Rollout mirrors tag reasoning rows with synthetic "rollout-*" item ids
@@ -1541,6 +2488,63 @@ extension CodexService {
             return true
         }
         return CodexSyntheticIdentifiers.isMirrorMintedItemID(itemId)
+    }
+
+    nonisolated static func isProvisionalSystemItemIdentifier(_ itemId: String?) -> Bool {
+        guard let itemId = normalizedHistoryIdentifier(itemId) else {
+            return true
+        }
+        return CodexSyntheticIdentifiers.isMirrorMintedItemID(itemId)
+            || itemId.hasPrefix("remodex-jsonl-")
+    }
+
+    nonisolated static func exactHistoryItemIdentityAllowsReconcile(
+        _ candidate: CodexMessage,
+        with message: CodexMessage,
+        itemId: String
+    ) -> Bool {
+        let needsSemanticProof = CodexSyntheticIdentifiers.isJSONLLineFallbackItemID(itemId)
+            || (
+                candidate.role == .user
+                    && CodexSyntheticIdentifiers.isProjectedDesktopUserItemID(itemId)
+            )
+        guard needsSemanticProof else {
+            return true
+        }
+        if candidate.role == .user {
+            return userMessagesMatchForHistory(candidate, message)
+                && userMessageMetadataLooksCompatible(
+                    localMessage: candidate,
+                    serverMessage: message,
+                    allowAttachmentCountFallback: candidate.deliveryState == .pending
+                )
+        }
+        let candidateText = normalizedMessageText(candidate.text)
+        let candidateTurnID = normalizedHistoryIdentifier(candidate.turnId)
+        let incomingTurnID = normalizedHistoryIdentifier(message.turnId)
+        return !candidateText.isEmpty
+            && candidateText == normalizedMessageText(message.text)
+            && candidateTurnID == incomingTurnID
+            && candidateTurnID.map { !isProvisionalHistoryTurnIdentifier($0) } == true
+    }
+
+    nonisolated static func lineFallbackIdentityAllowsTurnScopedReconcile(
+        _ candidate: CodexMessage,
+        with message: CodexMessage
+    ) -> Bool {
+        let candidateItemID = normalizedHistoryIdentifier(candidate.itemId)
+        let incomingItemID = normalizedHistoryIdentifier(message.itemId)
+        let hasLineFallback = candidateItemID
+            .map { CodexSyntheticIdentifiers.isJSONLLineFallbackItemID($0) } == true
+            || incomingItemID
+                .map { CodexSyntheticIdentifiers.isJSONLLineFallbackItemID($0) } == true
+        guard hasLineFallback else {
+            return true
+        }
+        let candidateTurnID = normalizedHistoryIdentifier(candidate.turnId)
+        let incomingTurnID = normalizedHistoryIdentifier(message.turnId)
+        return candidateTurnID == incomingTurnID
+            && candidateTurnID.map { !isProvisionalHistoryTurnIdentifier($0) } == true
     }
 
     // Turn identities are mergeable when either side lacks a real turn id;
@@ -1554,7 +2558,8 @@ extension CodexService {
         if lhsTurnId == rhsTurnId {
             return true
         }
-        return isSyntheticDesktopTurnIdentifier(lhsTurnId) || isSyntheticDesktopTurnIdentifier(rhsTurnId)
+        return isProvisionalHistoryTurnIdentifier(lhsTurnId)
+            || isProvisionalHistoryTurnIdentifier(rhsTurnId)
     }
 
     // Mirrors t3code's provider-message identity as closely as the mobile schema allows.
@@ -1571,6 +2576,25 @@ extension CodexService {
             return false
         }
         return !CodexSyntheticIdentifiers.isMirrorMintedItemID(itemId)
+    }
+
+    // Source aliases are semantic bridge hints, not provider identities. They may collide when
+    // two real assistant items intentionally contain the same text, so only use them to bridge
+    // one mirror identity and one provider identity (or the exact same item id).
+    nonisolated static func sourceItemIdentityAllowsReconcile(
+        _ existingItemId: String?,
+        _ incomingItemId: String?
+    ) -> Bool {
+        let existing = normalizedHistoryIdentifier(existingItemId)
+        let incoming = normalizedHistoryIdentifier(incomingItemId)
+        guard let existing, let incoming else {
+            return false
+        }
+        if existing == incoming {
+            return true
+        }
+        return CodexSyntheticIdentifiers.isMirrorMintedItemID(existing)
+            != CodexSyntheticIdentifiers.isMirrorMintedItemID(incoming)
     }
 
     // Running assistant rows may absorb history only when the provider item identity agrees.
@@ -1611,6 +2635,15 @@ extension CodexService {
         let candidates = messages.indices.filter { index in
             let candidate = messages[index]
             let candidateTurnId = normalizedHistoryIdentifier(candidate.turnId)
+            let hasSourceLocalLineIdentity = normalizedHistoryIdentifier(candidate.itemId)
+                .map { CodexSyntheticIdentifiers.isJSONLLineFallbackItemID($0) } == true
+                || normalizedHistoryIdentifier(message.itemId)
+                    .map { CodexSyntheticIdentifiers.isJSONLLineFallbackItemID($0) } == true
+            if hasSourceLocalLineIdentity,
+               isProvisionalHistoryTurnIdentifier(candidateTurnId)
+                || isProvisionalHistoryTurnIdentifier(normalizedTurnId) {
+                return false
+            }
             return candidate.role == .assistant
                 && (candidateTurnId == nil || candidateTurnId == normalizedTurnId)
                 && normalizedMessageText(candidate.text) == normalizedText
@@ -1881,8 +2914,8 @@ extension CodexService {
         }
         return candidateTurnId == nil
             || candidateTurnId == turnId
-            || isSyntheticDesktopTurnIdentifier(candidateTurnId)
-            || isSyntheticDesktopTurnIdentifier(turnId)
+            || isProvisionalHistoryTurnIdentifier(candidateTurnId)
+            || isProvisionalHistoryTurnIdentifier(turnId)
     }
 
     nonisolated static func shouldReconcilePendingUserHistoryMessage(
@@ -1951,12 +2984,12 @@ extension CodexService {
     ) -> [Int] {
         let incomingItemId = normalizedHistoryIdentifier(message.itemId)
         guard message.role == .user,
-              incomingItemId == nil || isSyntheticDesktopUserItemIdentifier(incomingItemId) else {
+              incomingItemId == nil || isProvisionalUserItemIdentifier(incomingItemId) else {
             return []
         }
 
         let rawIncomingTurnId = normalizedHistoryIdentifier(message.turnId)
-        let incomingTurnIdIsSynthetic = isSyntheticDesktopTurnIdentifier(rawIncomingTurnId)
+        let incomingTurnIdIsSynthetic = isProvisionalHistoryTurnIdentifier(rawIncomingTurnId)
         let incomingTurnId = incomingTurnIdIsSynthetic ? nil : rawIncomingTurnId
         // Synthetic Desktop identity marks a projected row whose prompt the
         // timeline may already hold under its real identity; projected snapshots
@@ -1979,7 +3012,7 @@ extension CodexService {
             }
 
             let rawCandidateTurnId = normalizedHistoryIdentifier(candidate.turnId)
-            let candidateTurnId = isSyntheticDesktopTurnIdentifier(rawCandidateTurnId) ? nil : rawCandidateTurnId
+            let candidateTurnId = isProvisionalHistoryTurnIdentifier(rawCandidateTurnId) ? nil : rawCandidateTurnId
             if let incomingTurnId, let candidateTurnId {
                 return incomingTurnId == candidateTurnId
             }
@@ -2079,6 +3112,7 @@ extension CodexService {
         threadId: String,
         turnId: String?,
         itemId: String?,
+        sourceItemKey: String? = nil,
         createdAt: Date,
         timeZoneIdentifier: String? = nil,
         skillMentions: [String] = [],
@@ -2088,7 +3122,10 @@ extension CodexService {
         planPresentation: CodexPlanPresentation? = nil,
         subagentAction: CodexSubagentAction? = nil
     ) {
-        guard !text.isEmpty || !attachments.isEmpty || subagentAction != nil else {
+        guard !text.isEmpty
+            || !attachments.isEmpty
+            || planState != nil
+            || subagentAction != nil else {
             return
         }
 
@@ -2108,6 +3145,7 @@ extension CodexService {
                 timeZoneIdentifier: timeZoneIdentifier,
                 turnId: turnId,
                 itemId: itemId,
+                sourceItemKey: sourceItemKey,
                 isStreaming: false,
                 deliveryState: .confirmed,
                 attachments: attachments,

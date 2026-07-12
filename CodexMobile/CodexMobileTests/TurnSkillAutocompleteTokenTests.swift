@@ -56,6 +56,38 @@ final class TurnSkillAutocompleteTokenTests: XCTestCase {
         XCTAssertEqual(updated, "run /check-code ")
     }
 
+    func testInputChangePrunesSkillMentionAfterItsTokenIsDeleted() {
+        let viewModel = TurnViewModel()
+        viewModel.composerMentionedSkills = [
+            TurnComposerMentionedSkill(name: "check-code", path: nil, description: nil),
+        ]
+
+        viewModel.onInputChangedForSkillAutocomplete(
+            "plain text",
+            codex: CodexService(),
+            thread: CodexThread(id: "thread-prune", cwd: "/tmp/project"),
+            activeTurnID: nil
+        )
+
+        XCTAssertTrue(viewModel.composerMentionedSkills.isEmpty)
+    }
+
+    func testInputChangeKeepsSkillMentionWhileSlashTokenRemains() {
+        let viewModel = TurnViewModel()
+        viewModel.composerMentionedSkills = [
+            TurnComposerMentionedSkill(name: "check-code", path: nil, description: nil),
+        ]
+
+        viewModel.onInputChangedForSkillAutocomplete(
+            "/CHECK-CODE next",
+            codex: CodexService(),
+            thread: CodexThread(id: "thread-keep", cwd: "/tmp/project"),
+            activeTurnID: nil
+        )
+
+        XCTAssertEqual(viewModel.composerMentionedSkills.map(\.name), ["check-code"])
+    }
+
     func testSkillAutocompleteRefreshesWhenCachedIndexMissesQuery() async throws {
         let viewModel = TurnViewModel()
         let service = CodexService()

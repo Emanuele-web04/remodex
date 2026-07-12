@@ -22,6 +22,286 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertEqual(service.threadRunBadgeState(for: threadID), .running)
     }
 
+    func testRunStartGenerationSurvivesDisconnectAndCanonicalIDReplacement() async {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let syntheticTurnID = "ipc-turn-0"
+        let canonicalTurnID = "turn-\(UUID().uuidString)"
+
+        sendTurnStarted(service: service, threadID: threadID, turnID: syntheticTurnID)
+        XCTAssertEqual(service.runStartGenerationByThread[threadID], 1)
+
+        // Duplicate lifecycle does not create a second logical run.
+        sendTurnStarted(service: service, threadID: threadID, turnID: syntheticTurnID)
+        XCTAssertEqual(service.runStartGenerationByThread[threadID], 1)
+
+        await service.disconnect(preserveReconnectIntent: true)
+        sendTurnStarted(service: service, threadID: threadID, turnID: syntheticTurnID)
+        XCTAssertEqual(service.runStartGenerationByThread[threadID], 1)
+
+        service.handleNotification(
+            method: "thread/replaced",
+            params: .object([
+                "threadId": .string(threadID),
+                "remodexDesktopMirror": .bool(true),
+                "remodexDesktopIpcMirror": .bool(true),
+            ])
+        )
+        service.handleNotification(
+            method: "turn/started",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(canonicalTurnID),
+                "remodexDesktopMirror": .bool(true),
+                "remodexTurnIdentityContinuity": .bool(true),
+            ])
+        )
+
+        XCTAssertEqual(service.activeTurnID(for: threadID), canonicalTurnID)
+        XCTAssertEqual(service.runStartGenerationByThread[threadID], 1)
+
+        sendTurnCompletedSuccess(service: service, threadID: threadID, turnID: canonicalTurnID)
+        service.handleNotification(
+            method: "turn/started",
+            params: .object([
+                "threadId": .string(threadID),
+                "remodexDesktopMirror": .bool(true),
+            ])
+        )
+
+        XCTAssertTrue(service.threadHasActiveOrRunningTurn(threadID))
+        XCTAssertNil(service.activeTurnID(for: threadID))
+        XCTAssertEqual(service.runStartGenerationByThread[threadID], 2)
+        XCTAssertEqual(service.timelineState(for: threadID).renderSnapshot.runStartGeneration, 2)
+    }
+
+    func testDistinctTurnAfterThreadReplacementAdvancesRunGeneration() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+
+        sendTurnStarted(service: service, threadID: threadID, turnID: "turn-a")
+        service.handleNotification(
+            method: "thread/replaced",
+            params: .object([
+                "threadId": .string(threadID),
+                "remodexDesktopMirror": .bool(true),
+            ])
+        )
+        sendTurnStarted(service: service, threadID: threadID, turnID: "turn-b")
+
+        XCTAssertEqual(service.activeTurnID(for: threadID), "turn-b")
+        XCTAssertEqual(service.runStartGenerationByThread[threadID], 2)
+    }
+
+    func testLateCompletionForPreviousTurnKeepsNewActiveTurnRunning() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let firstTurnID = "ipc-turn-0"
+        let secondTurnID = "ipc-turn-1"
+
+        sendTurnStarted(service: service, threadID: threadID, turnID: firstTurnID)
+        sendTurnStarted(service: service, threadID: threadID, turnID: secondTurnID)
+
+        service.upsertStreamingSystemItemMessage(
+            threadId: threadID,
+            turnId: secondTurnID,
+            itemId: "thinking-second",
+            kind: .thinking,
+            text: "Thinking for the newer turn",
+            isStreaming: true
+        )
+        let otherThreadID = "thread-\(UUID().uuidString)"
+        let otherTurnID = "turn-\(UUID().uuidString)"
+        service.upsertStreamingSystemItemMessage(
+            threadId: otherThreadID,
+            turnId: otherTurnID,
+            itemId: "thinking-other-thread",
+            kind: .thinking,
+            text: "Thinking in another thread",
+            isStreaming: true
+        )
+        let otherThreadStreamingKey = service.streamingItemMessageKey(
+            threadId: otherThreadID,
+            itemId: "thinking-other-thread"
+        )
+        service.watchRunningThreadIfNeeded(threadID)
+
+        sendTurnCompletedSuccess(service: service, threadID: threadID, turnID: firstTurnID)
+
+        XCTAssertEqual(service.activeTurnID(for: threadID), secondTurnID)
+        XCTAssertEqual(service.threadRunBadgeState(for: threadID), .running)
+        XCTAssertTrue(service.runningThreadIDs.contains(threadID))
+        XCTAssertTrue(service.readyThreadIDs.isEmpty)
+        XCTAssertTrue(service.threadsPendingCompletionHaptic.contains(threadID))
+        XCTAssertNotNil(service.runningThreadWatchByID[threadID])
+        XCTAssertNil(service.latestTurnTerminalStateByThread[threadID])
+        XCTAssertEqual(
+            service.projectedTerminalStateByThreadID[threadID]?[firstTurnID],
+            .completed
+        )
+        XCTAssertNotNil(
+            service.streamingSystemMessageByItemID[
+                service.streamingItemMessageKey(threadId: threadID, itemId: "thinking-second")
+            ]
+        )
+        XCTAssertTrue(
+            service.messages(for: threadID).contains { message in
+                message.turnId == secondTurnID
+                    && message.kind == .thinking
+                    && message.isStreaming
+            }
+        )
+        XCTAssertNotNil(service.streamingSystemMessageByItemID[otherThreadStreamingKey])
+
+        // Replayed lifecycle for old A must not replace still-running B.
+        sendTurnStarted(service: service, threadID: threadID, turnID: firstTurnID)
+        XCTAssertEqual(service.activeTurnID(for: threadID), secondTurnID)
+        XCTAssertEqual(service.threadRunBadgeState(for: threadID), .running)
+
+        let messageCountBeforeLateItem = service.messages(for: threadID).count
+        service.handleNotification(
+            method: "item/started",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(firstTurnID),
+                "item": .object([
+                    "id": .string("late-thinking-a"),
+                    "type": .string("reasoning"),
+                    "summary": .array([.string("Stale A activity")]),
+                ]),
+            ])
+        )
+        XCTAssertEqual(service.messages(for: threadID).count, messageCountBeforeLateItem)
+        XCTAssertEqual(service.activeTurnID(for: threadID), secondTurnID)
+
+        service.handleNotification(
+            method: "item/agentMessage/delta",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(firstTurnID),
+                "itemId": .string("late-agent-a"),
+                "delta": .string("Late text from the closed turn"),
+            ])
+        )
+        service.flushPendingAssistantDeltas(for: threadID, turnId: firstTurnID)
+        XCTAssertEqual(service.messages(for: threadID).count, messageCountBeforeLateItem)
+        XCTAssertEqual(service.activeTurnID(for: threadID), secondTurnID)
+        XCTAssertEqual(service.threadRunBadgeState(for: threadID), .running)
+    }
+
+    func testBackgroundDiscoveryLifecycleUpdatesBadgeWithoutHydratingUnopenedThread() async {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let otherThreadID = "thread-\(UUID().uuidString)"
+        let turnID = "ipc-turn-0"
+        service.isConnected = true
+        service.isInitialized = true
+        service.threads = [
+            CodexThread(id: threadID, createdAt: Date(), updatedAt: Date()),
+            CodexThread(id: otherThreadID, createdAt: Date(), updatedAt: Date()),
+        ]
+
+        var recordedMethods: [String] = []
+        service.requestTransportOverride = { method, _ in
+            recordedMethods.append(method)
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object(["data": .array([])]),
+                includeJSONRPC: false
+            )
+        }
+
+        let lifecycleParams: [String: JSONValue] = [
+            "threadId": .string(threadID),
+            "turnId": .string(turnID),
+            "remodexDesktopMirror": .bool(true),
+            "remodexBackgroundDiscovery": .bool(true),
+        ]
+        service.handleNotification(method: "turn/started", params: .object(lifecycleParams))
+        await flushAsyncSideEffects()
+
+        XCTAssertEqual(service.threadRunBadgeState(for: threadID), .running)
+        XCTAssertEqual(service.activeTurnID(for: threadID), turnID)
+        XCTAssertNil(service.activeTurnId)
+        XCTAssertTrue(recordedMethods.isEmpty)
+
+        service.handleNotification(method: "turn/completed", params: .object(lifecycleParams))
+        await flushAsyncSideEffects()
+
+        XCTAssertEqual(service.threadRunBadgeState(for: threadID), .ready)
+        XCTAssertNil(service.activeTurnID(for: threadID))
+        XCTAssertNil(service.terminalStateByTurnID[turnID])
+        XCTAssertTrue(recordedMethods.isEmpty)
+
+        // Projected Desktop ids are only unique inside one thread. Finishing
+        // `ipc-turn-0` in one chat must not suppress the same id in another.
+        service.handleNotification(
+            method: "turn/started",
+            params: .object(lifecycleParams.merging([
+                "threadId": .string(otherThreadID),
+            ]) { _, replacement in replacement })
+        )
+        await flushAsyncSideEffects()
+
+        XCTAssertEqual(service.threadRunBadgeState(for: otherThreadID), .running)
+        XCTAssertEqual(service.activeTurnID(for: otherThreadID), turnID)
+        XCTAssertNil(service.activeTurnId)
+        XCTAssertTrue(recordedMethods.isEmpty)
+    }
+
+    func testLiveBackgroundSnapshotRevivesTurnAfterGuessedInterruption() async {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let baseParams: [String: JSONValue] = [
+            "threadId": .string(threadID),
+            "turnId": .string(turnID),
+            "remodexDesktopMirror": .bool(true),
+            "remodexBackgroundDiscovery": .bool(true),
+        ]
+
+        service.handleNotification(method: "turn/started", params: .object(baseParams))
+        service.handleNotification(
+            method: "turn/completed",
+            params: .object(baseParams.merging([
+                "status": .string("interrupted"),
+            ]) { _, replacement in replacement })
+        )
+        XCTAssertEqual(service.latestTurnTerminalState(for: threadID), .stopped)
+        XCTAssertNil(service.threadRunBadgeState(for: threadID))
+
+        service.handleNotification(method: "turn/started", params: .object(baseParams))
+        await flushAsyncSideEffects()
+
+        XCTAssertEqual(service.threadRunBadgeState(for: threadID), .running)
+        XCTAssertEqual(service.activeTurnID(for: threadID), turnID)
+        XCTAssertNil(service.terminalStateByTurnID[turnID])
+    }
+
+    func testHistoryMergeNeverPromotesProjectedTurnIDIntoGlobalTerminalState() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let projectedTurnID = "ipc-turn-0"
+        let realTurnID = "turn-\(UUID().uuidString)"
+        service.suspendAutomaticMacScopedPersistence = true
+
+        let didChange = service.mergeHistoryTurnTerminalStates(
+            threadId: threadID,
+            terminalStatesByTurnID: [
+                projectedTurnID: .completed,
+                realTurnID: .completed,
+            ]
+        )
+
+        XCTAssertTrue(didChange)
+        XCTAssertNil(service.terminalStateByTurnID[projectedTurnID])
+        XCTAssertEqual(
+            service.projectedTerminalStateByThreadID[threadID]?[projectedTurnID],
+            .completed
+        )
+        XCTAssertEqual(service.terminalStateByTurnID[realTurnID], .completed)
+    }
+
     func testDesktopMirroredUserMessageItemStartedAppendsImmediately() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"
@@ -213,6 +493,37 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertEqual(messages.first?.text, "Historical answer")
         XCTAssertFalse(messages.first?.isStreaming ?? true)
         XCTAssertNil(service.threadRunBadgeState(for: threadID))
+    }
+
+    func testBufferedAssistantReplayReusesPersistedProviderItemAfterTransportReset() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let itemID = "item-\(UUID().uuidString)"
+
+        service.appendAssistantDelta(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: itemID,
+            delta: "Recovered assistant"
+        )
+        service.flushPendingAssistantDeltas(for: threadID, turnId: turnID)
+        service.finalizeAllStreamingState()
+
+        service.appendAssistantDelta(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: itemID,
+            delta: " block",
+            isReplay: true
+        )
+        service.flushPendingAssistantDeltas(for: threadID, turnId: turnID)
+
+        let assistantMessages = service.messages(for: threadID).filter { $0.role == .assistant }
+        XCTAssertEqual(assistantMessages.count, 1)
+        XCTAssertEqual(assistantMessages.first?.itemId, itemID)
+        XCTAssertEqual(assistantMessages.first?.text, "Recovered assistant block")
+        XCTAssertFalse(assistantMessages.first?.isStreaming ?? true)
     }
 
     func testAssistantDeltaCoalescingMergesCumulativeSnapshotsBeforeFlush() {
@@ -731,6 +1042,29 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertTrue(didPrepare)
         XCTAssertEqual(service.activeThreadId, freshThreadID)
         XCTAssertTrue(recordedMethods.isEmpty)
+    }
+
+    func testPaginatedRunningCatchupStillRequestsCurrentTurnHistory() {
+        let service = makeService()
+
+        service.supportsTurnPagination = true
+        XCTAssertTrue(
+            service.shouldRequestImmediateHistorySyncAfterRunningCatchup(
+                didRunForcedResume: true
+            )
+        )
+
+        service.supportsTurnPagination = false
+        XCTAssertFalse(
+            service.shouldRequestImmediateHistorySyncAfterRunningCatchup(
+                didRunForcedResume: true
+            )
+        )
+        XCTAssertTrue(
+            service.shouldRequestImmediateHistorySyncAfterRunningCatchup(
+                didRunForcedResume: false
+            )
+        )
     }
 
     func testActiveThreadDoesNotReceiveReadyOrFailedBadge() {

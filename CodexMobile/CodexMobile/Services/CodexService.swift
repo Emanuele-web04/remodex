@@ -151,10 +151,57 @@ struct CodexBridgeUpdatePrompt: Identifiable, Equatable, Sendable {
 }
 
 struct CodexThreadRuntimeOverride: Codable, Equatable, Sendable {
+    var modelId: String?
     var reasoningEffort: String?
     var serviceTierRawValue: String?
+    var overridesModel: Bool
     var overridesReasoning: Bool
     var overridesServiceTier: Bool
+    var runtimeSettingsRevision: Int
+    var runtimeSettingsUpdatedAt: Double
+
+    init(
+        modelId: String? = nil,
+        reasoningEffort: String? = nil,
+        serviceTierRawValue: String? = nil,
+        overridesModel: Bool = false,
+        overridesReasoning: Bool,
+        overridesServiceTier: Bool,
+        runtimeSettingsRevision: Int = 0,
+        runtimeSettingsUpdatedAt: Double = 0
+    ) {
+        self.modelId = modelId
+        self.reasoningEffort = reasoningEffort
+        self.serviceTierRawValue = serviceTierRawValue
+        self.overridesModel = overridesModel
+        self.overridesReasoning = overridesReasoning
+        self.overridesServiceTier = overridesServiceTier
+        self.runtimeSettingsRevision = runtimeSettingsRevision
+        self.runtimeSettingsUpdatedAt = runtimeSettingsUpdatedAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case modelId
+        case reasoningEffort
+        case serviceTierRawValue
+        case overridesModel
+        case overridesReasoning
+        case overridesServiceTier
+        case runtimeSettingsRevision
+        case runtimeSettingsUpdatedAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        modelId = try container.decodeIfPresent(String.self, forKey: .modelId)
+        reasoningEffort = try container.decodeIfPresent(String.self, forKey: .reasoningEffort)
+        serviceTierRawValue = try container.decodeIfPresent(String.self, forKey: .serviceTierRawValue)
+        overridesModel = try container.decodeIfPresent(Bool.self, forKey: .overridesModel) ?? false
+        overridesReasoning = try container.decodeIfPresent(Bool.self, forKey: .overridesReasoning) ?? false
+        overridesServiceTier = try container.decodeIfPresent(Bool.self, forKey: .overridesServiceTier) ?? false
+        runtimeSettingsRevision = try container.decodeIfPresent(Int.self, forKey: .runtimeSettingsRevision) ?? 0
+        runtimeSettingsUpdatedAt = try container.decodeIfPresent(Double.self, forKey: .runtimeSettingsUpdatedAt) ?? 0
+    }
 
     var serviceTier: CodexServiceTier? {
         guard let serviceTierRawValue else {
@@ -164,7 +211,7 @@ struct CodexThreadRuntimeOverride: Codable, Equatable, Sendable {
     }
 
     var isEmpty: Bool {
-        !overridesReasoning && !overridesServiceTier
+        !overridesModel && !overridesReasoning && !overridesServiceTier
     }
 }
 
@@ -188,6 +235,10 @@ enum CodexThreadRunBadgeState: Hashable, Sendable {
     case running
     case ready
     case failed
+    // Persistent goal is active on an idle thread (continuation may start on its own).
+    case goalActive
+    // Goal needs user attention (blocked, usage limited, or budget limited).
+    case goalAttention
 }
 
 enum CodexRunCompletionResult: String, Equatable, Sendable {
@@ -245,6 +296,7 @@ struct TurnTimelineRenderSnapshot: Equatable {
     let timelineChangeToken: Int
     let activeTurnID: String?
     let isThreadRunning: Bool
+    let runStartGeneration: Int
     let latestTurnTerminalState: CodexTurnTerminalState?
     let completedTurnIDs: Set<String>
     let stoppedTurnIDs: Set<String>
@@ -267,6 +319,7 @@ struct TurnTimelineRenderSnapshot: Equatable {
             timelineChangeToken: 0,
             activeTurnID: nil,
             isThreadRunning: false,
+            runStartGeneration: 0,
             latestTurnTerminalState: nil,
             completedTurnIDs: [],
             stoppedTurnIDs: [],
@@ -300,6 +353,7 @@ final class ThreadTimelineState {
     var messageRevision: Int
     var activeTurnID: String?
     var isThreadRunning: Bool
+    var runStartGeneration: Int
     var latestTurnTerminalState: CodexTurnTerminalState?
     var completedTurnIDs: Set<String>
     var stoppedTurnIDs: Set<String>
@@ -319,6 +373,7 @@ final class ThreadTimelineState {
         self.messageRevision = 0
         self.activeTurnID = nil
         self.isThreadRunning = false
+        self.runStartGeneration = 0
         self.latestTurnTerminalState = nil
         self.completedTurnIDs = []
         self.stoppedTurnIDs = []
@@ -353,6 +408,7 @@ final class CodexService {
         didSet {
             rebuildThreadLookupCaches()
             refreshPinnedThreadSnapshots()
+            scheduleCurrentMacThreadListSnapshotPersistence()
         }
     }
     var isConnected = false
@@ -365,6 +421,13 @@ final class CodexService {
     var activeThreadId: String?
     var activeTurnId: String?
     var activeTurnIdByThread: [String: String] = [:]
+    // Monotonic live turn-start token. Unlike running/id snapshots, this cannot
+    // lose a fast A-completed -> B-started transition to SwiftUI coalescing.
+    var runStartGenerationByThread: [String: Int] = [:]
+    @ObservationIgnored var lastRunStartTurnIDByThread: [String: String] = [:]
+    // Transport teardown clears running booleans before reconnect rehydrates A.
+    // Preserve one same-run start so reconnect does not masquerade as turn B.
+    @ObservationIgnored var pendingReconnectRunContinuityThreadIDs: Set<String> = []
 
     var runningThreadIDs: Set<String> = []
     // Protects active runs that are real but have not yielded a stable turnId yet.
@@ -375,8 +438,12 @@ final class CodexService {
     @ObservationIgnored var threadsPendingCompletionHaptic: Set<String> = []
     // Keeps the latest terminal outcome per thread so UI can react to real run completion.
     var latestTurnTerminalStateByThread: [String: CodexTurnTerminalState] = [:]
+    // Mirrors the app-server persisted thread goal (`thread/goal/updated|cleared`).
+    var goalByThreadID: [String: CodexThreadGoal] = [:]
     // Preserves terminal outcome per turn so completed/stopped blocks stay distinguishable.
     var terminalStateByTurnID: [String: CodexTurnTerminalState] = [:]
+    // Projected `ipc-turn-N` ids are only unique inside one thread/source epoch.
+    @ObservationIgnored var projectedTerminalStateByThreadID: [String: [String: CodexTurnTerminalState]] = [:]
     // Ordered pending runtime approvals keyed by request id so concurrent prompts do not overwrite each other.
     var pendingApprovals: [CodexApprovalRequest] = []
     var lastRawMessage: String?
@@ -442,6 +509,8 @@ final class CodexService {
     var supportsThreadFork = true
     // Runtime compatibility flag for `thread/turns/list` and `excludeTurns`.
     var supportsTurnPagination = true
+    // Runtime compatibility flag for the `thread/goal/*` API (false after method-not-found).
+    var supportsThreadGoals = true
     // Seeds brand-new chats with one-shot composer actions like code review.
     var pendingComposerActionByThreadID: [String: CodexPendingThreadComposerAction] = [:]
     // In-memory identity directory for subagents, keyed by thread id and agent id.
@@ -454,6 +523,14 @@ final class CodexService {
     var relayMacIdentityPublicKey: String?
     var relayProtocolVersion: Int = codexSecureProtocolVersion
     var lastAppliedBridgeOutboundSeq = 0
+    var lastAppliedBridgeReplayEpoch: String?
+    @ObservationIgnored var pendingCanonicalHistoryRefreshAfterReplayDiscontinuity = false
+    // A Desktop/rollout source handoff needs replace semantics for the mirrored
+    // tail, not an append-only merge that leaves stale synthetic rows behind.
+    @ObservationIgnored var pendingCanonicalSourceReplacementThreadIDs: Set<String> = []
+    // A bounded JSONL first paint is useful immediately but remains provisional
+    // until the app-server returns its exact cursor-backed page.
+    @ObservationIgnored var provisionalPaginatedHistoryThreadIDs: Set<String> = []
     // Mirrors the bridge package version currently running on the Mac, if the bridge reports it.
     var bridgeInstalledVersion: String?
     // Mirrors the latest published bridge package version, when the bridge can resolve it.
@@ -598,6 +675,8 @@ final class CodexService {
     @ObservationIgnored var canonicalHistoryReconcileTaskByThreadID: [String: Task<Void, Never>] = [:]
     // Tracks delayed retry timers for canonical reconcile so teardown can cancel the backoff too.
     @ObservationIgnored var canonicalHistoryReconcileRetryTaskByThreadID: [String: Task<Void, Never>] = [:]
+    // Increases retry spacing for chats whose first history page remains unavailable.
+    @ObservationIgnored var canonicalHistoryReconcileRetryAttemptByThreadID: [String: Int] = [:]
     // Coalesces sidebar/bootstrap thread/list refreshes so launch paths do not duplicate the same fetch.
     @ObservationIgnored var threadListFetchTaskByLimit: [Int: (id: UUID, task: Task<[CodexThread], Error>)] = [:]
     var isAppInForeground = true
@@ -687,13 +766,15 @@ final class CodexService {
     var bufferedSecureControlMessages: [String: [String]] = [:]
     // Assistant-scoped patch ledger used by the revert-changes flow.
     var aiChangeSetsByID: [String: AIChangeSet] = [:]
-    var aiChangeSetIDByTurnID: [String: String] = [:]
+    var aiChangeSetIDByTurnKey: [AIChangeSetTurnKey: String] = [:]
     var aiChangeSetIDByAssistantMessageID: [String: String] = [:]
     @ObservationIgnored var workspaceCheckpointCopyTaskByTurnID: [String: Task<Void, Never>] = [:]
     // Keeps hot-path thread lookups O(1) instead of rescanning the full sidebar list.
     @ObservationIgnored var threadByID: [String: CodexThread] = [:]
     @ObservationIgnored var threadIndexByID: [String: Int] = [:]
     @ObservationIgnored var firstLiveThreadIDCache: String?
+    @ObservationIgnored var restoredThreadSnapshotIDs: Set<String> = []
+    @ObservationIgnored var threadListSnapshotPersistenceTask: Task<Void, Never>?
     @ObservationIgnored var subagentIdentityByThreadID: [String: CodexSubagentIdentityEntry] = [:]
     @ObservationIgnored var subagentIdentityByAgentID: [String: CodexSubagentIdentityEntry] = [:]
     // Canonical repo roots keyed by observed working directories from bridge git/status responses.
@@ -728,6 +809,7 @@ final class CodexService {
     let decoder: JSONDecoder
     let messagePersistence = CodexMessagePersistence()
     let composerDraftPersistence = CodexComposerDraftPersistence()
+    let threadListPersistence = CodexThreadListPersistence()
     let aiChangeSetPersistence = AIChangeSetPersistence()
     let defaults: UserDefaults
     let userNotificationCenter: CodexUserNotificationCentering
@@ -772,7 +854,7 @@ final class CodexService {
         self.composerDraftsByThreadID = [:]
         rebuildSubagentIdentityDirectory()
         self.aiChangeSetsByID = [:]
-        self.aiChangeSetIDByTurnID = [:]
+        self.aiChangeSetIDByTurnKey = [:]
         self.aiChangeSetIDByAssistantMessageID = [:]
 
         let savedModelId = defaults.string(forKey: Self.selectedModelIdDefaultsKey)?
@@ -836,15 +918,20 @@ final class CodexService {
         self.relayMacDeviceId = SecureStore.readString(for: CodexSecureKeys.relayMacDeviceId)
         self.relayMacIdentityPublicKey = SecureStore.readString(for: CodexSecureKeys.relayMacIdentityPublicKey)
         if let rawProtocolVersion = SecureStore.readString(for: CodexSecureKeys.relayProtocolVersion),
-           let parsedProtocolVersion = Int(rawProtocolVersion) {
+           let parsedProtocolVersion = Int(rawProtocolVersion),
+           parsedProtocolVersion == codexSecureProtocolVersion {
             self.relayProtocolVersion = parsedProtocolVersion
         } else {
+            // Protocol capability belongs to this app build, not stale pairing
+            // metadata. A version bump keeps the trusted identity but requires
+            // the bridge to update before the next encrypted reconnect.
             self.relayProtocolVersion = codexSecureProtocolVersion
         }
         if let rawLastAppliedSeq = SecureStore.readString(for: CodexSecureKeys.relayLastAppliedBridgeOutboundSeq),
            let parsedLastAppliedSeq = Int(rawLastAppliedSeq) {
             self.lastAppliedBridgeOutboundSeq = parsedLastAppliedSeq
         }
+        self.lastAppliedBridgeReplayEpoch = SecureStore.readString(for: CodexSecureKeys.relayBridgeReplayEpoch)
         migrateCurrentTrustedMacDeviceIdIfNeeded()
         migrateLegacyMacScopedDefaultsIfNeeded()
         loadCurrentMacScopedDefaultsState()

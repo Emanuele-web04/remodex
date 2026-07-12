@@ -49,6 +49,188 @@ test("desktop conversation projector bootstraps active Desktop turns for mobile"
   assert.equal(output.notifications[1].params.remodexDesktopIpcMirror, true);
 });
 
+test("desktop conversation projector exposes committed per-thread runtime settings", () => {
+  const thread = projectDesktopConversationStateToThread("thread-runtime", {
+    title: "Runtime settings",
+    remodexRuntimeSettings: {
+      model: "gpt-5.6",
+      reasoningEffort: "xhigh",
+      serviceTier: "fast",
+      revision: 4,
+      updatedAt: 1234,
+      source: "phone",
+    },
+    turns: [],
+  });
+
+  assert.equal(thread.model, "gpt-5.6");
+  assert.equal(thread.reasoningEffort, "xhigh");
+  assert.equal(thread.serviceTier, "fast");
+  assert.equal(thread.runtimeSettingsRevision, 4);
+  assert.equal(thread.runtimeSettingsUpdatedAt, 1234);
+  assert.equal(thread.runtimeSettingsSource, "phone");
+});
+
+test("desktop conversation projector pushes newer runtime settings to an already-open phone thread", () => {
+  const projector = createDesktopConversationProjector();
+  projector.project("thread-runtime-live", {
+    title: "Runtime live",
+    remodexRuntimeSettings: {
+      model: "gpt-5.5",
+      reasoningEffort: "medium",
+      serviceTier: null,
+      revision: 1,
+    },
+    turns: [],
+  });
+  const output = projector.project("thread-runtime-live", {
+    title: "Runtime live",
+    remodexRuntimeSettings: {
+      model: "gpt-5.6",
+      reasoningEffort: "high",
+      serviceTier: "fast",
+      revision: 2,
+    },
+    turns: [],
+  });
+
+  const runtimeUpdate = output.notifications.find((notification) => notification.method === "thread/started");
+  assert.equal(runtimeUpdate.params.thread.model, "gpt-5.6");
+  assert.equal(runtimeUpdate.params.thread.reasoningEffort, "high");
+  assert.equal(runtimeUpdate.params.thread.serviceTier, "fast");
+  assert.equal(runtimeUpdate.params.thread.runtimeSettingsRevision, 2);
+});
+
+test("desktop conversation projector reports identity continuity only for the same logical turn", () => {
+  const sameTurnProjector = createDesktopConversationProjector();
+  sameTurnProjector.project("thread-same-repair", {
+    turns: [{
+      status: "inProgress",
+      params: { input: [{ type: "text", text: "Keep fixing mirroring" }] },
+      items: [{ id: "stable-assistant", type: "agentMessage", text: "Working" }],
+    }],
+  });
+  const sameTurnRepair = sameTurnProjector.project("thread-same-repair", {
+    turns: [{
+      turnId: "turn-real-a",
+      status: "inProgress",
+      params: { input: [{ type: "text", text: "Keep fixing mirroring" }] },
+      items: [{ id: "stable-assistant", type: "agentMessage", text: "Working" }],
+    }],
+  });
+  assert.equal(sameTurnRepair.type, "fullReplace");
+  assert.deepEqual(sameTurnRepair.turnIdentityContinuityTurnIds, ["turn-real-a"]);
+
+  const nextTurnProjector = createDesktopConversationProjector();
+  nextTurnProjector.project("thread-different-repair", {
+    turns: [{
+      status: "inProgress",
+      params: { input: [{ type: "text", text: "Turn A prompt" }] },
+      items: [{ id: "assistant-a", type: "agentMessage", text: "A output" }],
+    }],
+  });
+  const differentTurn = nextTurnProjector.project("thread-different-repair", {
+    turns: [{
+      turnId: "turn-real-b",
+      status: "inProgress",
+      params: { input: [{ type: "text", text: "Turn B prompt" }] },
+      items: [{ id: "assistant-b", type: "agentMessage", text: "B output" }],
+    }],
+  });
+  assert.equal(differentTurn.type, "fullReplace");
+  assert.deepEqual(differentTurn.turnIdentityContinuityTurnIds, []);
+
+  const repeatedPromptProjector = createDesktopConversationProjector();
+  repeatedPromptProjector.project("thread-repeated-prompt", {
+    turns: [{
+      status: "inProgress",
+      params: { input: [{ type: "text", text: "continue" }] },
+      items: [{ id: "assistant-repeat-a", type: "agentMessage", text: "A output" }],
+    }],
+  });
+  const repeatedPromptNewTurn = repeatedPromptProjector.project("thread-repeated-prompt", {
+    turns: [{
+      turnId: "turn-repeat-b",
+      status: "inProgress",
+      params: { input: [{ type: "text", text: "continue" }] },
+      items: [{ id: "assistant-repeat-b", type: "agentMessage", text: "B output" }],
+    }],
+  });
+  assert.deepEqual(repeatedPromptNewTurn.turnIdentityContinuityTurnIds, []);
+
+  const parallelProjector = createDesktopConversationProjector();
+  parallelProjector.project("thread-one-to-one-continuity", {
+    turns: [{
+      status: "inProgress",
+      startedAt: 123,
+      params: { input: [{ type: "text", text: "same signature" }] },
+      items: [],
+    }],
+  });
+  const parallelReplacement = parallelProjector.project("thread-one-to-one-continuity", {
+    turns: [
+      {
+        turnId: "turn-real-first",
+        status: "inProgress",
+        startedAt: 123,
+        params: { input: [{ type: "text", text: "same signature" }] },
+        items: [],
+      },
+      {
+        turnId: "turn-real-second",
+        status: "inProgress",
+        startedAt: 123,
+        params: { input: [{ type: "text", text: "same signature" }] },
+        items: [],
+      },
+    ],
+  });
+  assert.equal(parallelReplacement.type, "fullReplace");
+  assert.deepEqual(
+    parallelReplacement.turnIdentityContinuityTurnIds,
+    ["turn-real-first"],
+    "one synthetic alias cannot suppress two canonical run starts"
+  );
+
+  const partialRepairProjector = createDesktopConversationProjector();
+  partialRepairProjector.project("thread-partial-repair", {
+    turns: [
+      {
+        status: "inProgress",
+        items: [{ id: "assistant-partial-a", type: "agentMessage", text: "A" }],
+      },
+      {
+        status: "inProgress",
+        items: [{ id: "assistant-partial-c", type: "agentMessage", text: "C" }],
+      },
+    ],
+  });
+  const partialRepair = partialRepairProjector.project("thread-partial-repair", {
+    turns: [
+      {
+        turnId: "turn-real-partial-a",
+        status: "inProgress",
+        items: [{ id: "assistant-partial-a", type: "agentMessage", text: "A" }],
+      },
+      {
+        status: "inProgress",
+        items: [{ id: "assistant-partial-c", type: "agentMessage", text: "C" }],
+      },
+    ],
+  });
+  assert.equal(partialRepair.type, "fullReplace");
+  assert.deepEqual(
+    partialRepair.notifications
+      .filter((notification) => notification.method === "turn/started")
+      .map((notification) => notification.params.turnId),
+    ["turn-real-partial-a", "ipc-turn-1"]
+  );
+  assert.deepEqual(
+    new Set(partialRepair.turnIdentityContinuityTurnIds),
+    new Set(["turn-real-partial-a", "ipc-turn-1"])
+  );
+});
+
 test("desktop conversation projector emits plan reasoning and command deltas", () => {
   const projector = createDesktopConversationProjector();
   projector.project("thread-deltas", {
@@ -98,6 +280,37 @@ test("desktop conversation projector emits plan reasoning and command deltas", (
       ["item/commandExecution/outputDelta", "line 2\n"],
     ]
   );
+});
+
+test("desktop conversation projector marks Litter todo-list items as progress plans", () => {
+  const rawPlan = {
+    id: "dae353b0-litter-plan",
+    type: "todo-list",
+    status: "completed",
+    explanation: "All review fixes are complete.",
+    plan: [
+      { step: "Fix history", status: "completed" },
+      { step: "Verify mirroring", status: "completed" },
+    ],
+  };
+  const state = {
+    turns: [{
+      turnId: "turn-litter-plan",
+      status: "inProgress",
+      items: [rawPlan],
+    }],
+  };
+
+  const thread = projectDesktopConversationStateToThread("thread-litter-plan", state);
+  assert.equal(thread.turns[0].items[0].remodexProgressPlan, true);
+
+  const output = createDesktopConversationProjector().project("thread-litter-plan", state);
+  const lifecycleItems = output.notifications
+    .filter((notification) => notification.method === "item/started"
+      || notification.method === "item/completed")
+    .map((notification) => notification.params.item);
+  assert.equal(lifecycleItems.length, 2);
+  assert.equal(lifecycleItems.every((item) => item.remodexProgressPlan === true), true);
 });
 
 test("desktop conversation projector normalizes Desktop tool aliases for mobile lifecycle", () => {
@@ -273,6 +486,28 @@ test("desktop conversation projector skips userMessage items that only carry con
   assert.deepEqual(startedItemIds, ["assistant-1"]);
 });
 
+test("desktop conversation projector hides native goal continuation context", () => {
+  const projector = createDesktopConversationProjector();
+  const output = projector.project("thread-goal-context", {
+    turns: [{
+      turnId: "turn-goal-context",
+      status: "inProgress",
+      params: {
+        input: [{
+          type: "text",
+          text: "<codex_internal_context source=\"goal\">\nContinue working toward the active thread goal.\n</codex_internal_context>",
+        }],
+      },
+      items: [{ id: "assistant-goal", type: "agentMessage", text: "Continuing" }],
+    }],
+  });
+  assert.equal(JSON.stringify(output.notifications).includes("codex_internal_context"), false);
+  assert.deepEqual(
+    output.notifications.filter((entry) => entry.method === "item/started").map((entry) => entry.params.itemId),
+    ["assistant-goal"]
+  );
+});
+
 test("desktop conversation projector mirrors token usage updates", () => {
   const projector = createDesktopConversationProjector();
   projector.project("thread-usage", {
@@ -434,4 +669,45 @@ test("projects Desktop conversation state into thread/read backfill shape", () =
     thread.turns[0].items.slice(2).map((item) => item.remodexDesktopIpcItemType),
     ["mcpToolCall", "dynamicToolCall"]
   );
+});
+
+test("desktop conversation projector live-syncs goal metadata without transcript rows", () => {
+  const projector = createDesktopConversationProjector();
+  const baseGoal = {
+    threadId: "thread-goal",
+    objective: "Ship live goal sync",
+    status: "active",
+    tokenBudget: null,
+    tokensUsed: 10,
+    timeUsedSeconds: 2,
+    createdAt: 1,
+    updatedAt: 2,
+  };
+  const bootstrap = projector.project("thread-goal", { threadGoal: baseGoal, turns: [] });
+  assert.deepEqual(bootstrap.notifications.map((entry) => entry.method), ["thread/goal/updated"]);
+  assert.deepEqual(bootstrap.notifications[0].params.goal, baseGoal);
+  assert.equal(bootstrap.notifications[0].params.turnId, null);
+
+  const progress = projector.project("thread-goal", {
+    threadGoal: { ...baseGoal, tokensUsed: 20, updatedAt: 3 },
+    turns: [],
+  });
+  assert.deepEqual(progress.notifications.map((entry) => entry.method), ["thread/goal/updated"]);
+  assert.equal(progress.notifications[0].params.goal.tokensUsed, 20);
+
+  const completed = projector.project("thread-goal", {
+    threadGoal: null,
+    completedThreadGoal: { ...baseGoal, status: "complete", updatedAt: 4 },
+    turns: [],
+  });
+  assert.deepEqual(completed.notifications.map((entry) => entry.method), ["thread/goal/updated"]);
+  assert.equal(completed.notifications[0].params.goal.status, "complete");
+
+  const cleared = projector.project("thread-goal", {
+    threadGoal: null,
+    completedThreadGoal: null,
+    turns: [],
+  });
+  assert.deepEqual(cleared.notifications.map((entry) => entry.method), ["thread/goal/cleared"]);
+  assert.equal(cleared.notifications[0].params.threadId, "thread-goal");
 });

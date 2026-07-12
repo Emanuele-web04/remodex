@@ -852,6 +852,70 @@ final class TurnViewModelQueueTests: XCTestCase {
         XCTAssertEqual(service.turnTerminalState(for: "turn-latest"), .completed)
     }
 
+    func testRefreshInFlightTurnStateDoesNotClearNewDesktopTurnForStaleTerminalCandidate() async {
+        let service = makeService()
+        let threadID = "thread-queue"
+        let firstTurnID = "ipc-turn-0"
+        let secondTurnID = "ipc-turn-1"
+        service.isConnected = true
+        service.isInitialized = true
+        service.supportsTurnPagination = false
+
+        let mirroredParams: [String: JSONValue] = [
+            "threadId": .string(threadID),
+            "remodexDesktopMirror": .bool(true),
+        ]
+        service.handleNotification(
+            method: "turn/started",
+            params: .object(mirroredParams.merging([
+                "turnId": .string(firstTurnID),
+            ]) { _, replacement in replacement })
+        )
+        service.handleNotification(
+            method: "turn/started",
+            params: .object(mirroredParams.merging([
+                "turnId": .string(secondTurnID),
+            ]) { _, replacement in replacement })
+        )
+        service.handleNotification(
+            method: "turn/completed",
+            params: .object(mirroredParams.merging([
+                "turnId": .string(firstTurnID),
+                "status": .string("completed"),
+            ]) { _, replacement in replacement })
+        )
+
+        service.requestTransportOverride = { method, _ in
+            XCTAssertEqual(method, "thread/read")
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object([
+                    "thread": .object([
+                        "turns": .array([
+                            .object([
+                                "id": .string(firstTurnID),
+                                "status": .string("in_progress"),
+                            ]),
+                        ]),
+                    ]),
+                ]),
+                includeJSONRPC: false
+            )
+        }
+
+        let didRefresh = await service.refreshInFlightTurnState(threadId: threadID)
+
+        XCTAssertTrue(didRefresh)
+        XCTAssertEqual(service.activeTurnID(for: threadID), secondTurnID)
+        XCTAssertEqual(service.threadRunBadgeState(for: threadID), .running)
+        XCTAssertTrue(service.runningThreadIDs.contains(threadID))
+        XCTAssertTrue(service.desktopMirroredRunningThreadIDs.contains(threadID))
+        XCTAssertEqual(
+            service.projectedTerminalStateByThreadID[threadID]?[firstTurnID],
+            .completed
+        )
+    }
+
     func testRefreshInFlightTurnStatePreservesDesktopMirroredRunOnlyOnceWhenSnapshotIsStale() async {
         let service = makeService()
 
@@ -948,7 +1012,7 @@ final class TurnViewModelQueueTests: XCTestCase {
         XCTAssertNil(service.activeTurnId)
     }
 
-    func testVisibleTailPreservesRecentFileChangeArtifactsFromOmittedPreviousTurn() {
+    func testVisibleTailDoesNotInjectArtifactsFromOmittedPreviousTurn() {
         let service = makeService()
         let fileChange = makeMessage(
             id: "file-change",
@@ -978,8 +1042,7 @@ final class TurnViewModelQueueTests: XCTestCase {
             omittedPrefix: ArraySlice(omittedPrefix)
         )
 
-        XCTAssertEqual(result.prefix(2).map(\.id), ["file-change", "plan"])
-        XCTAssertEqual(result.count, visibleTail.count + 2)
+        XCTAssertEqual(result.map(\.id), visibleTail.map(\.id))
     }
 
     func testInterruptTurnDoesNotTargetCompletedLatestTurnWhenRunningTurnHasNoID() async {
@@ -1094,6 +1157,12 @@ final class TurnViewModelQueueTests: XCTestCase {
             switch method {
             case "thread/turns/list":
                 XCTAssertEqual(params?.objectValue?["threadId"]?.stringValue, "thread-queue")
+                XCTAssertEqual(
+                    params?.objectValue?["limit"]?.intValue,
+                    ThreadTurnStateSnapshotPolicy.recentTurnLimit
+                )
+                XCTAssertEqual(params?.objectValue?["sortDirection"]?.stringValue, "desc")
+                XCTAssertNil(params?.objectValue?["remodexTurnStateOnly"])
                 throw CodexServiceError.rpcError(
                     RPCError(
                         code: -32600,

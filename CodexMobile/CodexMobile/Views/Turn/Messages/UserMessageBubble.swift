@@ -51,7 +51,7 @@ struct UserMessageBubble: View {
 
             if let statusText = deliveryStatusText {
                 Text(statusText)
-                    .font(AppFont.subheadline())
+                    .font(AppFont.caption())
                     .foregroundStyle(message.deliveryState == .failed ? .red : .secondary)
             }
         }
@@ -158,10 +158,24 @@ struct UserMessageBubble: View {
             .foregroundStyle(foreground)
             .tint(foreground)
         } else {
-            UserBubbleInlineMarkdownText(renderModel.text, foreground: foreground)
-                .font(AppFont.body())
+            if renderModel.segments.isEmpty {
+                UserBubbleInlineMarkdownText(renderModel.text, foreground: foreground)
+                    .font(AppFont.body())
+            } else {
+                UserBubbleInlineSkillText(
+                    renderModel.segments,
+                    foreground: foreground,
+                    skillForeground: bubbleColor == .default ? .blue : foreground
+                )
+                    .font(AppFont.body())
+            }
         }
     }
+}
+
+enum UserBubbleInlineSegment: Equatable {
+    case text(String)
+    case skillMention(name: String, displayLabel: String)
 }
 
 private struct UserBubbleRenderModel: Equatable {
@@ -169,6 +183,7 @@ private struct UserBubbleRenderModel: Equatable {
     let textFingerprint: String
     let chips: [TurnMentionChipRef]
     let usesBlockMarkdown: Bool
+    let segments: [UserBubbleInlineSegment]
 }
 
 enum UserBubbleRenderModelCache {
@@ -244,6 +259,7 @@ private enum UserBubbleMentionExtractor {
             let chip = TurnMentionChipRef.skill(trimmed)
             appendChip(chip, to: &chips, seenChipIDs: &seenChipIDs)
             selectedChipsByToken[mentionLookupKey(trigger: "$", token: trimmed)] = chip
+            selectedChipsByToken[mentionLookupKey(trigger: "/", token: trimmed)] = chip
         }
 
         for mention in pluginMentions {
@@ -258,10 +274,9 @@ private enum UserBubbleMentionExtractor {
             in: rawText,
             style: .mentionToken
         )
-        var replacements: [Replacement] = []
-        var replacedChipIDs: Set<String> = []
+        var nonSkillReplacements: [Replacement] = []
 
-        if normalizedText.contains("@") || normalizedText.contains("$"),
+        if normalizedText.contains("@") || normalizedText.contains("$") || normalizedText.contains("/"),
            let mentionRegex = TurnMessageRegexCache.userMentionToken {
             let nsText = normalizedText as NSString
             let matches = mentionRegex.matches(
@@ -275,22 +290,80 @@ private enum UserBubbleMentionExtractor {
                 }
                 let lookupKey = mentionLookupKey(trigger: parsed.trigger, token: parsed.token)
                 guard let chip = selectedChipsByToken[lookupKey] else { continue }
-                replacements.append(Replacement(range: match.range, text: chip.displayLabel + parsed.trailingPunctuation))
-                replacedChipIDs.insert(chip.id)
+                guard chip.kind != .skill else { continue }
+                nonSkillReplacements.append(
+                    Replacement(range: match.range, text: chip.displayLabel + parsed.trailingPunctuation)
+                )
             }
         }
 
-        // Chips render in their own strip; keep the bubble text to the user's prose only.
-        let displayText = cleanedText(
-            replacing: replacements,
+        let intermediateText = cleanedText(
+            replacing: nonSkillReplacements,
             in: normalizedText
         )
-        return UserBubbleRenderModel(
-            text: displayText,
-            textFingerprint: TurnTextCacheKey.stableFingerprint(for: displayText),
-            chips: chips,
-            usesBlockMarkdown: UserBubbleBlockMarkdownDetector.containsBlockMarkdown(displayText)
+        let usesBlockMarkdown = UserBubbleBlockMarkdownDetector.containsBlockMarkdown(intermediateText)
+        let inlineResult = skillInlineResult(
+            in: intermediateText,
+            selectedChipsByToken: selectedChipsByToken,
+            createsSegments: !usesBlockMarkdown
         )
+        return UserBubbleRenderModel(
+            text: inlineResult.displayText,
+            textFingerprint: TurnTextCacheKey.stableFingerprint(for: inlineResult.displayText),
+            chips: chips.filter { !inlineResult.inlineSkillChipIDs.contains($0.id) },
+            usesBlockMarkdown: usesBlockMarkdown,
+            segments: inlineResult.segments
+        )
+    }
+
+    private static func skillInlineResult(
+        in text: String,
+        selectedChipsByToken: [String: TurnMentionChipRef],
+        createsSegments: Bool
+    ) -> (displayText: String, segments: [UserBubbleInlineSegment], inlineSkillChipIDs: Set<String>) {
+        guard let regex = TurnMessageRegexCache.userMentionToken else {
+            return (text, [], [])
+        }
+        let nsText = text as NSString
+        let matches = regex.matches(in: text, range: NSRange(location: 0, length: nsText.length))
+        var replacements: [Replacement] = []
+        var segments: [UserBubbleInlineSegment] = []
+        var inlineSkillChipIDs: Set<String> = []
+        var cursor = 0
+
+        for match in matches {
+            guard let parsed = parsedMention(match: match, in: nsText),
+                  parsed.trigger == "$" || parsed.trigger == "/",
+                  let chip = selectedChipsByToken[
+                    mentionLookupKey(trigger: parsed.trigger, token: parsed.token)
+                  ],
+                  chip.kind == .skill else {
+                continue
+            }
+            replacements.append(
+                Replacement(range: match.range, text: chip.displayLabel + parsed.trailingPunctuation)
+            )
+            guard createsSegments else { continue }
+
+            if match.range.location > cursor {
+                segments.append(.text(nsText.substring(with: NSRange(
+                    location: cursor,
+                    length: match.range.location - cursor
+                ))))
+            }
+            segments.append(.skillMention(name: parsed.token, displayLabel: chip.displayLabel))
+            if !parsed.trailingPunctuation.isEmpty {
+                segments.append(.text(parsed.trailingPunctuation))
+            }
+            cursor = NSMaxRange(match.range)
+            inlineSkillChipIDs.insert(chip.id)
+        }
+
+        if createsSegments, !inlineSkillChipIDs.isEmpty, cursor < nsText.length {
+            segments.append(.text(nsText.substring(from: cursor)))
+        }
+        let displayText = cleanedText(replacing: replacements, in: text)
+        return (displayText, inlineSkillChipIDs.isEmpty ? [] : segments, inlineSkillChipIDs)
     }
 
     private static func appendChip(
@@ -306,15 +379,18 @@ private enum UserBubbleMentionExtractor {
         match: NSTextCheckingResult,
         in nsText: NSString
     ) -> (trigger: String, token: String, trailingPunctuation: String)? {
-        let triggerRange = match.range(at: 1)
-        let tokenRange = match.range(at: 2)
-        guard triggerRange.location != NSNotFound,
-              tokenRange.location != NSNotFound else {
+        let capturePair = [(1, 2), (3, 4)].first { pair in
+            pair.0 < match.numberOfRanges
+                && pair.1 < match.numberOfRanges
+                && match.range(at: pair.0).location != NSNotFound
+                && match.range(at: pair.1).location != NSNotFound
+        }
+        guard let capturePair else {
             return nil
         }
 
-        let trigger = nsText.substring(with: triggerRange)
-        let rawToken = nsText.substring(with: tokenRange)
+        let trigger = nsText.substring(with: match.range(at: capturePair.0))
+        let rawToken = nsText.substring(with: match.range(at: capturePair.1))
         let normalized = normalizedMentionToken(rawToken)
         guard !normalized.token.isEmpty else {
             return nil
@@ -376,7 +452,7 @@ private struct UserBubblePreviewCatalog: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 28) {
-                previewSection("Skill chip + text") {
+                previewSection("Inline skill + text") {
                     bubblePreview(
                         text: "can you $check-code",
                         skillMentions: ["check-code"],
@@ -505,6 +581,6 @@ private struct UserBubblePreviewCatalog: View {
     }
 }
 
-#Preview("User Bubble — Mention Chips") {
+#Preview("User Bubble — Inline Skills") {
     UserBubblePreviewCatalog()
 }
