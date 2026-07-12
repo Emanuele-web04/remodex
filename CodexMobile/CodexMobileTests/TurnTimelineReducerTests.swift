@@ -1159,6 +1159,75 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(previousMessages.flatMap(\.messages).map(\.id), ["commentary"])
     }
 
+    func testCompletedTimelineFoldsReasoningAfterHiddenAssistantCommentaryIntoPreviousMessages() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "user",
+                threadID: "thread",
+                role: .user,
+                text: "Inspect the timeline",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "command-1",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git status",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "command-1",
+                orderIndex: 2
+            ),
+            makeMessage(
+                id: "commentary",
+                threadID: "thread",
+                role: .assistant,
+                text: "I found the relevant files.",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "commentary",
+                orderIndex: 3
+            ),
+            makeMessage(
+                id: "reasoning",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "Reasoning after commentary",
+                createdAt: now.addingTimeInterval(3),
+                turnID: "turn-1",
+                itemID: "reasoning",
+                orderIndex: 4
+            ),
+            makeMessage(
+                id: "final",
+                threadID: "thread",
+                role: .assistant,
+                text: "The inspection is complete.",
+                createdAt: now.addingTimeInterval(4),
+                turnID: "turn-1",
+                itemID: "final",
+                orderIndex: 5
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(
+            messages: messages,
+            completedTurnIDs: ["turn-1"]
+        )
+        let previousMessages = items.compactMap { item -> TurnTimelinePreviousMessagesGroup? in
+            guard case .previousMessages(let group) = item else { return nil }
+            return group
+        }
+
+        XCTAssertEqual(previousMessages.flatMap(\.messages).map(\.id), ["commentary", "reasoning"])
+        XCTAssertFalse(items.contains { $0.id == "reasoning" })
+    }
+
     func testTimelineRenderProjectionReasoningTraceDoesNotJoinDifferentTurns() {
         let now = Date()
         let messages = [

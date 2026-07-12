@@ -693,12 +693,14 @@ enum TurnTimelineRenderProjection {
             }
 
             if isGeneratedImageArtifactOnly(candidate) {
+                hasOpenFinishedCommandGroup = false
                 hiddenIndices.append(index)
                 generatedImageArtifactIndices.append(index)
                 continue
             }
 
             if isReplayOfFinalAssistant(candidate, finalMessage: finalMessage) {
+                hasOpenFinishedCommandGroup = false
                 hiddenIndices.append(index)
                 if shouldPreserveReplayAsPreviousMessage(candidate, finalMessage: finalMessage) {
                     groupIndices.append(index)
@@ -726,6 +728,7 @@ enum TurnTimelineRenderProjection {
 
             hiddenIndices.append(index)
             groupIndices.append(index)
+            hasOpenFinishedCommandGroup = false
         }
 
         return PreviousMessageSelection(
