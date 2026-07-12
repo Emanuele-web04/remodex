@@ -120,6 +120,28 @@ enum TurnTimelineToolBurstAccessoryResolver {
     }
 }
 
+enum TurnTimelineCommandGroupAccessoryResolver {
+    static func copyFooterState(
+        for group: TurnTimelineCommandGroup,
+        statesByMessageID: [String: AssistantBlockAccessoryState],
+        suppressesRunningIndicator: Bool
+    ) -> AssistantBlockAccessoryState? {
+        guard let hostMessage = group.accessoryHostMessage,
+              let state = statesByMessageID[hostMessage.id] else {
+            return nil
+        }
+
+        let resolvedState = suppressesRunningIndicator
+            ? state.replacingRunningIndicator(false)
+            : state
+        guard resolvedState.showsRunningIndicator
+            || (resolvedState.allowsCopy && resolvedState.copyText != nil) else {
+            return nil
+        }
+        return resolvedState
+    }
+}
+
 private struct AssistantBlockRevertMessageSignature: Equatable {
     let id: String
     let role: CodexMessageRole
@@ -373,6 +395,110 @@ private struct TurnTimelinePreviousMessagesView: View {
     }
 }
 
+private struct TurnTimelineCommandGroupView: View {
+    let group: TurnTimelineCommandGroup
+    let isRetryAvailable: Bool
+    let cachedBlockInfoByMessageID: [String: AssistantBlockAccessoryState]
+    let planSessionSource: CodexPlanSessionSource?
+    let allowsAssistantPlanFallbackRecovery: Bool
+    let completedTurnIDs: Set<String>
+    let threadMessagesForPlanMatching: [CodexMessage]
+    let currentWorkingDirectory: String?
+    let planMatchingFingerprint: Int
+    let newestStreamingMessageID: String?
+    let autoScrollMode: TurnScrollOwnership
+    let showsGlobalRunningIndicator: Bool
+    let onRetryUserMessage: (String) -> Void
+    let onTapAssistantRevert: (CodexMessage) -> Void
+    let onTapSubagent: (CodexSubagentThreadPresentation) -> Void
+
+    @State private var isExpanded = false
+
+    private var title: String {
+        var parts = [group.commandCount == 1 ? "Ran 1 command" : "Ran \(group.commandCount) commands"]
+        if group.failedCommandCount > 0 {
+            parts.append("\(group.failedCommandCount) failed")
+        }
+        if group.stoppedCommandCount > 0 {
+            parts.append("\(group.stoppedCommandCount) stopped")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private var summaryColor: Color {
+        group.hasUnsuccessfulCommands ? .red : .secondary
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    isExpanded.toggle()
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    RemodexIcon.image(systemName: "terminal", size: 14, relativeTo: .body)
+                        .foregroundStyle(summaryColor)
+                    Text(title)
+                        .font(AppFont.body(weight: .regular))
+                        .foregroundStyle(summaryColor)
+                    RemodexIcon.image(systemName: "chevron.right", size: 13, relativeTo: .body)
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(title)
+            .accessibilityHint(isExpanded ? "Collapse commands" : "Expand commands")
+
+            if isExpanded {
+                ForEach(group.orderedMessages) { message in
+                    groupedMessageRow(message)
+                }
+            } else {
+                ForEach(group.collapsedDetailMessages) { message in
+                    groupedMessageRow(message)
+                }
+            }
+
+            if let footerState = TurnTimelineCommandGroupAccessoryResolver.copyFooterState(
+                for: group,
+                statesByMessageID: cachedBlockInfoByMessageID,
+                suppressesRunningIndicator: showsGlobalRunningIndicator
+            ) {
+                CopyBlockButton(
+                    text: footerState.allowsCopy ? footerState.copyText : nil,
+                    isRunning: footerState.showsRunningIndicator
+                )
+            }
+        }
+        .id(group.id)
+    }
+
+    private func groupedMessageRow(_ message: CodexMessage) -> some View {
+        TurnTimelineMessageRow(
+            message: message,
+            isRetryAvailable: isRetryAvailable,
+            cachedBlockInfoByMessageID: cachedBlockInfoByMessageID,
+            planSessionSource: planSessionSource,
+            allowsAssistantPlanFallbackRecovery: allowsAssistantPlanFallbackRecovery,
+            completedTurnIDs: completedTurnIDs,
+            threadMessagesForPlanMatching: threadMessagesForPlanMatching,
+            currentWorkingDirectory: currentWorkingDirectory,
+            planMatchingFingerprint: planMatchingFingerprint,
+            newestStreamingMessageID: newestStreamingMessageID,
+            autoScrollMode: autoScrollMode,
+            showsGlobalRunningIndicator: showsGlobalRunningIndicator,
+            movesCopyAndRunningToGroupFooter: message.id == group.accessoryHostMessage?.id,
+            onRetryUserMessage: onRetryUserMessage,
+            onTapAssistantRevert: onTapAssistantRevert,
+            onTapSubagent: onTapSubagent
+        )
+    }
+}
+
 struct TurnTimelineRowsSection: View {
     let shouldWarmRecentTailProgressively: Bool
     let hasEarlierMessages: Bool
@@ -452,6 +578,24 @@ struct TurnTimelineRowsSection: View {
                     )
                 case .toolBurst(let group):
                     TurnTimelineToolBurstView(
+                        group: group,
+                        isRetryAvailable: isRetryAvailable,
+                        cachedBlockInfoByMessageID: cachedBlockInfoByMessageID,
+                        planSessionSource: planSessionSource,
+                        allowsAssistantPlanFallbackRecovery: allowsAssistantPlanFallbackRecovery,
+                        completedTurnIDs: completedTurnIDs,
+                        threadMessagesForPlanMatching: threadMessagesForPlanMatching,
+                        currentWorkingDirectory: currentWorkingDirectory,
+                        planMatchingFingerprint: planMatchingFingerprint,
+                        newestStreamingMessageID: newestStreamingMessageID,
+                        autoScrollMode: autoScrollMode,
+                        showsGlobalRunningIndicator: shouldUseGlobalRunningIndicator,
+                        onRetryUserMessage: onRetryUserMessage,
+                        onTapAssistantRevert: onTapAssistantRevert,
+                        onTapSubagent: onTapSubagent
+                    )
+                case .commandGroup(let group):
+                    TurnTimelineCommandGroupView(
                         group: group,
                         isRetryAvailable: isRetryAvailable,
                         cachedBlockInfoByMessageID: cachedBlockInfoByMessageID,

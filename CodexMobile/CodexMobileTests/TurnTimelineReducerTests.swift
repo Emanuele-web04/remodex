@@ -549,7 +549,11 @@ final class TurnTimelineReducerTests: XCTestCase {
         ]
 
         let items = TurnTimelineRenderProjection.project(messages: messages)
-        XCTAssertEqual(items.map(\.id), ["tool-1", "tool-2"])
+        XCTAssertEqual(items.map(\.id), ["command-group:tool-1"])
+        guard case .commandGroup(let group) = items.first else {
+            return XCTFail("Expected completed commands behind one disclosure")
+        }
+        XCTAssertEqual(group.messages.map(\.id), ["tool-1", "tool-2"])
     }
 
     func testTimelineRenderProjectionSplitsToolRunsAcrossStableTurnIDs() {
@@ -588,6 +592,841 @@ final class TurnTimelineReducerTests: XCTestCase {
         }
 
         XCTAssertEqual(messageIDs, ["tool-1", "tool-2"])
+    }
+
+    func testTimelineRenderProjectionGroupsFinishedCommandsIntoDisclosureItem() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "command-1",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed rg -n \"needle\" Sources",
+                createdAt: now,
+                turnID: "turn-1",
+                itemID: "command-1"
+            ),
+            makeMessage(
+                id: "command-2",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed sed -n '1,40p' Sources/App.swift",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "command-2"
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(messages: messages)
+
+        XCTAssertEqual(items.map(\.id), ["command-group:command-1"])
+    }
+
+    func testTimelineRenderProjectionGroupsCommandsAcrossLiveReasoningTrace() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "command-1",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed rg -n \"needle\" Sources",
+                createdAt: now,
+                turnID: "turn-1",
+                itemID: "command-1"
+            ),
+            makeMessage(
+                id: "command-2",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed sed -n '1,40p' Sources/App.swift",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "command-2"
+            ),
+            makeMessage(
+                id: "reasoning",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "Reasoning summary between command tool calls",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "reasoning"
+            ),
+            makeMessage(
+                id: "command-3",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git diff --stat",
+                createdAt: now.addingTimeInterval(3),
+                turnID: "turn-1",
+                itemID: "command-3"
+            ),
+            makeMessage(
+                id: "command-4",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git status --short",
+                createdAt: now.addingTimeInterval(4),
+                turnID: "turn-1",
+                itemID: "command-4"
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(
+            messages: messages,
+            activeTurnID: "turn-1",
+            isThreadRunning: true
+        )
+
+        XCTAssertEqual(items.map(\.id), ["command-group:command-1"])
+        guard case .commandGroup(let group) = items.first else {
+            return XCTFail("Expected one command disclosure across the reasoning trace")
+        }
+        XCTAssertEqual(group.messages.map(\.id), [
+            "command-1",
+            "command-2",
+            "command-3",
+            "command-4",
+        ])
+        XCTAssertEqual(group.commandCount, 4)
+        XCTAssertEqual(group.traceMessages.map(\.id), ["reasoning"])
+        XCTAssertEqual(group.orderedMessages.map(\.id), [
+            "command-1",
+            "command-2",
+            "reasoning",
+            "command-3",
+            "command-4",
+        ])
+    }
+
+    func testTimelineProjectionPreservesCommandTraceOrderBeforeGrouping() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "command-1",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git status",
+                createdAt: now,
+                turnID: "turn-1",
+                itemID: "command-1",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "reasoning",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "Reasoning summary between commands",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "reasoning",
+                orderIndex: 2
+            ),
+            makeMessage(
+                id: "command-2",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git diff --stat",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "command-2",
+                orderIndex: 3
+            ),
+        ]
+
+        let projectedMessages = TurnTimelineReducer.project(messages: messages).messages
+        XCTAssertEqual(projectedMessages.map(\.id), ["command-1", "reasoning", "command-2"])
+
+        let items = TurnTimelineRenderProjection.project(messages: projectedMessages)
+        guard case .commandGroup(let group) = items.first else {
+            return XCTFail("Expected one command disclosure across the reasoning trace")
+        }
+        XCTAssertEqual(items.count, 1)
+        XCTAssertEqual(group.messages.map(\.id), ["command-1", "command-2"])
+        XCTAssertEqual(group.orderedMessages.map(\.id), ["command-1", "reasoning", "command-2"])
+    }
+
+    func testTimelineProjectionPreservesTrailingTraceAfterCommand() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "command-1",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git status",
+                createdAt: now,
+                turnID: "turn-1",
+                itemID: "command-1",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "reasoning",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "Reasoning summary after the command",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "reasoning",
+                orderIndex: 2
+            ),
+        ]
+
+        let projectedMessages = TurnTimelineReducer.project(messages: messages).messages
+        XCTAssertEqual(projectedMessages.map(\.id), ["command-1", "reasoning"])
+
+        let items = TurnTimelineRenderProjection.project(messages: projectedMessages)
+        guard case .commandGroup(let group) = items.first else {
+            return XCTFail("Expected the trailing trace to stay with its command disclosure")
+        }
+        XCTAssertEqual(items.count, 1)
+        XCTAssertEqual(group.orderedMessages.map(\.id), ["command-1", "reasoning"])
+    }
+
+    func testCompletedTimelineKeepsReasoningTraceWithCommandGroup() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "user",
+                threadID: "thread",
+                role: .user,
+                text: "Inspect the timeline",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "command-1",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git status",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "command-1",
+                orderIndex: 2
+            ),
+            makeMessage(
+                id: "command-2",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git diff --stat",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "command-2",
+                orderIndex: 3
+            ),
+            makeMessage(
+                id: "reasoning",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "Reasoning summary between commands",
+                createdAt: now.addingTimeInterval(3),
+                turnID: "turn-1",
+                itemID: "reasoning",
+                orderIndex: 4
+            ),
+            makeMessage(
+                id: "command-3",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed rg -n needle Sources",
+                createdAt: now.addingTimeInterval(4),
+                turnID: "turn-1",
+                itemID: "command-3",
+                orderIndex: 5
+            ),
+            makeMessage(
+                id: "command-4",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git status --short",
+                createdAt: now.addingTimeInterval(5),
+                turnID: "turn-1",
+                itemID: "command-4",
+                orderIndex: 6
+            ),
+            makeMessage(
+                id: "final",
+                threadID: "thread",
+                role: .assistant,
+                text: "The inspection is complete.",
+                createdAt: now.addingTimeInterval(6),
+                turnID: "turn-1",
+                itemID: "final",
+                orderIndex: 7
+            ),
+        ]
+
+        let projectedMessages = TurnTimelineReducer.project(messages: messages).messages
+        let items = TurnTimelineRenderProjection.project(
+            messages: projectedMessages,
+            completedTurnIDs: ["turn-1"]
+        )
+
+        XCTAssertEqual(items.map(\.id), ["user", "command-group:command-1", "final"])
+        guard case .commandGroup(let group) = items[1] else {
+            return XCTFail("Expected one completed command disclosure with its trace")
+        }
+        XCTAssertEqual(group.commandCount, 4)
+        XCTAssertEqual(group.traceMessages.map(\.id), ["reasoning"])
+        XCTAssertEqual(group.orderedMessages.map(\.id), [
+            "command-1",
+            "command-2",
+            "reasoning",
+            "command-3",
+            "command-4",
+        ])
+    }
+
+    func testCompletedTimelineKeepsCommandTraceVisibleAcrossInlineFileChange() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "user",
+                threadID: "thread",
+                role: .user,
+                text: "Inspect the timeline",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "command-1",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git status",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "command-1",
+                orderIndex: 2
+            ),
+            makeMessage(
+                id: "file-change",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: "M Sources/App.swift",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "file-change",
+                orderIndex: 3
+            ),
+            makeMessage(
+                id: "reasoning",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "Reasoning summary after the file update",
+                createdAt: now.addingTimeInterval(3),
+                turnID: "turn-1",
+                itemID: "reasoning",
+                orderIndex: 4
+            ),
+            makeMessage(
+                id: "final",
+                threadID: "thread",
+                role: .assistant,
+                text: "The inspection is complete.",
+                createdAt: now.addingTimeInterval(4),
+                turnID: "turn-1",
+                itemID: "final",
+                orderIndex: 5
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(
+            messages: messages,
+            completedTurnIDs: ["turn-1"]
+        )
+
+        XCTAssertEqual(items.map(\.id), ["user", "command-group:command-1", "final"])
+        guard case .commandGroup(let commandGroup) = items[1] else {
+            return XCTFail("Expected the file change and trace to remain with the command disclosure")
+        }
+        XCTAssertEqual(commandGroup.messages.map(\.id), ["command-1"])
+        XCTAssertEqual(commandGroup.traceMessages.map(\.id), ["reasoning"])
+        XCTAssertEqual(commandGroup.collapsedDetailMessages.map(\.id), ["file-change", "reasoning"])
+        XCTAssertEqual(commandGroup.orderedMessages.map(\.id), [
+            "command-1",
+            "file-change",
+            "reasoning",
+        ])
+        let previousMessages = items.compactMap { item -> TurnTimelinePreviousMessagesGroup? in
+            guard case .previousMessages(let group) = item else { return nil }
+            return group
+        }
+        XCTAssertFalse(previousMessages.flatMap(\.messages).contains { $0.id == "reasoning" })
+    }
+
+    func testTimelineProjectionKeepsTrailingFileChangeOutsideCommandGroupWithoutLaterTrace() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "command-1",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git status",
+                createdAt: now,
+                turnID: "turn-1",
+                itemID: "command-1"
+            ),
+            makeMessage(
+                id: "file-change",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: "M Sources/App.swift",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "file-change"
+            ),
+            makeMessage(
+                id: "final",
+                threadID: "thread",
+                role: .assistant,
+                text: "Done.",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "final"
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(messages: messages)
+
+        XCTAssertEqual(items.map(\.id), [
+            "command-group:command-1",
+            "file-change",
+            "final",
+        ])
+    }
+
+    func testTimelineRenderProjectionStillSplitsCommandsAcrossAssistantCommentary() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "command-1",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git status",
+                createdAt: now,
+                turnID: "turn-1",
+                itemID: "command-1"
+            ),
+            makeMessage(
+                id: "commentary",
+                threadID: "thread",
+                role: .assistant,
+                text: "I found the relevant files.",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "commentary"
+            ),
+            makeMessage(
+                id: "command-2",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git diff --stat",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "command-2"
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(messages: messages)
+
+        XCTAssertEqual(items.map(\.id), [
+            "command-group:command-1",
+            "commentary",
+            "command-group:command-2",
+        ])
+    }
+
+    func testCompletedTimelineStillSplitsCommandsAcrossHiddenAssistantCommentary() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "user",
+                threadID: "thread",
+                role: .user,
+                text: "Inspect the timeline",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "command-1",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git status",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "command-1",
+                orderIndex: 2
+            ),
+            makeMessage(
+                id: "command-2",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git diff --stat",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "command-2",
+                orderIndex: 3
+            ),
+            makeMessage(
+                id: "commentary",
+                threadID: "thread",
+                role: .assistant,
+                text: "I found the relevant files.",
+                createdAt: now.addingTimeInterval(3),
+                turnID: "turn-1",
+                itemID: "commentary",
+                orderIndex: 4
+            ),
+            makeMessage(
+                id: "command-3",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed rg -n needle Sources",
+                createdAt: now.addingTimeInterval(4),
+                turnID: "turn-1",
+                itemID: "command-3",
+                orderIndex: 5
+            ),
+            makeMessage(
+                id: "command-4",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git status --short",
+                createdAt: now.addingTimeInterval(5),
+                turnID: "turn-1",
+                itemID: "command-4",
+                orderIndex: 6
+            ),
+            makeMessage(
+                id: "final",
+                threadID: "thread",
+                role: .assistant,
+                text: "The inspection is complete.",
+                createdAt: now.addingTimeInterval(6),
+                turnID: "turn-1",
+                itemID: "final",
+                orderIndex: 7
+            ),
+        ]
+
+        let projectedMessages = TurnTimelineReducer.project(messages: messages).messages
+        let items = TurnTimelineRenderProjection.project(
+            messages: projectedMessages,
+            completedTurnIDs: ["turn-1"]
+        )
+        let commandGroups = items.compactMap { item -> TurnTimelineCommandGroup? in
+            guard case .commandGroup(let group) = item else { return nil }
+            return group
+        }
+        let previousMessages = items.compactMap { item -> TurnTimelinePreviousMessagesGroup? in
+            guard case .previousMessages(let group) = item else { return nil }
+            return group
+        }
+
+        XCTAssertEqual(commandGroups.count, 2)
+        XCTAssertEqual(commandGroups[0].messages.map(\.id), ["command-1", "command-2"])
+        XCTAssertEqual(commandGroups[1].messages.map(\.id), ["command-3", "command-4"])
+        XCTAssertEqual(previousMessages.flatMap(\.messages).map(\.id), ["commentary"])
+    }
+
+    func testCompletedTimelineFoldsReasoningAfterHiddenAssistantCommentaryIntoPreviousMessages() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "user",
+                threadID: "thread",
+                role: .user,
+                text: "Inspect the timeline",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "command-1",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git status",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "command-1",
+                orderIndex: 2
+            ),
+            makeMessage(
+                id: "commentary",
+                threadID: "thread",
+                role: .assistant,
+                text: "I found the relevant files.",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "commentary",
+                orderIndex: 3
+            ),
+            makeMessage(
+                id: "reasoning",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "Reasoning after commentary",
+                createdAt: now.addingTimeInterval(3),
+                turnID: "turn-1",
+                itemID: "reasoning",
+                orderIndex: 4
+            ),
+            makeMessage(
+                id: "final",
+                threadID: "thread",
+                role: .assistant,
+                text: "The inspection is complete.",
+                createdAt: now.addingTimeInterval(4),
+                turnID: "turn-1",
+                itemID: "final",
+                orderIndex: 5
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(
+            messages: messages,
+            completedTurnIDs: ["turn-1"]
+        )
+        let previousMessages = items.compactMap { item -> TurnTimelinePreviousMessagesGroup? in
+            guard case .previousMessages(let group) = item else { return nil }
+            return group
+        }
+
+        XCTAssertEqual(previousMessages.flatMap(\.messages).map(\.id), ["commentary", "reasoning"])
+        XCTAssertFalse(items.contains { $0.id == "reasoning" })
+    }
+
+    func testTimelineRenderProjectionReasoningTraceDoesNotJoinDifferentTurns() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "command-1",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git status",
+                createdAt: now,
+                turnID: "turn-1",
+                itemID: "command-1"
+            ),
+            makeMessage(
+                id: "reasoning",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "Reasoning summary for the first turn",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "reasoning"
+            ),
+            makeMessage(
+                id: "command-2",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git diff --stat",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-2",
+                itemID: "command-2"
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(messages: messages)
+
+        XCTAssertEqual(items.map(\.id), [
+            "command-group:command-1",
+            "command-group:command-2",
+        ])
+        guard case .commandGroup(let firstGroup) = items.first else {
+            return XCTFail("Expected a command group for the first turn")
+        }
+        XCTAssertEqual(firstGroup.orderedMessages.map(\.id), ["command-1", "reasoning"])
+        XCTAssertEqual(firstGroup.traceMessages.map(\.id), ["reasoning"])
+    }
+
+    func testTimelineRenderProjectionCommandGroupExposesFailedAndStoppedCounts() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "completed",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git status",
+                createdAt: now,
+                turnID: "turn-1",
+                itemID: "completed"
+            ),
+            makeMessage(
+                id: "failed",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Failed npm test",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "failed"
+            ),
+            makeMessage(
+                id: "stopped",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Stopped xcodebuild",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "stopped"
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(messages: messages)
+
+        guard case .commandGroup(let group) = items.first else {
+            return XCTFail("Expected terminal commands in one disclosure")
+        }
+        XCTAssertEqual(group.commandCount, 3)
+        XCTAssertEqual(group.failedCommandCount, 1)
+        XCTAssertEqual(group.stoppedCommandCount, 1)
+        XCTAssertTrue(group.hasUnsuccessfulCommands)
+    }
+
+    func testTimelineRenderProjectionKeepsRunningCommandsVisibleUntilFinished() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "running",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Running rg -n \"needle\" Sources",
+                createdAt: now,
+                turnID: "turn-1",
+                itemID: "running",
+                isStreaming: true
+            ),
+            makeMessage(
+                id: "finished",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed sed -n '1,40p' Sources/App.swift",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "finished"
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(messages: messages)
+
+        XCTAssertEqual(items.map(\.id), ["running", "command-group:finished"])
+    }
+
+    func testTimelineRenderProjectionKeepsFinishedCommandGroupOutsideCompletedTurnPreviousMessages() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "user",
+                threadID: "thread",
+                role: .user,
+                text: "Inspect the timeline",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "status",
+                threadID: "thread",
+                role: .assistant,
+                text: "I’ll inspect the projection.",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "status",
+                orderIndex: 2
+            ),
+            makeMessage(
+                id: "reasoning",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "Reasoning summary for the timeline inspection",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "reasoning",
+                orderIndex: 3
+            ),
+            makeMessage(
+                id: "command",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed rg -n \"TurnTimelineRenderProjection\" CodexMobile",
+                createdAt: now.addingTimeInterval(3),
+                turnID: "turn-1",
+                itemID: "command",
+                orderIndex: 4
+            ),
+            makeMessage(
+                id: "final",
+                threadID: "thread",
+                role: .assistant,
+                text: "The projection is ready.",
+                createdAt: now.addingTimeInterval(4),
+                turnID: "turn-1",
+                itemID: "final",
+                orderIndex: 5
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(
+            messages: messages,
+            completedTurnIDs: ["turn-1"]
+        )
+
+        XCTAssertEqual(items.map(\.id), [
+            "user",
+            "previous-messages:final",
+            "command-group:command",
+            "final",
+        ])
+        guard case .previousMessages(let previousMessages) = items[1],
+              case .commandGroup(let commandGroup) = items[2] else {
+            return XCTFail("Expected reasoning/status and command tool calls in separate disclosures")
+        }
+        XCTAssertEqual(previousMessages.messages.map(\.id), ["status", "reasoning"])
+        XCTAssertEqual(commandGroup.messages.map(\.id), ["command"])
+        XCTAssertEqual(commandGroup.commandCount, 1)
     }
 
     func testTimelineRenderProjectionCollapsesCompletedTurnBeforeFinalAnswer() {
@@ -4605,6 +5444,70 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(rowState.blockDiffText, "diff payload")
     }
 
+    func testCommandGroupAccessoryResolverKeepsCopyAndRunningVisibleInFooter() {
+        let messages = [
+            makeMessage(
+                id: "command-1",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git status",
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "reasoning",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "Reasoning summary",
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "command-2",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git diff --stat",
+                turnID: "turn-1"
+            ),
+        ]
+        let group = TurnTimelineCommandGroup(
+            messages: [messages[0], messages[2]],
+            orderedMessages: messages
+        )
+        guard let hostID = group.accessoryHostMessage?.id else {
+            return XCTFail("Expected the command group to expose its visual footer host")
+        }
+        let state = AssistantBlockAccessoryState(
+            copyText: "Completed response",
+            showsRunningIndicator: true,
+            allowsCopy: true,
+            blockDiffText: "diff payload"
+        )
+
+        let footerState = TurnTimelineCommandGroupAccessoryResolver.copyFooterState(
+            for: group,
+            statesByMessageID: [hostID: state],
+            suppressesRunningIndicator: false
+        )
+        let globallySuppressedState = TurnTimelineCommandGroupAccessoryResolver.copyFooterState(
+            for: group,
+            statesByMessageID: [hostID: state],
+            suppressesRunningIndicator: true
+        )
+        let rowState = state.suppressingCopyAndRunningAccessory()
+
+        XCTAssertEqual(hostID, "command-2")
+        XCTAssertEqual(footerState?.copyText, "Completed response")
+        XCTAssertEqual(footerState?.showsRunningIndicator, true)
+        XCTAssertEqual(globallySuppressedState?.copyText, "Completed response")
+        XCTAssertEqual(globallySuppressedState?.showsRunningIndicator, false)
+        XCTAssertNil(rowState.copyText)
+        XCTAssertEqual(rowState.allowsCopy, false)
+        XCTAssertEqual(rowState.showsRunningIndicator, false)
+        XCTAssertEqual(rowState.blockDiffText, "diff payload")
+    }
+
     func testAssistantBlockInfoDoesNotMoveCopyAcrossTurnBoundary() {
         let now = Date()
         let messages = [
@@ -4903,6 +5806,58 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(initialStates["thinking-placeholder"]?.showsRunningIndicator, true)
         XCTAssertNil(rehousedStates["thinking-placeholder"])
         XCTAssertEqual(rehousedStates["assistant-1"]?.showsRunningIndicator, true)
+    }
+
+    func testCommandGroupAccessoryStateDoesNotRehomeOntoReasoningTrace() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "command-1",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git status",
+                createdAt: now,
+                turnID: "turn-1",
+                itemID: "command-1"
+            ),
+            makeMessage(
+                id: "reasoning",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "Reasoning summary between commands",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "reasoning"
+            ),
+            makeMessage(
+                id: "command-2",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git diff --stat",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "command-2"
+            ),
+        ]
+        let commandState = AssistantBlockAccessoryState(
+            copyText: "Assistant result",
+            showsRunningIndicator: true,
+            allowsCopy: true
+        )
+        let renderItems = TurnTimelineRenderProjection.project(messages: messages)
+
+        let rehousedStates = TurnTimelineView<EmptyView, EmptyView>.rehomeHiddenAccessoryStates(
+            ["command-2": commandState],
+            messages: messages,
+            renderItems: renderItems
+        )
+
+        XCTAssertEqual(renderItems.map(\.id), ["command-group:command-1"])
+        XCTAssertEqual(rehousedStates["command-2"], commandState)
+        XCTAssertNil(rehousedStates["reasoning"])
     }
 
     func testHiddenAccessoryStateDoesNotCrossStableTurnBoundary() {

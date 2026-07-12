@@ -16,12 +16,21 @@
           "name" : "Fixed-Roundingwhite",
           "position-specializations" : [
             {
+              "value" : {
+                "scale" : 1,
+                "translation-in-points" : [
+                  0.26439794274210726,
+                  -27.3359375
+                ]
+              }
+            },
+            {
               "idiom" : "square",
               "value" : {
-                "scale" : 0.94,
+                "scale" : 1,
                 "translation-in-points" : [
-                  0,
-                  0
+                  0.26439794274210726,
+                  -27.3359375
                 ]
               }
             }
@@ -33,7 +42,7 @@
         {
           "idiom" : "square",
           "value" : {
-            "scale" : 0.99,
+            "scale" : 1,
             "translation-in-points" : [
               0,
               0
