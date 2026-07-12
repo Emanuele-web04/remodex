@@ -65,6 +65,7 @@ const {
   seedConversationStateFromThreadRead,
 } = require("./desktop-ipc-action-follower");
 const { createDesktopIpcLiveOwner } = require("./desktop-ipc-live-owner");
+const { createThreadRuntimeSettingsStore } = require("./thread-runtime-settings-store");
 const { version: bridgePackageVersion = "" } = require("../package.json");
 const {
   MINIMUM_SUPPORTED_IOS_APP_VERSION,
@@ -772,6 +773,7 @@ function startBridge({
   const jsonlTurnsListRolloutCacheByThread = new Map();
   const jsonlTurnsListRolloutMissCacheByThread = new Map();
   const threadTurnsListFastPageCoordinator = createThreadTurnsListFastPageCoordinator();
+  const threadRuntimeSettingsStore = createThreadRuntimeSettingsStore();
   const trackedForwardedRequestMethods = new Set([
     "account/login/start",
     "account/login/cancel",
@@ -847,6 +849,7 @@ function startBridge({
       // served from Desktop echoes, or routed over the IPC bus.
       isLocallyOwnedThread: (threadId) => Boolean(desktopIpcLiveOwner?.isThreadOwned(threadId)),
       normalizeTurnStartParams: normalizeTurnStartParamsForCodex,
+      runtimeSettingsStore: threadRuntimeSettingsStore,
       socketPath: config.desktopIpcSocketPath || undefined,
       snapshotDebounceMs: config.desktopIpcSnapshotDebounceMs,
     })
@@ -858,6 +861,7 @@ function startBridge({
       sendCodexRequest,
       sendRawCodexMessage: (rawMessage) => codex.send(rawMessage),
       normalizeTurnStartParams: normalizeTurnStartParamsForCodex,
+      runtimeSettingsStore: threadRuntimeSettingsStore,
       socketPath: config.desktopIpcSocketPath || undefined,
       snapshotDebounceMs: config.desktopIpcSnapshotDebounceMs,
     })
@@ -1246,7 +1250,7 @@ function startBridge({
   }
 
   function forwardInboundRequestToCodex(rawMessage) {
-    const codexRequest = disableUnsupportedReasoningSummaryForTurnStart(rawMessage);
+    const codexRequest = normalizeTurnStartForCodex(rawMessage);
     rememberForwardedRequestMethod(rawMessage);
     rememberThreadFromMessage("phone", codexRequest);
     codex.send(codexRequest);
@@ -1692,6 +1696,13 @@ function startBridge({
       return normalizedMessage;
     }
     relaySanitizedResponseMethodsById.delete(String(responseId));
+
+    if (trackedRequest.method === "thread/list"
+      || trackedRequest.method === "thread/read"
+      || trackedRequest.method === "thread/resume") {
+      threadRuntimeSettingsStore.enrichResponse(trackedRequest.method, parsed);
+      normalizedMessage = JSON.stringify(parsed);
+    }
 
     return sanitizeThreadHistoryImagesForRelay(normalizedMessage, trackedRequest.method, trackedRequest);
   }
@@ -2404,7 +2415,7 @@ function disableUnsupportedReasoningSummaryForTurnStart(rawMessage) {
 }
 
 function normalizeTurnStartParamsForCodex(params) {
-  const normalizedRawMessage = disableUnsupportedReasoningSummaryForTurnStart(JSON.stringify({
+  const normalizedRawMessage = normalizeTurnStartForCodex(JSON.stringify({
     method: "turn/start",
     params,
   }));
@@ -2412,6 +2423,66 @@ function normalizeTurnStartParamsForCodex(params) {
   return parsed?.params && typeof parsed.params === "object" && !Array.isArray(parsed.params)
     ? parsed.params
     : params;
+}
+
+// A turn/start can carry the same runtime choice twice: in the legacy top-level
+// model/effort fields and in collaborationMode.settings. Codex treats the nested
+// collaboration settings as authoritative, so a stale Desktop value there can
+// silently override the model selected on the phone. Keep both representations
+// aligned before either direct app-server forwarding or Desktop-follower routing.
+function normalizeTurnStartForCodex(rawMessage) {
+  const parsed = parseBridgeJSON(rawMessage);
+  if (!parsed || parsed.method !== "turn/start") {
+    return rawMessage;
+  }
+
+  const params = parsed.params && typeof parsed.params === "object" && !Array.isArray(parsed.params)
+    ? parsed.params
+    : null;
+  if (!params) {
+    return rawMessage;
+  }
+
+  const model = normalizeNonEmptyString(params.model);
+  const effort = normalizeNonEmptyString(params.effort);
+  let changed = false;
+  let nextParams = params;
+
+  for (const collaborationKey of ["collaborationMode", "collaboration_mode"]) {
+    const collaborationMode = nextParams[collaborationKey];
+    const settings = collaborationMode?.settings;
+    if (!settings || typeof settings !== "object" || Array.isArray(settings)) {
+      continue;
+    }
+
+    const nextSettings = { ...settings };
+    let settingsChanged = false;
+    if (model && normalizeNonEmptyString(settings.model) !== model) {
+      nextSettings.model = model;
+      settingsChanged = true;
+    }
+    if (effort && normalizeNonEmptyString(settings.reasoning_effort) !== effort) {
+      nextSettings.reasoning_effort = effort;
+      settingsChanged = true;
+    }
+    if (!settingsChanged) {
+      continue;
+    }
+
+    nextParams = {
+      ...nextParams,
+      [collaborationKey]: {
+        ...collaborationMode,
+        settings: nextSettings,
+      },
+    };
+    changed = true;
+  }
+
+  const alignedRawMessage = changed
+    ? JSON.stringify({ ...parsed, params: nextParams })
+    : rawMessage;
+  return disableUnsupportedReasoningSummaryForTurnStart(alignedRawMessage);
 }
 
 function readTurnStartModel(params) {
@@ -4970,6 +5041,7 @@ module.exports = {
   hasRelayConnectionGoneStale,
   isContextualUserItemNotification,
   maybeMergeLatestJsonlTurnIntoTurnsListResponse,
+  normalizeTurnStartForCodex,
   normalizeRelayBoundJsonRpcMessage,
   persistBridgePreferences,
   resolveJsonlTurnsListRolloutPathForFallback,

@@ -19,6 +19,7 @@ const {
   fetchAdaptiveThreadTurnsListForRelay,
   hasRelayConnectionGoneStale,
   maybeMergeLatestJsonlTurnIntoTurnsListResponse,
+  normalizeTurnStartForCodex,
   normalizeRelayBoundJsonRpcMessage,
   persistBridgePreferences,
   resolveJsonlTurnsListRolloutPathForFallback,
@@ -980,6 +981,55 @@ test("disableUnsupportedReasoningSummaryForTurnStart leaves other models untouch
   });
 
   assert.equal(disableUnsupportedReasoningSummaryForTurnStart(raw), raw);
+});
+
+test("normalizeTurnStartForCodex aligns stale collaboration settings with the phone runtime choice", () => {
+  const raw = JSON.stringify({
+    id: "req-phone-sol",
+    method: "turn/start",
+    params: {
+      threadId: "thread-desktop-terra",
+      model: "gpt-5.6-sol",
+      effort: "low",
+      serviceTier: "fast",
+      collaborationMode: {
+        mode: "default",
+        settings: {
+          model: "gpt-5.6-terra",
+          reasoning_effort: "medium",
+          developer_instructions: "keep me",
+        },
+      },
+      input: [{ type: "text", text: "hi" }],
+    },
+  });
+
+  const normalized = JSON.parse(normalizeTurnStartForCodex(raw));
+
+  assert.equal(normalized.params.model, "gpt-5.6-sol");
+  assert.equal(normalized.params.effort, "low");
+  assert.equal(normalized.params.serviceTier, "fast");
+  assert.equal(normalized.params.collaborationMode.settings.model, "gpt-5.6-sol");
+  assert.equal(normalized.params.collaborationMode.settings.reasoning_effort, "low");
+  assert.equal(normalized.params.collaborationMode.settings.developer_instructions, "keep me");
+});
+
+test("normalizeTurnStartForCodex leaves collaboration-only runtime choices intact", () => {
+  const raw = JSON.stringify({
+    method: "turn/start",
+    params: {
+      threadId: "thread-plan",
+      collaborationMode: {
+        mode: "plan",
+        settings: {
+          model: "gpt-5.6-terra",
+          reasoning_effort: "high",
+        },
+      },
+    },
+  });
+
+  assert.equal(normalizeTurnStartForCodex(raw), raw);
 });
 
 test("hasRelayConnectionGoneStale returns false for fresh or missing activity timestamps", () => {

@@ -611,6 +611,7 @@ struct NewChatDraftView: View {
                 viewModel: viewModel,
                 codex: codex,
                 thread: draftThread,
+                usesThreadRuntimeSettings: false,
                 activeTurnID: nil,
                 isThreadRunning: false,
                 isEmptyThread: true,

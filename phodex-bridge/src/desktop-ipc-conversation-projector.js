@@ -179,6 +179,9 @@ function projectConversationState(threadId, rawState, {
 } = {}) {
   const turns = projectTurns(threadId, rawState, { turnCache, itemCache });
   const activeTurnId = activeTurnIdFromTurns(turns);
+  const runtimeSettings = rawState?.remodexRuntimeSettings
+    || rawState?.remodex_runtime_settings
+    || null;
   const thread = {
     id: threadId,
     sessionId: threadId,
@@ -191,7 +194,17 @@ function projectConversationState(threadId, rawState, {
     cwd: readString(rawState?.cwd) || readString(rawState?.current_working_directory) || "",
     path: readString(rawState?.rolloutPath) || readString(rawState?.rollout_path) || null,
     modelProvider: readString(rawState?.modelProvider) || readString(rawState?.model_provider) || "",
-    model: readString(rawState?.latestModel) || readString(rawState?.latest_model) || "",
+    model: readString(runtimeSettings?.model)
+      || readString(rawState?.latestModel)
+      || readString(rawState?.latest_model)
+      || "",
+    ...(runtimeSettings ? {
+      reasoningEffort: readString(runtimeSettings.reasoningEffort) || null,
+      serviceTier: readString(runtimeSettings.serviceTier) || null,
+      runtimeSettingsRevision: Number(runtimeSettings.revision) || 0,
+      runtimeSettingsUpdatedAt: Number(runtimeSettings.updatedAt) || 0,
+      runtimeSettingsSource: readString(runtimeSettings.source) || null,
+    } : {}),
     cliVersion: readString(rawState?.cliVersion) || readString(rawState?.cli_version) || "",
     source: rawState?.source ?? null,
     gitInfo: cloneJSON(rawState?.gitInfo ?? rawState?.git_info ?? null),
@@ -362,6 +375,11 @@ function diffProjections(threadId, previousProjection, nextProjection) {
 
 function diffThreadMetadata(previousThread, nextThread) {
   const notifications = [];
+  const previousRuntimeRevision = Number(previousThread.runtimeSettingsRevision) || 0;
+  const nextRuntimeRevision = Number(nextThread.runtimeSettingsRevision) || 0;
+  if (nextRuntimeRevision > previousRuntimeRevision) {
+    notifications.push(threadStartedNotification(nextThread));
+  }
   const previousTitle = readString(previousThread.title) || readString(previousThread.name);
   const nextTitle = readString(nextThread.title) || readString(nextThread.name);
   if (nextTitle && previousTitle !== nextTitle) {

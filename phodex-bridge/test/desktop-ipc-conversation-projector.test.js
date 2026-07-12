@@ -49,6 +49,58 @@ test("desktop conversation projector bootstraps active Desktop turns for mobile"
   assert.equal(output.notifications[1].params.remodexDesktopIpcMirror, true);
 });
 
+test("desktop conversation projector exposes committed per-thread runtime settings", () => {
+  const thread = projectDesktopConversationStateToThread("thread-runtime", {
+    title: "Runtime settings",
+    remodexRuntimeSettings: {
+      model: "gpt-5.6",
+      reasoningEffort: "xhigh",
+      serviceTier: "fast",
+      revision: 4,
+      updatedAt: 1234,
+      source: "phone",
+    },
+    turns: [],
+  });
+
+  assert.equal(thread.model, "gpt-5.6");
+  assert.equal(thread.reasoningEffort, "xhigh");
+  assert.equal(thread.serviceTier, "fast");
+  assert.equal(thread.runtimeSettingsRevision, 4);
+  assert.equal(thread.runtimeSettingsUpdatedAt, 1234);
+  assert.equal(thread.runtimeSettingsSource, "phone");
+});
+
+test("desktop conversation projector pushes newer runtime settings to an already-open phone thread", () => {
+  const projector = createDesktopConversationProjector();
+  projector.project("thread-runtime-live", {
+    title: "Runtime live",
+    remodexRuntimeSettings: {
+      model: "gpt-5.5",
+      reasoningEffort: "medium",
+      serviceTier: null,
+      revision: 1,
+    },
+    turns: [],
+  });
+  const output = projector.project("thread-runtime-live", {
+    title: "Runtime live",
+    remodexRuntimeSettings: {
+      model: "gpt-5.6",
+      reasoningEffort: "high",
+      serviceTier: "fast",
+      revision: 2,
+    },
+    turns: [],
+  });
+
+  const runtimeUpdate = output.notifications.find((notification) => notification.method === "thread/started");
+  assert.equal(runtimeUpdate.params.thread.model, "gpt-5.6");
+  assert.equal(runtimeUpdate.params.thread.reasoningEffort, "high");
+  assert.equal(runtimeUpdate.params.thread.serviceTier, "fast");
+  assert.equal(runtimeUpdate.params.thread.runtimeSettingsRevision, 2);
+});
+
 test("desktop conversation projector reports identity continuity only for the same logical turn", () => {
   const sameTurnProjector = createDesktopConversationProjector();
   sameTurnProjector.project("thread-same-repair", {

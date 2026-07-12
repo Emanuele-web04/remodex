@@ -412,6 +412,7 @@ function buildConversationStateFromThread(thread, {
     title: readString(thread?.name) || previous?.title || null,
     latestModel,
     latestReasoningEffort: previous?.latestReasoningEffort || null,
+    latestServiceTier: previous?.latestServiceTier || null,
     previousTurnModel: previous?.previousTurnModel || null,
     latestCollaborationMode: previous?.latestCollaborationMode || {
       mode: "default",
@@ -509,6 +510,7 @@ function createEmptyConversationState(threadId, {
     title: null,
     latestModel: "",
     latestReasoningEffort: null,
+    latestServiceTier: null,
     previousTurnModel: null,
     latestCollaborationMode: {
       mode: "default",
@@ -642,6 +644,7 @@ function applyTurnRuntimeMetadata(conversation, turnParams) {
   }
   const model = readString(turnParams.model);
   const effort = readString(turnParams.effort);
+  const serviceTier = readString(turnParams.serviceTier) || null;
   if (model) {
     conversation.previousTurnModel = conversation.latestModel || null;
     conversation.latestModel = model;
@@ -649,6 +652,7 @@ function applyTurnRuntimeMetadata(conversation, turnParams) {
   if (effort) {
     conversation.latestReasoningEffort = effort;
   }
+  conversation.latestServiceTier = serviceTier;
   if (turnParams.collaborationMode && typeof turnParams.collaborationMode === "object") {
     conversation.latestCollaborationMode = cloneJSON(turnParams.collaborationMode);
     return;

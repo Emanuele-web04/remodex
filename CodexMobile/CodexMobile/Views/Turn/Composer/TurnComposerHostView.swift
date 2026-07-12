@@ -11,6 +11,7 @@ struct TurnComposerHostView: View {
 
     let codex: CodexService
     let thread: CodexThread
+    let usesThreadRuntimeSettings: Bool
     let activeTurnID: String?
     let isThreadRunning: Bool
     let isEmptyThread: Bool
@@ -105,13 +106,15 @@ struct TurnComposerHostView: View {
             voiceAudioLevels: voiceAudioLevels,
             voiceRecordingDuration: voiceRecordingDuration
         )
+        let runtimeThreadId = usesThreadRuntimeSettings ? thread.id : nil
         let runtimeState = TurnComposerRuntimeState.resolve(
             codex: codex,
+            threadId: runtimeThreadId,
             reasoningDisplayOptions: reasoningDisplayOptions
         )
-        let runtimeActions = TurnComposerRuntimeActions.resolve(codex: codex)
-        let selectedModelID = codex.visibleSelectedModelIDForComposer()
-        let isRuntimeSelectionLoading = codex.isRuntimeSelectionLoadingForComposer()
+        let runtimeActions = TurnComposerRuntimeActions.resolve(codex: codex, threadId: runtimeThreadId)
+        let selectedModelID = codex.visibleSelectedModelIDForComposer(threadId: runtimeThreadId)
+        let isRuntimeSelectionLoading = codex.isRuntimeSelectionLoadingForComposer(threadId: runtimeThreadId)
         let hasComposerWorkingDirectory = thread.gitWorkingDirectory != nil
             && !SidebarThreadGrouping.isRootlessChatThread(thread)
         let gitState = TurnComposerGitState(

@@ -2,7 +2,8 @@
 // Purpose: Provides scroll geometry batching and UIKit axis clamping for the timeline.
 // Layer: View Support
 // Exports: ScrollBottomState, TurnTimelineRenderItemsCacheSignature, TurnTimelineRenderItemsCache,
-//   TurnTimelinePendingAssistantState, VerticalScrollAxisGuard, ScrollGeometryCoalescer
+//   TurnTimelinePendingAssistantState, TurnTimelineNativeScrollController,
+//   VerticalScrollAxisGuard, ScrollGeometryCoalescer
 // Depends on: SwiftUI, UIKit, CodexMessage, TurnTimelineRenderProjection
 
 import SwiftUI
@@ -93,23 +94,62 @@ enum TurnTimelinePendingAssistantState {
     }
 }
 
+// Gives app-owned scroll actions a narrow bridge to UIKit. SwiftUI's scrollTo
+// does not reliably interrupt an in-flight UIScrollView deceleration by itself.
+@MainActor
+final class TurnTimelineNativeScrollController {
+    private weak var scrollView: UIScrollView?
+
+    func attach(_ scrollView: UIScrollView) {
+        self.scrollView = scrollView
+    }
+
+    func cancelUserMomentum() {
+        guard let scrollView,
+              scrollView.isDragging || scrollView.isDecelerating else {
+            return
+        }
+
+        let currentOffset = scrollView.contentOffset
+        // Cancelling and immediately restoring the pan recognizer terminates
+        // UIKit's current drag/deceleration without moving the viewport.
+        scrollView.panGestureRecognizer.isEnabled = false
+        scrollView.panGestureRecognizer.isEnabled = true
+        scrollView.setContentOffset(currentOffset, animated: false)
+    }
+}
+
 // Pins SwiftUI's backing UIScrollView to the vertical axis when an oversized row
 // briefly makes UIKit preserve a horizontal content offset.
 struct VerticalScrollAxisGuard: UIViewRepresentable {
+    let nativeScrollController: TurnTimelineNativeScrollController
+
     func makeUIView(context: Context) -> VerticalScrollAxisGuardView {
-        VerticalScrollAxisGuardView()
+        VerticalScrollAxisGuardView(nativeScrollController: nativeScrollController)
     }
 
     func updateUIView(_ uiView: VerticalScrollAxisGuardView, context: Context) {
+        uiView.nativeScrollController = nativeScrollController
         uiView.attachToNearestScrollViewIfNeeded()
     }
 }
 
 // Internal because UIViewRepresentable witnesses expose this concrete UIView type.
 final class VerticalScrollAxisGuardView: UIView {
+    var nativeScrollController: TurnTimelineNativeScrollController
     private weak var guardedScrollView: UIScrollView?
     private var contentOffsetObservation: NSKeyValueObservation?
     private var boundsObservation: NSKeyValueObservation?
+
+    init(nativeScrollController: TurnTimelineNativeScrollController) {
+        self.nativeScrollController = nativeScrollController
+        super.init(frame: .zero)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
@@ -117,7 +157,11 @@ final class VerticalScrollAxisGuardView: UIView {
     }
 
     func attachToNearestScrollViewIfNeeded() {
-        guard let scrollView = enclosingScrollView(), guardedScrollView !== scrollView else {
+        guard let scrollView = enclosingScrollView() else {
+            return
+        }
+        nativeScrollController.attach(scrollView)
+        guard guardedScrollView !== scrollView else {
             clampHorizontalOffset()
             return
         }

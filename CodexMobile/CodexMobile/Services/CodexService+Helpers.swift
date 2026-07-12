@@ -48,6 +48,7 @@ extension CodexService {
     }
 
     func upsertThread(_ incomingThread: CodexThread, treatAsServerState: Bool = false) {
+        applyRemoteRuntimeSettings(from: incomingThread)
         if treatAsServerState {
             restoredThreadSnapshotIDs.remove(incomingThread.id)
         }
@@ -121,6 +122,16 @@ extension CodexService {
         if merged.agentRole == nil { merged.agentRole = existing.agentRole }
         if merged.model == nil { merged.model = existing.model }
         if merged.modelProvider == nil { merged.modelProvider = existing.modelProvider }
+        if merged.reasoningEffort == nil { merged.reasoningEffort = existing.reasoningEffort }
+        if merged.serviceTier == nil,
+           merged.runtimeSettingsRevision == nil {
+            merged.serviceTier = existing.serviceTier
+        }
+        if merged.runtimeSettingsRevision == nil {
+            merged.runtimeSettingsRevision = existing.runtimeSettingsRevision
+            merged.runtimeSettingsUpdatedAt = existing.runtimeSettingsUpdatedAt
+            merged.runtimeSettingsSource = existing.runtimeSettingsSource
+        }
         return applyingAuthoritativeProjectPath(
             to: merged,
             treatAsServerState: treatAsServerState

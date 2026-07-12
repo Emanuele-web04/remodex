@@ -225,6 +225,7 @@ extension CodexService {
 
         // Merge active server threads.
         for serverThread in serverThreads {
+            applyRemoteRuntimeSettings(from: serverThread)
             if persistedDeletedIDs.contains(serverThread.id) {
                 continue
             }

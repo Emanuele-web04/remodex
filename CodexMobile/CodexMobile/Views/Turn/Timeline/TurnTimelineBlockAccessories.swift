@@ -164,21 +164,29 @@ extension TurnTimelineView {
         activeTurnID: String? = nil,
         isThreadRunning: Bool = false
     ) -> [String: AssistantBlockAccessoryState] {
-        let collapsedFinalMessageIDs = TurnTimelineRenderProjection.collapsedFinalMessageIDs(
+        let collapseMetadata = TurnTimelineRenderProjection.collapseMetadata(
             in: messages,
             completedTurnIDs: completedTurnIDs,
             activeTurnID: activeTurnID,
             isThreadRunning: isThreadRunning
         )
+        return rehomeCollapsedFinalAccessoryStates(
+            statesByMessageID,
+            messages: messages,
+            collapsedFinalMessageIDs: collapseMetadata.collapsedFinalMessageIDs,
+            hiddenMessageIDs: collapseMetadata.collapsedPreviousMessageIDs
+        )
+    }
+
+    static func rehomeCollapsedFinalAccessoryStates(
+        _ statesByMessageID: [String: AssistantBlockAccessoryState],
+        messages: [CodexMessage],
+        collapsedFinalMessageIDs: Set<String>,
+        hiddenMessageIDs: Set<String>
+    ) -> [String: AssistantBlockAccessoryState] {
         guard !collapsedFinalMessageIDs.isEmpty else {
             return statesByMessageID
         }
-        let hiddenMessageIDs = TurnTimelineRenderProjection.collapsedPreviousMessageIDs(
-            in: messages,
-            completedTurnIDs: completedTurnIDs,
-            activeTurnID: activeTurnID,
-            isThreadRunning: isThreadRunning
-        )
 
         var updated = statesByMessageID
         for finalIndex in messages.indices where collapsedFinalMessageIDs.contains(messages[finalIndex].id) {

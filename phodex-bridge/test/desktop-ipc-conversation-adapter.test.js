@@ -764,6 +764,7 @@ test("conversation adapter propagates phone turn model and effort to composer fi
         input: [{ type: "input_text", text: "use my model" }],
         model: "gpt-5.5",
         effort: "medium",
+        serviceTier: "fast",
       },
     }],
   ]]);
@@ -793,6 +794,7 @@ test("conversation adapter propagates phone turn model and effort to composer fi
   const conversation = conversations.get("thread-model-meta");
   assert.equal(conversation.latestModel, "gpt-5.5");
   assert.equal(conversation.latestReasoningEffort, "medium");
+  assert.equal(conversation.latestServiceTier, "fast");
   assert.equal(conversation.latestCollaborationMode.settings.model, "gpt-5.5");
   assert.equal(conversation.latestCollaborationMode.settings.reasoning_effort, "medium");
 });

@@ -35,10 +35,8 @@ enum PlanAccessoryStatus: Equatable {
 
     var tint: Color {
         switch self {
-        case .pending:
+        case .pending, .inProgress:
             return Color(.plan)
-        case .inProgress:
-            return .orange
         case .completed:
             return .green
         }
@@ -51,6 +49,7 @@ struct PlanAccessorySnapshot: Equatable {
     let status: PlanAccessoryStatus
     let completedStepCount: Int
     let totalStepCount: Int
+    let stepStatuses: [CodexPlanStepStatus]
     let isStreaming: Bool
     let currentStepNumber: Int
 
@@ -60,6 +59,7 @@ struct PlanAccessorySnapshot: Equatable {
         status: PlanAccessoryStatus,
         completedStepCount: Int,
         totalStepCount: Int,
+        stepStatuses: [CodexPlanStepStatus]? = nil,
         isStreaming: Bool = false,
         currentStepNumber: Int? = nil
     ) {
@@ -68,6 +68,9 @@ struct PlanAccessorySnapshot: Equatable {
         self.status = status
         self.completedStepCount = completedStepCount
         self.totalStepCount = totalStepCount
+        self.stepStatuses = stepStatuses ?? (0..<max(totalStepCount, 0)).map { index in
+            index < completedStepCount ? .completed : .pending
+        }
         self.isStreaming = isStreaming
         let fallbackStepNumber = min(completedStepCount + 1, totalStepCount)
         self.currentStepNumber = totalStepCount > 0
@@ -87,6 +90,7 @@ struct PlanAccessorySnapshot: Equatable {
             status: status,
             completedStepCount: completedStepCount,
             totalStepCount: totalStepCount,
+            stepStatuses: steps.map(\.status),
             isStreaming: message.isStreaming,
             currentStepNumber: highlightedStepIndex.map { $0 + 1 }
         )
@@ -231,19 +235,18 @@ struct PlanAccessoryCard: View {
     private var leadingMarker: some View {
         if snapshot.totalStepCount > 0 {
             PlanStepProgressRing(
-                totalSteps: snapshot.totalStepCount,
-                completedSteps: snapshot.completedStepCount,
+                stepStatuses: snapshot.stepStatuses,
                 tint: snapshot.status.tint
             )
         } else {
             ZStack {
                 Circle()
                     .fill(snapshot.status.tint.opacity(0.14))
-                    .frame(width: 16, height: 16)
+                    .frame(width: 14, height: 14)
 
                 Circle()
                     .fill(snapshot.status.tint)
-                    .frame(width: 6, height: 6)
+                    .frame(width: 5, height: 5)
             }
         }
     }
@@ -270,34 +273,45 @@ struct PlanAccessoryCard: View {
 }
 
 /// Compact circular progress indicator divided into one arc per plan step.
-/// Completed steps light up in the plan tint; remaining steps sit in a faint
-/// track, so the ring visibly fills as the plan advances.
+/// Each segment mirrors its own step: completed arcs light up in the plan
+/// tint, the in-progress arc glows at partial strength, and pending arcs stay
+/// a faint track — so the ring fills (and moves) as the plan advances.
 private struct PlanStepProgressRing: View {
-    let totalSteps: Int
-    let completedSteps: Int
+    let stepStatuses: [CodexPlanStepStatus]
     let tint: Color
-    var size: CGFloat = 16
-    var lineWidth: CGFloat = 2.5
+    var size: CGFloat = 14
+    var lineWidth: CGFloat = 2.25
 
     var body: some View {
         ZStack {
-            ForEach(0..<segmentCount, id: \.self) { index in
+            ForEach(stepStatuses.indices, id: \.self) { index in
                 Circle()
                     .trim(from: trim(for: index).start, to: trim(for: index).end)
                     .stroke(
-                        index < completedSteps ? tint : tint.opacity(0.16),
+                        segmentColor(for: stepStatuses[index]),
                         style: StrokeStyle(lineWidth: lineWidth, lineCap: .butt)
                     )
             }
         }
         .rotationEffect(.degrees(-90))
         .frame(width: size, height: size)
-        .animation(.easeOut(duration: 0.25), value: completedSteps)
+        .animation(.easeOut(duration: 0.25), value: stepStatuses)
         .accessibilityHidden(true)
     }
 
+    private func segmentColor(for status: CodexPlanStepStatus) -> Color {
+        switch status {
+        case .completed:
+            return tint
+        case .inProgress:
+            return tint.opacity(0.45)
+        case .pending:
+            return tint.opacity(0.16)
+        }
+    }
+
     private var segmentCount: Int {
-        max(totalSteps, 1)
+        max(stepStatuses.count, 1)
     }
 
     // Gap between segments, scaled down as the step count grows so dense plans

@@ -76,6 +76,16 @@ enum TurnTimelineRenderProjection {
     private static let eagerFileChangeCollapseByteLimit = 96_000
     private static let smallWhitespaceScanByteLimit = 512
 
+    struct Result {
+        let renderItems: [TurnTimelineRenderItem]
+        let metadata: CollapseMetadata
+    }
+
+    struct CollapseMetadata {
+        let collapsedFinalMessageIDs: Set<String>
+        let collapsedPreviousMessageIDs: Set<String>
+    }
+
     // Groups tool runs and completed-turn preamble rows so the visible timeline stays compact.
     static func project(
         messages: [CodexMessage],
@@ -83,19 +93,68 @@ enum TurnTimelineRenderProjection {
         activeTurnID: String? = nil,
         isThreadRunning: Bool = false
     ) -> [TurnTimelineRenderItem] {
-        var items: [TurnTimelineRenderItem] = []
-        var bufferedToolMessages: [CodexMessage] = []
-        let fileChangePlan = fileChangeCollapsePlan(in: messages)
-        let resolvedCompletedTurnIDs = completedTurnIDsIncludingFinalAnswerEvidence(
+        renderItems(
+            messages: messages,
+            finalCollapsePlan: resolvedPreviousMessagesCollapsePlan(
+                in: messages,
+                completedTurnIDs: completedTurnIDs,
+                activeTurnID: activeTurnID,
+                isThreadRunning: isThreadRunning
+            ),
+            activeTurnID: activeTurnID,
+            isThreadRunning: isThreadRunning
+        )
+    }
+
+    static func result(
+        messages: [CodexMessage],
+        completedTurnIDs: Set<String> = [],
+        activeTurnID: String? = nil,
+        isThreadRunning: Bool = false
+    ) -> Result {
+        let plan = resolvedPreviousMessagesCollapsePlan(
             in: messages,
             completedTurnIDs: completedTurnIDs,
             activeTurnID: activeTurnID,
             isThreadRunning: isThreadRunning
         )
-        let finalCollapsePlan = previousMessagesCollapsePlan(
-            in: messages,
-            completedTurnIDs: resolvedCompletedTurnIDs
+        return Result(
+            renderItems: renderItems(
+                messages: messages,
+                finalCollapsePlan: plan,
+                activeTurnID: activeTurnID,
+                isThreadRunning: isThreadRunning
+            ),
+            metadata: collapseMetadata(from: plan, messages: messages)
         )
+    }
+
+    static func collapseMetadata(
+        in messages: [CodexMessage],
+        completedTurnIDs: Set<String>,
+        activeTurnID: String? = nil,
+        isThreadRunning: Bool = false
+    ) -> CollapseMetadata {
+        collapseMetadata(
+            from: resolvedPreviousMessagesCollapsePlan(
+                in: messages,
+                completedTurnIDs: completedTurnIDs,
+                activeTurnID: activeTurnID,
+                isThreadRunning: isThreadRunning
+            ),
+            messages: messages
+        )
+    }
+
+    private static func renderItems(
+        messages: [CodexMessage],
+        finalCollapsePlan: [Int: PreviousMessagesCollapse],
+        activeTurnID: String?,
+        isThreadRunning: Bool
+    ) -> [TurnTimelineRenderItem] {
+        var items: [TurnTimelineRenderItem] = []
+        var bufferedToolMessages: [CodexMessage] = []
+        let fileChangePlan = fileChangeCollapsePlan(in: messages)
         let hiddenIndices = Set(finalCollapsePlan.values.flatMap(\.indices))
             .union(fileChangePlan.hiddenIndices)
         let groupByInsertionIndex = finalCollapsePlan.values.reduce(into: [Int: PreviousMessagesCollapse]()) { result, collapse in
@@ -160,16 +219,12 @@ enum TurnTimelineRenderProjection {
         activeTurnID: String? = nil,
         isThreadRunning: Bool = false
     ) -> Set<String> {
-        let resolvedCompletedTurnIDs = completedTurnIDsIncludingFinalAnswerEvidence(
+        collapseMetadata(
             in: messages,
             completedTurnIDs: completedTurnIDs,
             activeTurnID: activeTurnID,
             isThreadRunning: isThreadRunning
-        )
-        return Set(previousMessagesCollapsePlan(
-            in: messages,
-            completedTurnIDs: resolvedCompletedTurnIDs
-        ).keys.map { messages[$0].id })
+        ).collapsedFinalMessageIDs
     }
 
     static func collapsedPreviousMessageIDs(
@@ -178,18 +233,12 @@ enum TurnTimelineRenderProjection {
         activeTurnID: String? = nil,
         isThreadRunning: Bool = false
     ) -> Set<String> {
-        let resolvedCompletedTurnIDs = completedTurnIDsIncludingFinalAnswerEvidence(
+        collapseMetadata(
             in: messages,
             completedTurnIDs: completedTurnIDs,
             activeTurnID: activeTurnID,
             isThreadRunning: isThreadRunning
-        )
-        return Set(previousMessagesCollapsePlan(
-            in: messages,
-            completedTurnIDs: resolvedCompletedTurnIDs
-        ).values.flatMap { collapse in
-            collapse.indices.map { messages[$0].id }
-        })
+        ).collapsedPreviousMessageIDs
     }
 
     private struct PreviousMessagesCollapse {
@@ -335,11 +384,27 @@ enum TurnTimelineRenderProjection {
             in: messages,
             completedTurnIDs: completedTurnIDs
         )
+        var messageIndicesByTurn: [String: [Int]] = [:]
+        var lastUserIndexBeforeFinalByTurn: [String: Int] = [:]
+        for index in messages.indices {
+            let message = messages[index]
+            guard let turnID = normalizedIdentifier(message.turnId) else {
+                continue
+            }
+            messageIndicesByTurn[turnID, default: []].append(index)
+            if message.role == .user,
+               let finalIndex = resolvedFinalAssistantIndexByTurn[turnID],
+               index < finalIndex {
+                lastUserIndexBeforeFinalByTurn[turnID] = index
+            }
+        }
+
         var plan: [Int: PreviousMessagesCollapse] = [:]
         for (turnID, finalIndex) in resolvedFinalAssistantIndexByTurn {
-            let lowerBound = lastUserIndexBefore(finalIndex, in: messages, turnID: turnID).map { $0 + 1 } ?? messages.startIndex
+            let lowerBound = lastUserIndexBeforeFinalByTurn[turnID].map { $0 + 1 } ?? messages.startIndex
             let hiddenSelection = previousMessageSelection(
                 in: messages,
+                messageIndices: messageIndicesByTurn[turnID] ?? [],
                 turnID: turnID,
                 finalIndex: finalIndex,
                 lowerBound: lowerBound
@@ -369,6 +434,35 @@ enum TurnTimelineRenderProjection {
         }
 
         return plan
+    }
+
+    private static func resolvedPreviousMessagesCollapsePlan(
+        in messages: [CodexMessage],
+        completedTurnIDs: Set<String>,
+        activeTurnID: String?,
+        isThreadRunning: Bool
+    ) -> [Int: PreviousMessagesCollapse] {
+        previousMessagesCollapsePlan(
+            in: messages,
+            completedTurnIDs: completedTurnIDsIncludingFinalAnswerEvidence(
+                in: messages,
+                completedTurnIDs: completedTurnIDs,
+                activeTurnID: activeTurnID,
+                isThreadRunning: isThreadRunning
+            )
+        )
+    }
+
+    private static func collapseMetadata(
+        from plan: [Int: PreviousMessagesCollapse],
+        messages: [CodexMessage]
+    ) -> CollapseMetadata {
+        CollapseMetadata(
+            collapsedFinalMessageIDs: Set(plan.keys.map { messages[$0].id }),
+            collapsedPreviousMessageIDs: Set(plan.values.flatMap { collapse in
+                collapse.indices.map { messages[$0].id }
+            })
+        )
     }
 
     // Cold reopen can materialize old rows before turn terminal-state caches.
@@ -455,6 +549,7 @@ enum TurnTimelineRenderProjection {
 
     private static func previousMessageSelection(
         in messages: [CodexMessage],
+        messageIndices: [Int],
         turnID: String,
         finalIndex: Int,
         lowerBound: Int
@@ -464,8 +559,8 @@ enum TurnTimelineRenderProjection {
         var groupIndices: [Int] = []
         var generatedImageArtifactIndices: [Int] = []
 
-        for index in messages.indices {
-            guard index >= lowerBound, index != finalIndex else {
+        for index in messageIndices.drop(while: { $0 < lowerBound }) {
+            guard index != finalIndex else {
                 continue
             }
             let candidate = messages[index]
@@ -499,17 +594,6 @@ enum TurnTimelineRenderProjection {
             groupIndices: groupIndices,
             generatedImageArtifactIndices: generatedImageArtifactIndices
         )
-    }
-
-    private static func lastUserIndexBefore(_ index: Int, in messages: [CodexMessage], turnID: String) -> Int? {
-        messages.indices.reversed().first { candidateIndex in
-            guard candidateIndex < index else {
-                return false
-            }
-            let candidate = messages[candidateIndex]
-            return candidate.role == .user
-                && normalizedIdentifier(candidate.turnId) == turnID
-        }
     }
 
     // Keeps user-critical artifacts visible beside the final answer instead of burying them in the disclosure.

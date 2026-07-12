@@ -203,6 +203,7 @@ function createDesktopIpcActionFollower({
   // alone cannot close the race between a local claim and a Desktop echo.
   isLocallyOwnedThread = () => false,
   normalizeTurnStartParams = (params) => params,
+  runtimeSettingsStore = null,
   logPrefix = "[remodex]",
   socketPath = resolveDefaultIpcSocketPath(),
   netModule = net,
@@ -621,6 +622,7 @@ function createDesktopIpcActionFollower({
       releaseDesktopThreadState(threadId);
       return false;
     }
+    runtimeSettingsStore?.attachToConversation?.(threadId, nextState);
     if (isFullSnapshot) {
       rebuildNormalizedLiveIndex(threadId, nextState);
     } else {
@@ -1527,11 +1529,27 @@ function createDesktopIpcActionFollower({
   function submitDesktopFollowerRequest(route, originalMessage) {
     Promise.resolve()
       .then(() => resolveFollowerRequestParams(route))
-      .then((params) => ipc.sendRequest(route.method, params))
-      .then((result) => {
+      .then(async (resolvedParams) => {
+        if (route.method === "thread-follower-start-turn") {
+          await syncDesktopOwnerRuntimeSettings(route.threadId, resolvedParams.turnStartParams);
+        }
+        return {
+          resolvedParams,
+          result: await ipc.sendRequest(route.method, resolvedParams),
+        };
+      })
+      .then(({ resolvedParams, result }) => {
+        const appServerResult = appServerResultForFollowerRequest(route.method, result);
+        if (route.method === "thread-follower-start-turn") {
+          commitPhoneRuntimeSettings(
+            route.threadId,
+            resolvedParams.turnStartParams,
+            readTurnIdFromAppServerResult(appServerResult)
+          );
+        }
         sendApplicationResponse(JSON.stringify({
           id: originalMessage.id,
-          result: appServerResultForFollowerRequest(route.method, result),
+          result: appServerResult,
         }));
       })
       .catch((error) => {
@@ -1566,6 +1584,57 @@ function createDesktopIpcActionFollower({
       return result.result ?? null;
     }
     return result ?? null;
+  }
+
+  function readTurnIdFromAppServerResult(result) {
+    return readString(result?.turn?.id)
+      || readString(result?.turnId)
+      || readString(result?.turn_id)
+      || "";
+  }
+
+  // Desktop-owned threads build the actual app-server turn from the owner's
+  // local composer state. Passing model/effort only inside start-turn leaves
+  // that state untouched, so Desktop silently starts with its old selection.
+  // Apply the phone's complete runtime choice first, then start the turn.
+  async function syncDesktopOwnerRuntimeSettings(threadId, turnStartParams) {
+    const params = turnStartParams && typeof turnStartParams === "object"
+      ? turnStartParams
+      : {};
+    const collaborationMode = params.collaborationMode && typeof params.collaborationMode === "object"
+      ? cloneJSON(params.collaborationMode)
+      : null;
+    const collaborationSettings = collaborationMode?.settings;
+    const model = readString(params.model) || readString(collaborationSettings?.model);
+    const effort = readString(params.effort)
+      || readString(params.reasoningEffort)
+      || readString(collaborationSettings?.reasoning_effort)
+      || readString(collaborationSettings?.reasoningEffort);
+    if (!model && !effort && !collaborationMode) {
+      return;
+    }
+
+    await ipc.sendRequest("thread-follower-update-thread-settings", {
+      conversationId: threadId,
+      threadSettings: {
+        ...(model ? { model } : {}),
+        effort: effort || null,
+        // turn/start omission is the app-server representation of Normal speed.
+        serviceTier: readString(params.serviceTier) || readString(params.service_tier) || null,
+        ...(collaborationMode ? { collaborationMode } : {}),
+      },
+    });
+  }
+
+  function commitPhoneRuntimeSettings(threadId, turnStartParams, turnId) {
+    try {
+      runtimeSettingsStore?.commit?.(threadId, turnStartParams, {
+        source: "phone",
+        turnId,
+      });
+    } catch (error) {
+      console.warn(`${logPrefix} runtime settings persistence failed: ${error.message}`);
+    }
   }
 
   // Desktop-followed turn starts must apply the same param normalization as

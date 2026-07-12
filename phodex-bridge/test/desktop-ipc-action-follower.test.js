@@ -1580,8 +1580,19 @@ test("desktop IPC follower routes phone turns to Desktop-owned threads", async (
   });
 
   const outbound = [];
+  const runtimeCommits = [];
   const follower = createDesktopIpcActionFollower({
     socketPath,
+    runtimeSettingsStore: {
+      get() {
+        return null;
+      },
+      commit(threadId, params, metadata) {
+        runtimeCommits.push({ threadId, params, metadata });
+        return null;
+      },
+      attachToConversation() {},
+    },
     sendApplicationResponse(message) {
       outbound.push(JSON.parse(message));
     },
@@ -1620,12 +1631,28 @@ test("desktop IPC follower routes phone turns to Desktop-owned threads", async (
       input: [{ type: "input_text", text: "continue from phone" }],
       cwd: "/repo",
       model: "gpt-test",
+      effort: "low",
+      serviceTier: "fast",
     },
   }));
   assert.equal(handled, true);
 
+  await waitFor(() => serverFrames.find((frame) => frame.method === "thread-follower-update-thread-settings"));
   await waitFor(() => serverFrames.find((frame) => frame.method === "thread-follower-start-turn"));
+  const settingsFrame = serverFrames.find((frame) => frame.method === "thread-follower-update-thread-settings");
   const turnStartFrame = serverFrames.find((frame) => frame.method === "thread-follower-start-turn");
+  assert.deepEqual(settingsFrame.params, {
+    conversationId: "thread-desktop-owned",
+    threadSettings: {
+      model: "gpt-test",
+      effort: "low",
+      serviceTier: "fast",
+    },
+  });
+  assert.ok(
+    serverFrames.indexOf(settingsFrame) < serverFrames.indexOf(turnStartFrame),
+    "Desktop runtime settings must settle before start-turn"
+  );
   assert.equal(turnStartFrame.version, 1);
   assert.deepEqual(turnStartFrame.params, {
     conversationId: "thread-desktop-owned",
@@ -1635,6 +1662,8 @@ test("desktop IPC follower routes phone turns to Desktop-owned threads", async (
       input: [{ type: "input_text", text: "continue from phone" }],
       cwd: "/repo",
       model: "gpt-test",
+      effort: "low",
+      serviceTier: "fast",
     },
   });
 
@@ -1643,6 +1672,21 @@ test("desktop IPC follower routes phone turns to Desktop-owned threads", async (
     id: "phone-turn-start-1",
     result: { turn: { id: "turn-from-phone" } },
   });
+  assert.deepEqual(runtimeCommits, [{
+    threadId: "thread-desktop-owned",
+    params: {
+      threadId: "thread-desktop-owned",
+      input: [{ type: "input_text", text: "continue from phone" }],
+      cwd: "/repo",
+      model: "gpt-test",
+      effort: "low",
+      serviceTier: "fast",
+    },
+    metadata: {
+      source: "phone",
+      turnId: "turn-from-phone",
+    },
+  }]);
 
   const routedRequests = [
     {

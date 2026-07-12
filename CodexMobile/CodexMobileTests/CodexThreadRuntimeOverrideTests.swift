@@ -59,6 +59,94 @@ final class CodexThreadRuntimeOverrideTests: XCTestCase {
         XCTAssertNil(secondService.effectiveServiceTier(for: "thread-normal"))
     }
 
+    func testPhoneRuntimeSettingsBecomeThreadScopedWithoutChangingAppDefaults() {
+        let service = makeService()
+        service.availableModels = [makeModel(), makeGPT55Model()]
+        service.setSelectedModelId("gpt-5.4")
+        service.setSelectedReasoningEffort("medium")
+        service.setSelectedServiceTier(nil)
+
+        service.applyRemoteRuntimeSettings(from: CodexThread(
+            id: "thread-remote",
+            model: "gpt-5.5",
+            reasoningEffort: "high",
+            serviceTier: "fast",
+            runtimeSettingsRevision: 1,
+            runtimeSettingsUpdatedAt: 123,
+            runtimeSettingsSource: "phone"
+        ))
+
+        XCTAssertEqual(service.selectedModelId, "gpt-5.4")
+        XCTAssertEqual(service.runtimeModelIdentifierForTurn(), "gpt-5.4")
+        XCTAssertEqual(service.runtimeModelIdentifierForTurn(threadId: "thread-remote"), "gpt-5.5")
+        XCTAssertEqual(service.selectedReasoningEffortForSelectedModel(threadId: "thread-remote"), "high")
+        XCTAssertEqual(service.effectiveServiceTier(for: "thread-remote"), .fast)
+
+        service.applyRemoteRuntimeSettings(from: CodexThread(
+            id: "thread-remote",
+            model: "gpt-5.4",
+            reasoningEffort: "medium",
+            serviceTier: nil,
+            runtimeSettingsRevision: 2,
+            runtimeSettingsUpdatedAt: 456,
+            runtimeSettingsSource: "phone"
+        ))
+
+        XCTAssertEqual(service.runtimeModelIdentifierForTurn(threadId: "thread-remote"), "gpt-5.4")
+        XCTAssertEqual(service.selectedReasoningEffortForSelectedModel(threadId: "thread-remote"), "medium")
+        XCTAssertNil(service.effectiveServiceTier(for: "thread-remote"))
+    }
+
+    func testNewerTimestampWinsAfterBridgeRevisionResets() {
+        let service = makeService()
+        service.availableModels = [makeModel(), makeGPT55Model()]
+
+        service.applyRemoteRuntimeSettings(from: CodexThread(
+            id: "thread-reset",
+            model: "gpt-5.5",
+            reasoningEffort: "high",
+            serviceTier: "fast",
+            runtimeSettingsRevision: 12,
+            runtimeSettingsUpdatedAt: 100,
+            runtimeSettingsSource: "phone"
+        ))
+        service.applyRemoteRuntimeSettings(from: CodexThread(
+            id: "thread-reset",
+            model: "gpt-5.4",
+            reasoningEffort: "medium",
+            serviceTier: nil,
+            runtimeSettingsRevision: 1,
+            runtimeSettingsUpdatedAt: 200,
+            runtimeSettingsSource: "phone"
+        ))
+
+        XCTAssertEqual(service.runtimeModelIdentifierForTurn(threadId: "thread-reset"), "gpt-5.4")
+        XCTAssertEqual(service.selectedReasoningEffortForSelectedModel(threadId: "thread-reset"), "medium")
+        XCTAssertNil(service.effectiveServiceTier(for: "thread-reset"))
+        XCTAssertEqual(service.threadRuntimeOverride(for: "thread-reset")?.runtimeSettingsRevision, 1)
+    }
+
+    func testDesktopRuntimeSettingsDoNotOverridePhoneSelection() {
+        let service = makeService()
+        service.availableModels = [makeModel(), makeGPT55Model()]
+        service.setThreadModelOverride("gpt-5.4", for: "thread-phone-authority")
+        service.setThreadReasoningEffortOverride("medium", for: "thread-phone-authority")
+
+        service.applyRemoteRuntimeSettings(from: CodexThread(
+            id: "thread-phone-authority",
+            model: "gpt-5.5",
+            reasoningEffort: "high",
+            serviceTier: "fast",
+            runtimeSettingsRevision: 9,
+            runtimeSettingsUpdatedAt: 999,
+            runtimeSettingsSource: "desktop"
+        ))
+
+        XCTAssertEqual(service.runtimeModelIdentifierForTurn(threadId: "thread-phone-authority"), "gpt-5.4")
+        XCTAssertEqual(service.selectedReasoningEffortForSelectedModel(threadId: "thread-phone-authority"), "medium")
+        XCTAssertNil(service.effectiveServiceTier(for: "thread-phone-authority"))
+    }
+
     func testClearingSelectedModelFallsBackToGPT55Medium() {
         let service = makeService()
         service.availableModels = [makeGPT55Model(), makeModel()]
@@ -164,8 +252,16 @@ final class CodexThreadRuntimeOverrideTests: XCTestCase {
         let service = makeService()
         service.availableModels = [makeModel()]
         service.setSelectedModelId("gpt-5.4")
-        service.setThreadReasoningEffortOverride("high", for: "thread-old")
-        service.setThreadServiceTierOverride(.fast, for: "thread-old")
+        service.applyThreadRuntimeOverride(CodexThreadRuntimeOverride(
+            modelId: "gpt-5.4",
+            reasoningEffort: "high",
+            serviceTierRawValue: CodexServiceTier.fast.rawValue,
+            overridesModel: true,
+            overridesReasoning: true,
+            overridesServiceTier: true,
+            runtimeSettingsRevision: 9,
+            runtimeSettingsUpdatedAt: 123
+        ), to: "thread-old")
 
         service.inheritThreadRuntimeOverrides(from: "thread-old", to: "thread-new")
 
@@ -174,6 +270,8 @@ final class CodexThreadRuntimeOverrideTests: XCTestCase {
             "high"
         )
         XCTAssertEqual(service.effectiveServiceTier(for: "thread-new"), .fast)
+        XCTAssertEqual(service.threadRuntimeOverride(for: "thread-new")?.runtimeSettingsRevision, 0)
+        XCTAssertEqual(service.threadRuntimeOverride(for: "thread-new")?.runtimeSettingsUpdatedAt, 0)
     }
 
     func testStartThreadUsesProvidedRuntimeOverrideForServiceTier() async throws {

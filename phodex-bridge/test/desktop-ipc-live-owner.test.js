@@ -2556,6 +2556,17 @@ test("live owner applies Desktop runtime overrides to later follower turn starts
 
   const owner = createDesktopIpcLiveOwner({
     socketPath,
+    runtimeSettingsStore: {
+      get(threadId) {
+        return threadId === "thread-overrides"
+          ? { model: "gpt-persisted", reasoningEffort: "medium", serviceTier: "fast" }
+          : null;
+      },
+      commit() {
+        return null;
+      },
+      attachToConversation() {},
+    },
     async sendCodexRequest(method, params) {
       codexRequests.push({ method, params });
       return { ok: true };
@@ -2610,6 +2621,7 @@ test("live owner applies Desktop runtime overrides to later follower turn starts
       input: [{ type: "text", text: "use my desktop model" }],
       model: "gpt-desktop-pick",
       effort: "high",
+      serviceTier: "fast",
     },
   }]);
 });
@@ -2771,6 +2783,7 @@ test("live owner applies Desktop thread settings and broadcasts phone read state
       threadSettings: {
         model: "gpt-desktop-settings",
         effort: "high",
+        serviceTier: "fast",
       },
     },
   });
@@ -2808,6 +2821,7 @@ test("live owner applies Desktop thread settings and broadcasts phone read state
   const startedTurn = codexRequests.filter((request) => request.method === "turn/start").at(-1);
   assert.equal(startedTurn.params.model, "gpt-desktop-settings");
   assert.equal(startedTurn.params.effort, "high");
+  assert.equal(startedTurn.params.serviceTier, "fast");
 
   // Reading the thread from the phone broadcasts the read state to Desktop.
   owner.observeInbound(JSON.stringify({

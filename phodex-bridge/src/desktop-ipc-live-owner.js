@@ -113,6 +113,7 @@ function createDesktopIpcLiveOwner({
   sendCodexRequest,
   sendRawCodexMessage,
   normalizeTurnStartParams = (params) => params,
+  runtimeSettingsStore = null,
   socketPath = resolveDefaultIpcSocketPath(),
   sidebarRefreshDelayMs = DEFAULT_SIDEBAR_REFRESH_DELAY_MS,
   snapshotDebounceMs = DEFAULT_SNAPSHOT_DEBOUNCE_MS,
@@ -500,7 +501,15 @@ function createDesktopIpcLiveOwner({
         // ownership instead of polling a thread that may never have existed.
         removeOwnedThread(pending.threadId);
       }
+      return;
     }
+    commitAcceptedRuntimeSettings(
+      pending.threadId,
+      pending.entry?.params,
+      "phone",
+      readTurnIdFromResult(message.result)
+    );
+    scheduleSnapshot(pending.threadId);
   }
 
   // Publishes phone-origin turns as soon as the bridge sees turn/start, instead
@@ -814,6 +823,7 @@ function createDesktopIpcLiveOwner({
       hostId,
       now,
     });
+    runtimeSettingsStore?.attachToConversation?.(threadId, next);
     conversations.set(threadId, next);
     stopAwaitingInitialHistory(threadId);
     return next;
@@ -831,6 +841,7 @@ function createDesktopIpcLiveOwner({
         now,
         cwd: seed.cwd,
       });
+      runtimeSettingsStore?.attachToConversation?.(normalizedThreadId, conversation);
       conversations.set(normalizedThreadId, conversation);
     }
     return conversation;
@@ -1025,6 +1036,7 @@ function createDesktopIpcLiveOwner({
     if (!conversationState || !ownedThreadIds.has(threadId)) {
       return true;
     }
+    runtimeSettingsStore?.attachToConversation?.(threadId, conversationState);
     if (shouldDelayInitialSnapshotForHistory(threadId)) {
       return false;
     }
@@ -1242,6 +1254,13 @@ function createDesktopIpcLiveOwner({
     }
     try {
       const turnStartResult = await sendCodexRequest("turn/start", nextCodexParams);
+      commitAcceptedRuntimeSettings(
+        conversationId,
+        nextCodexParams,
+        isKnownHeldPhoneStart ? "phone" : "desktop",
+        readTurnIdFromResult(turnStartResult)
+      );
+      scheduleSnapshot(conversationId);
       if (!isKnownHeldPhoneStart) {
         mirrorFollowerUserPromptToPhone(conversationId, nextCodexParams, turnStartResult);
       }
@@ -1367,6 +1386,12 @@ function createDesktopIpcLiveOwner({
         conversation.latestReasoningEffort = overrides.effort;
       }
     }
+    if (Object.prototype.hasOwnProperty.call(params, "serviceTier")) {
+      overrides.serviceTier = readString(params.serviceTier) || null;
+      if (conversation) {
+        conversation.latestServiceTier = overrides.serviceTier;
+      }
+    }
     followerRuntimeOverridesByThreadId.set(conversationId, overrides);
     if (conversation) {
       scheduleSnapshot(conversationId);
@@ -1399,11 +1424,15 @@ function createDesktopIpcLiveOwner({
     const model = readString(threadSettings.model)
       || readString(threadSettings.collaborationMode?.settings?.model);
     const effort = threadSettings.effort;
+    const hasServiceTier = Object.prototype.hasOwnProperty.call(threadSettings, "serviceTier");
     if (model) {
       overrides.model = model;
     }
     if (effort !== undefined) {
       overrides.effort = effort ?? null;
+    }
+    if (hasServiceTier) {
+      overrides.serviceTier = readString(threadSettings.serviceTier) || null;
     }
     if (threadSettings.collaborationMode && typeof threadSettings.collaborationMode === "object") {
       overrides.collaborationMode = cloneJSON(threadSettings.collaborationMode);
@@ -1423,6 +1452,9 @@ function createDesktopIpcLiveOwner({
       }
       if (effort !== undefined) {
         conversation.latestReasoningEffort = effort ?? null;
+      }
+      if (hasServiceTier) {
+        conversation.latestServiceTier = overrides.serviceTier;
       }
       if (overrides.collaborationMode) {
         conversation.latestCollaborationMode = cloneJSON(overrides.collaborationMode);
@@ -1499,12 +1531,14 @@ function createDesktopIpcLiveOwner({
       input: [{ type: "text", text }],
       cwd: readString(entry?.cwd) || readString(conversation?.cwd) || undefined,
     }));
+    let queuedTurnParams = startParams;
     Promise.resolve()
       .then(() => normalizeTurnStartParams(cloneJSON(startParams)))
       .then((normalized) => {
         const params = normalized && typeof normalized === "object" && !Array.isArray(normalized)
           ? normalized
           : startParams;
+        queuedTurnParams = params;
         const pendingEntry = rememberPendingTurnStart(threadId, params);
         if (pendingEntry) {
           insertOptimisticPendingTurn(threadId, pendingEntry);
@@ -1512,7 +1546,14 @@ function createDesktopIpcLiveOwner({
         }
         return sendCodexRequest("turn/start", params);
       })
-      .then(() => {
+      .then((turnStartResult) => {
+        commitAcceptedRuntimeSettings(
+          threadId,
+          queuedTurnParams,
+          "desktop",
+          readTurnIdFromResult(turnStartResult)
+        );
+        scheduleSnapshot(threadId);
         queue.shift();
         if (queue.length === 0) {
           queuedFollowUpsByThreadId.delete(threadId);
@@ -1530,7 +1571,16 @@ function createDesktopIpcLiveOwner({
   // Fills follower turn-start params with Desktop-selected runtime overrides when
   // the request itself does not specify them. Phone-origin turns are untouched.
   function mergeFollowerRuntimeOverrides(conversationId, params) {
-    const overrides = followerRuntimeOverridesByThreadId.get(conversationId);
+    const persisted = runtimeSettingsStore?.get?.(conversationId) || null;
+    const persistedOverrides = persisted ? {
+      model: persisted.model,
+      effort: persisted.reasoningEffort,
+      serviceTier: persisted.serviceTier,
+    } : null;
+    const liveOverrides = followerRuntimeOverridesByThreadId.get(conversationId) || null;
+    const overrides = persistedOverrides || liveOverrides
+      ? { ...(persistedOverrides || {}), ...(liveOverrides || {}) }
+      : null;
     if (!overrides) {
       return params;
     }
@@ -1541,10 +1591,27 @@ function createDesktopIpcLiveOwner({
     if (overrides.effort != null && merged.effort == null) {
       merged.effort = overrides.effort;
     }
+    if (overrides.serviceTier && merged.serviceTier == null) {
+      merged.serviceTier = overrides.serviceTier;
+    }
     if (overrides.collaborationMode && merged.collaborationMode == null) {
       merged.collaborationMode = cloneJSON(overrides.collaborationMode);
     }
     return merged;
+  }
+
+  function commitAcceptedRuntimeSettings(threadId, params, source, turnId) {
+    try {
+      const settings = runtimeSettingsStore?.commit?.(threadId, params, { source, turnId });
+      const conversation = conversations.get(threadId);
+      if (settings && conversation) {
+        runtimeSettingsStore.attachToConversation(threadId, conversation);
+      }
+      return settings;
+    } catch (error) {
+      console.warn(`[remodex] runtime settings persistence failed: ${error.message}`);
+      return null;
+    }
   }
 
   // True while the bridge's app-server is executing a turn for this thread, or
@@ -1685,6 +1752,15 @@ function sanitizeTurnStartParams(params) {
 function readThreadFromResponse(message) {
   const result = message?.result || message?.payload || {};
   return readThreadFromPayload(result);
+}
+
+function readTurnIdFromResult(result) {
+  return readString(result?.turn?.id)
+    || readString(result?.turnId)
+    || readString(result?.turn_id)
+    || readString(result?.result?.turn?.id)
+    || readString(result?.result?.turnId)
+    || readString(result?.result?.turn_id);
 }
 
 function readThreadFromPayload(result) {

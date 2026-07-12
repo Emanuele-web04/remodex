@@ -84,6 +84,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     @State private var isRetryingEarlierHistoryLoad = false
     @State private var localEarlierRevealTask: Task<Void, Never>?
     @State private var scrollGeometryCoalescer = ScrollGeometryCoalescer()
+    @State private var nativeScrollController = TurnTimelineNativeScrollController()
 
     /// The service supplies paginated render windows; legacy full-history threads still slice locally.
     private var visibleMessages: ArraySlice<CodexMessage> {
@@ -334,7 +335,11 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                         .padding(.horizontal, timelineHorizontalPadding)
                         .frame(width: viewport.size.width, alignment: .leading)
                         .clipped()
-                        .background(VerticalScrollAxisGuard())
+                        .background(
+                            VerticalScrollAxisGuard(
+                                nativeScrollController: nativeScrollController
+                            )
+                        )
                         .padding(.top, 12)
                         .padding(.bottom, 12)
 
@@ -427,22 +432,34 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         rebuildBlockInfo: Bool = true
     ) {
         let visibleSlice = visibleMessages
-        let visible = Array(visibleSlice)
+        var materializedVisible: [CodexMessage]?
+        var projectionResult: TurnTimelineRenderProjection.Result?
         var nextState = renderCacheState
         var didChange = false
         let shapeSignature = renderItemsShapeSignature(for: visibleSlice)
+
+        func visibleMessagesArray() -> [CodexMessage] {
+            if let materializedVisible {
+                return materializedVisible
+            }
+            let visible = Array(visibleSlice)
+            materializedVisible = visible
+            return visible
+        }
 
         // Block-info placement depends on collapsed render items, so keep the
         // projection fresh before deriving accessory state.
         if rebuildRenderItems || rebuildBlockInfo {
             let signature = renderItemsCacheSignature(for: visibleSlice)
             if signature != nextState.renderItemsSignature {
-                nextState.visibleRenderItems = TurnTimelineRenderProjection.project(
-                    messages: visible,
+                let result = TurnTimelineRenderProjection.result(
+                    messages: visibleMessagesArray(),
                     completedTurnIDs: completedTurnIDs,
                     activeTurnID: activeTurnID,
                     isThreadRunning: isThreadRunning
                 )
+                projectionResult = result
+                nextState.visibleRenderItems = result.renderItems
                 nextState.renderItemsSignature = signature
                 nextState.renderItemsShapeSignature = shapeSignature
                 didChange = true
@@ -450,9 +467,10 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         }
 
         if rebuildBlockInfo {
-            let key = blockInfoInputKey(for: visible)
+            let key = blockInfoInputKey(for: visibleSlice)
             if nextState.blockInfoInputKey != key {
                 nextState.blockInfoInputKey = key
+                let visible = visibleMessagesArray()
 
                 let cachedBlockInfo = Self.assistantBlockInfo(
                     for: visible,
@@ -470,12 +488,17 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                         return (message.id, blockText)
                     }
                 )
-                let updated = Self.rehomeCollapsedFinalAccessoryStates(
-                    initialBlockInfoByMessageID,
-                    messages: visible,
+                let collapseMetadata = projectionResult?.metadata ?? TurnTimelineRenderProjection.collapseMetadata(
+                    in: visible,
                     completedTurnIDs: completedTurnIDs,
                     activeTurnID: activeTurnID,
                     isThreadRunning: isThreadRunning
+                )
+                let updated = Self.rehomeCollapsedFinalAccessoryStates(
+                    initialBlockInfoByMessageID,
+                    messages: visible,
+                    collapsedFinalMessageIDs: collapseMetadata.collapsedFinalMessageIDs,
+                    hiddenMessageIDs: collapseMetadata.collapsedPreviousMessageIDs
                 )
                 nextState.blockInfoByMessageID = Self.rehomeHiddenAccessoryStates(
                     updated,
@@ -494,7 +517,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
 
     // Hashes the fields that change copy-block aggregation or inline action placement.
     // Include message text too because thread/resume can reconcile completed rows in place.
-    private func blockInfoInputKey(for messages: [CodexMessage]) -> Int {
+    private func blockInfoInputKey(for messages: ArraySlice<CodexMessage>) -> Int {
         TurnTimelineCacheKeyBuilder.blockInfoInputKey(
             messages: messages,
             isThreadRunning: isThreadRunning,
@@ -663,6 +686,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
 
     private func handleScrollToLatestButtonTap(using proxy: ScrollViewProxy) {
         HapticFeedback.shared.triggerImpactFeedback(style: .light)
+        nativeScrollController.cancelUserMomentum()
         isAwaitingAssistantResponse = false
         transitionScrollOwnership(.jumpToLatest)
         isUserTouchingScroll = false

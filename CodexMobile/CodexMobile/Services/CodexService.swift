@@ -151,10 +151,57 @@ struct CodexBridgeUpdatePrompt: Identifiable, Equatable, Sendable {
 }
 
 struct CodexThreadRuntimeOverride: Codable, Equatable, Sendable {
+    var modelId: String?
     var reasoningEffort: String?
     var serviceTierRawValue: String?
+    var overridesModel: Bool
     var overridesReasoning: Bool
     var overridesServiceTier: Bool
+    var runtimeSettingsRevision: Int
+    var runtimeSettingsUpdatedAt: Double
+
+    init(
+        modelId: String? = nil,
+        reasoningEffort: String? = nil,
+        serviceTierRawValue: String? = nil,
+        overridesModel: Bool = false,
+        overridesReasoning: Bool,
+        overridesServiceTier: Bool,
+        runtimeSettingsRevision: Int = 0,
+        runtimeSettingsUpdatedAt: Double = 0
+    ) {
+        self.modelId = modelId
+        self.reasoningEffort = reasoningEffort
+        self.serviceTierRawValue = serviceTierRawValue
+        self.overridesModel = overridesModel
+        self.overridesReasoning = overridesReasoning
+        self.overridesServiceTier = overridesServiceTier
+        self.runtimeSettingsRevision = runtimeSettingsRevision
+        self.runtimeSettingsUpdatedAt = runtimeSettingsUpdatedAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case modelId
+        case reasoningEffort
+        case serviceTierRawValue
+        case overridesModel
+        case overridesReasoning
+        case overridesServiceTier
+        case runtimeSettingsRevision
+        case runtimeSettingsUpdatedAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        modelId = try container.decodeIfPresent(String.self, forKey: .modelId)
+        reasoningEffort = try container.decodeIfPresent(String.self, forKey: .reasoningEffort)
+        serviceTierRawValue = try container.decodeIfPresent(String.self, forKey: .serviceTierRawValue)
+        overridesModel = try container.decodeIfPresent(Bool.self, forKey: .overridesModel) ?? false
+        overridesReasoning = try container.decodeIfPresent(Bool.self, forKey: .overridesReasoning) ?? false
+        overridesServiceTier = try container.decodeIfPresent(Bool.self, forKey: .overridesServiceTier) ?? false
+        runtimeSettingsRevision = try container.decodeIfPresent(Int.self, forKey: .runtimeSettingsRevision) ?? 0
+        runtimeSettingsUpdatedAt = try container.decodeIfPresent(Double.self, forKey: .runtimeSettingsUpdatedAt) ?? 0
+    }
 
     var serviceTier: CodexServiceTier? {
         guard let serviceTierRawValue else {
@@ -164,7 +211,7 @@ struct CodexThreadRuntimeOverride: Codable, Equatable, Sendable {
     }
 
     var isEmpty: Bool {
-        !overridesReasoning && !overridesServiceTier
+        !overridesModel && !overridesReasoning && !overridesServiceTier
     }
 }
 
