@@ -8,6 +8,9 @@ import SwiftUI
 import UIKit
 
 struct TurnComposerInputTextView: UIViewRepresentable {
+    // Shared with the SwiftUI placeholder so empty and typed text start on the same baseline.
+    static let textContainerInset = UIEdgeInsets(top: 3, left: 0, bottom: 5, right: 0)
+
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Binding var text: String
     @Binding var isFocused: Bool
@@ -15,10 +18,11 @@ struct TurnComposerInputTextView: UIViewRepresentable {
     @Binding var dynamicHeight: CGFloat
     let runtimeState: TurnComposerRuntimeState?
     let runtimeActions: TurnComposerRuntimeActions
+    let isCollapsed: Bool
+    let maxVisibleLines: CGFloat
     let onPasteImageData: ([Data]) -> Void
 
     private let minVisibleLines: CGFloat = 1
-    private let maxVisibleLines: CGFloat = 8
     func makeUIView(context: Context) -> TurnComposerPasteInterceptingTextView {
         let textView = TurnComposerPasteInterceptingTextView(frame: .zero, textContainer: nil)
         textView.delegate = context.coordinator
@@ -28,7 +32,7 @@ struct TurnComposerInputTextView: UIViewRepresentable {
         textView.typingAttributes[.font] = composerUIFont()
         textView.typingAttributes[.foregroundColor] = UIColor.label
         textView.adjustsFontForContentSizeCategory = true
-        textView.textContainerInset = .zero
+        textView.textContainerInset = Self.textContainerInset
         textView.textContainer.lineFragmentPadding = 0
         textView.textContainer.widthTracksTextView = true
         textView.autocorrectionType = .default
@@ -63,6 +67,8 @@ struct TurnComposerInputTextView: UIViewRepresentable {
             isFocused: $isFocused,
             dynamicHeight: $dynamicHeight
         )
+        let maxVisibleLinesChanged = context.coordinator.updateMaxVisibleLines(maxVisibleLines)
+        let expandedAfterCollapse = context.coordinator.noteCollapsedState(isCollapsed)
         let shouldApplyBindingText = context.coordinator.shouldApplyBindingText(text, to: uiView)
         let textChanged = shouldApplyBindingText && uiView.text != text
         if textChanged {
@@ -80,7 +86,7 @@ struct TurnComposerInputTextView: UIViewRepresentable {
         uiView.typingAttributes[.font] = nextFont
         uiView.typingAttributes[.foregroundColor] = UIColor.label
         uiView.adjustsFontForContentSizeCategory = true
-        uiView.textContainerInset = .zero
+        uiView.textContainerInset = Self.textContainerInset
         uiView.textContainer.widthTracksTextView = true
         // Preserve internal scrolling without letting composer drags dismiss the keyboard.
         uiView.keyboardDismissMode = .none
@@ -98,7 +104,13 @@ struct TurnComposerInputTextView: UIViewRepresentable {
                 uiView?.isEditable = false
             }
         }
-        context.coordinator.updateHeightIfNeeded(for: uiView, force: textChanged || fontChanged)
+        context.coordinator.updateHeightIfNeeded(
+            for: uiView,
+            force: textChanged || fontChanged || expandedAfterCollapse || maxVisibleLinesChanged
+        )
+        if expandedAfterCollapse || maxVisibleLinesChanged {
+            context.coordinator.scheduleDeferredHeightUpdate(for: uiView)
+        }
     }
 
     func makeCoordinator() -> Coordinator {
@@ -107,7 +119,8 @@ struct TurnComposerInputTextView: UIViewRepresentable {
             isFocused: $isFocused,
             dynamicHeight: $dynamicHeight,
             minVisibleLines: minVisibleLines,
-            maxVisibleLines: maxVisibleLines
+            maxVisibleLines: maxVisibleLines,
+            isCollapsed: isCollapsed
         )
     }
 
@@ -124,12 +137,13 @@ struct TurnComposerInputTextView: UIViewRepresentable {
         private var isFocused: Binding<Bool>
         private var dynamicHeight: Binding<CGFloat>
         private let minVisibleLines: CGFloat
-        private let maxVisibleLines: CGFloat
         private var lastFocusBindingValue: Bool
         private var pendingHeightValue: CGFloat?
         private var isHeightCommitScheduled = false
         private var lastHeightMeasurementSignature: HeightMeasurementSignature?
         private var lastIsEditable: Bool
+        private var lastIsCollapsed: Bool
+        private var maxVisibleLines: CGFloat
         private var pendingUIKitText: String?
         private var staleBindingTextDuringPendingEdit: String?
 
@@ -138,15 +152,21 @@ struct TurnComposerInputTextView: UIViewRepresentable {
             isFocused: Binding<Bool>,
             dynamicHeight: Binding<CGFloat>,
             minVisibleLines: CGFloat,
-            maxVisibleLines: CGFloat
+            maxVisibleLines: CGFloat,
+            isCollapsed: Bool
         ) {
             self.text = text
             self.isFocused = isFocused
             self.dynamicHeight = dynamicHeight
             self.minVisibleLines = minVisibleLines
             self.maxVisibleLines = maxVisibleLines
-            self.lastFocusBindingValue = isFocused.wrappedValue
+            // A freshly created text view is never first responder, so start
+            // from `false` regardless of the binding: when the collapsed
+            // composer sets focus *before* mounting this view, the first
+            // `syncFocusIfNeeded` must see a change and raise the keyboard.
+            self.lastFocusBindingValue = false
             self.lastIsEditable = true
+            self.lastIsCollapsed = isCollapsed
         }
 
         func updateBindings(
@@ -159,7 +179,25 @@ struct TurnComposerInputTextView: UIViewRepresentable {
             self.dynamicHeight = dynamicHeight
         }
 
+        fileprivate func noteCollapsedState(_ isCollapsed: Bool) -> Bool {
+            let expandedAfterCollapse = lastIsCollapsed && !isCollapsed
+            lastIsCollapsed = isCollapsed
+            return expandedAfterCollapse
+        }
+
+        fileprivate func updateMaxVisibleLines(_ value: CGFloat) -> Bool {
+            guard abs(maxVisibleLines - value) > 0.1 else {
+                return false
+            }
+            maxVisibleLines = value
+            lastHeightMeasurementSignature = nil
+            return true
+        }
+
         func textViewDidChange(_ textView: UITextView) {
+            // Let heavier streaming rows back off briefly so keystrokes stay responsive
+            // while a run is repainting tool/status activity.
+            StreamingUIInteractionMonitor.noteComposerKeystroke()
             let newText = textView.text ?? ""
             if text.wrappedValue != newText {
                 pendingUIKitText = newText
@@ -259,24 +297,36 @@ struct TurnComposerInputTextView: UIViewRepresentable {
             updateHeight(for: textView)
         }
 
+        // The collapsed capsule can receive an external transcript before
+        // SwiftUI has laid out the expanded composer frame. Measure once more
+        // after layout so the full transcript, not the old one-line box, drives height.
+        fileprivate func scheduleDeferredHeightUpdate(for textView: UITextView) {
+            DispatchQueue.main.async { [weak self, weak textView] in
+                guard let self, let textView else { return }
+                textView.layoutIfNeeded()
+                self.updateHeightIfNeeded(for: textView, force: true)
+            }
+        }
+
         private func updateHeight(for textView: UITextView) {
             textView.layoutIfNeeded()
             if let textLayoutManager = textView.textLayoutManager {
                 textLayoutManager.ensureLayout(for: textLayoutManager.documentRange)
             }
             let lineHeight = (textView.font ?? UIFont.preferredFont(forTextStyle: .body)).lineHeight
-            let minHeight = lineHeight * minVisibleLines
-            let maxHeight = lineHeight * maxVisibleLines
+            let verticalInset = textView.textContainerInset.top + textView.textContainerInset.bottom
+            let minHeight = ceil(lineHeight * minVisibleLines + verticalInset)
+            let maxHeight = ceil(lineHeight * maxVisibleLines + verticalInset)
             let targetWidth = max(textView.bounds.width, textView.textContainer.size.width, 1)
             let fitSize = CGSize(width: targetWidth, height: .greatestFiniteMagnitude)
-            var measured = textView.sizeThatFits(fitSize).height
-            let shouldScroll = measured > maxHeight + 0.5
+            var measured = ceil(textView.sizeThatFits(fitSize).height)
+            let shouldScroll = measured > maxHeight
             if textView.isScrollEnabled != shouldScroll {
                 textView.isScrollEnabled = shouldScroll
                 textView.alwaysBounceVertical = shouldScroll
                 textView.showsVerticalScrollIndicator = shouldScroll
                 textView.invalidateIntrinsicContentSize()
-                measured = textView.sizeThatFits(fitSize).height
+                measured = ceil(textView.sizeThatFits(fitSize).height)
             }
             let clamped = min(max(measured, minHeight), maxHeight)
             normalizeViewport(in: textView, shouldScroll: shouldScroll)
@@ -292,10 +342,12 @@ struct TurnComposerInputTextView: UIViewRepresentable {
         private func heightMeasurementSignature(for textView: UITextView) -> HeightMeasurementSignature {
             let font = textView.font ?? UIFont.preferredFont(forTextStyle: .body)
             let width = max(textView.bounds.width, textView.textContainer.size.width, 1)
+            let verticalInset = textView.textContainerInset.top + textView.textContainerInset.bottom
             return HeightMeasurementSignature(
                 textHash: textView.text.hashValue,
                 widthBucket: Int((width * 2).rounded()),
                 lineHeightBucket: Int((font.lineHeight * 10).rounded()),
+                verticalInsetBucket: Int((verticalInset * 10).rounded()),
                 isScrollEnabled: textView.isScrollEnabled
             )
         }
@@ -385,8 +437,16 @@ struct TurnComposerInputTextView: UIViewRepresentable {
 
             if shouldBeFocused && isEditable {
                 guard !textView.isFirstResponder else { return }
-                DispatchQueue.main.async {
+                // Focus synchronously when the view is already attached so the
+                // keyboard starts rising in the same frame as the tap; a view
+                // that is still mounting has no window yet and must defer one
+                // runloop turn until it's in the hierarchy.
+                if textView.window != nil {
                     textView.becomeFirstResponder()
+                } else {
+                    DispatchQueue.main.async {
+                        textView.becomeFirstResponder()
+                    }
                 }
             } else if !shouldBeFocused || !isEditable {
                 guard textView.isFirstResponder else { return }
@@ -401,6 +461,7 @@ struct TurnComposerInputTextView: UIViewRepresentable {
         let textHash: Int
         let widthBucket: Int
         let lineHeightBucket: Int
+        let verticalInsetBucket: Int
         let isScrollEnabled: Bool
     }
 }

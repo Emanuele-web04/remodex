@@ -2,8 +2,9 @@
 // Purpose: Renders timeline row groups and message-row accessories.
 // Layer: View Component
 // Exports: AssistantBlockAccessoryState, TurnTimelineRowsSection
-// Depends on: SwiftUI, TurnTimelineRenderProjection, MessageRow, CodexMessage
+// Depends on: SwiftUI, RemodexTextKit, TurnTimelineRenderProjection, MessageRow, CodexMessage
 
+import RemodexTextKit
 import SwiftUI
 
 struct AssistantBlockAccessoryState: Equatable {
@@ -19,10 +20,10 @@ struct AssistantBlockAccessoryState: Equatable {
         copyText: String?,
         showsRunningIndicator: Bool,
         allowsCopy: Bool = false,
-        blockDiffText: String?,
-        blockDiffEntries: [TurnFileChangeSummaryEntry]?,
-        blockRevertPresentation: AssistantRevertPresentation?,
-        blockRevertMessage: CodexMessage?
+        blockDiffText: String? = nil,
+        blockDiffEntries: [TurnFileChangeSummaryEntry]? = nil,
+        blockRevertPresentation: AssistantRevertPresentation? = nil,
+        blockRevertMessage: CodexMessage? = nil
     ) {
         self.copyText = copyText
         self.showsRunningIndicator = showsRunningIndicator
@@ -67,6 +68,18 @@ struct AssistantBlockAccessoryState: Equatable {
         )
     }
 
+    func suppressingCopyAndRunningAccessory() -> AssistantBlockAccessoryState {
+        AssistantBlockAccessoryState(
+            copyText: nil,
+            showsRunningIndicator: false,
+            allowsCopy: false,
+            blockDiffText: blockDiffText,
+            blockDiffEntries: blockDiffEntries,
+            blockRevertPresentation: blockRevertPresentation,
+            blockRevertMessage: blockRevertMessage
+        )
+    }
+
     func mergingRehomedAccessoryState(_ state: AssistantBlockAccessoryState) -> AssistantBlockAccessoryState {
         AssistantBlockAccessoryState(
             copyText: copyText ?? state.copyText,
@@ -82,6 +95,28 @@ struct AssistantBlockAccessoryState: Equatable {
     private static func blockRevertMessageSignature(_ message: CodexMessage?) -> AssistantBlockRevertMessageSignature? {
         guard let message else { return nil }
         return AssistantBlockRevertMessageSignature(message)
+    }
+}
+
+enum TurnTimelineToolBurstAccessoryResolver {
+    static func copyFooterState(
+        for group: TurnTimelineToolBurstGroup,
+        statesByMessageID: [String: AssistantBlockAccessoryState],
+        suppressesRunningIndicator: Bool
+    ) -> AssistantBlockAccessoryState? {
+        guard let hostMessage = group.latestMessage,
+              let state = statesByMessageID[hostMessage.id] else {
+            return nil
+        }
+
+        let resolvedState = suppressesRunningIndicator
+            ? state.replacingRunningIndicator(false)
+            : state
+        guard resolvedState.showsRunningIndicator
+            || (resolvedState.allowsCopy && resolvedState.copyText != nil) else {
+            return nil
+        }
+        return resolvedState
     }
 }
 
@@ -119,8 +154,9 @@ private struct TurnTimelineMessageRow: View {
     let currentWorkingDirectory: String?
     let planMatchingFingerprint: Int
     let newestStreamingMessageID: String?
-    let autoScrollMode: TurnAutoScrollMode
+    let autoScrollMode: TurnScrollOwnership
     let showsGlobalRunningIndicator: Bool
+    let movesCopyAndRunningToGroupFooter: Bool
     let onRetryUserMessage: (String) -> Void
     let onTapAssistantRevert: (CodexMessage) -> Void
     let onTapSubagent: (CodexSubagentThreadPresentation) -> Void
@@ -137,7 +173,7 @@ private struct TurnTimelineMessageRow: View {
             threadMessagesForPlanMatching: threadMessagesForPlanMatching,
             currentWorkingDirectory: currentWorkingDirectory,
             planMatchingFingerprint: planMatchingFingerprint,
-            showsStreamingAnimations: autoScrollMode == .followBottom
+            showsStreamingAnimations: autoScrollMode.allowsStreamingAnimations
                 && message.id == newestStreamingMessageID,
             inlineCommitAndPushAction: inlineCommitAndPushAction,
             inlineCommitAndPushPhase: inlineCommitAndPushPhase,
@@ -150,9 +186,12 @@ private struct TurnTimelineMessageRow: View {
 
     private var assistantBlockAccessoryState: AssistantBlockAccessoryState? {
         let state = cachedBlockInfoByMessageID[message.id]
-        return showsGlobalRunningIndicator
+        let resolvedState = showsGlobalRunningIndicator
             ? state?.replacingRunningIndicator(false)
             : state
+        return movesCopyAndRunningToGroupFooter
+            ? resolvedState?.suppressingCopyAndRunningAccessory()
+            : resolvedState
     }
 }
 
@@ -167,7 +206,7 @@ private struct TurnTimelineToolBurstView: View {
     let currentWorkingDirectory: String?
     let planMatchingFingerprint: Int
     let newestStreamingMessageID: String?
-    let autoScrollMode: TurnAutoScrollMode
+    let autoScrollMode: TurnScrollOwnership
     let showsGlobalRunningIndicator: Bool
     let onRetryUserMessage: (String) -> Void
     let onTapAssistantRevert: (CodexMessage) -> Void
@@ -185,24 +224,16 @@ private struct TurnTimelineToolBurstView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            ForEach(group.pinnedMessages) { message in
-                TurnTimelineMessageRow(
-                    message: message,
-                    isRetryAvailable: isRetryAvailable,
-                    cachedBlockInfoByMessageID: cachedBlockInfoByMessageID,
-                    planSessionSource: planSessionSource,
-                    allowsAssistantPlanFallbackRecovery: allowsAssistantPlanFallbackRecovery,
-                    completedTurnIDs: completedTurnIDs,
-                    threadMessagesForPlanMatching: threadMessagesForPlanMatching,
-                    currentWorkingDirectory: currentWorkingDirectory,
-                    planMatchingFingerprint: planMatchingFingerprint,
-                    newestStreamingMessageID: newestStreamingMessageID,
-                    autoScrollMode: autoScrollMode,
-                    showsGlobalRunningIndicator: showsGlobalRunningIndicator,
-                    onRetryUserMessage: onRetryUserMessage,
-                    onTapAssistantRevert: onTapAssistantRevert,
-                    onTapSubagent: onTapSubagent
-                )
+            if isExpanded {
+                ForEach(group.overflowMessages) { message in
+                    toolMessageRow(message)
+                }
+            }
+
+            // Keep the newest call immediately visible. The disclosure belongs
+            // below the tool rows in both collapsed and expanded states.
+            if let latestMessage = group.latestMessage {
+                toolMessageRow(latestMessage)
             }
 
             if group.hiddenCount > 0 {
@@ -212,19 +243,12 @@ private struct TurnTimelineToolBurstView: View {
                     }
                 } label: {
                     HStack(spacing: 6) {
-                        RemodexIcon.image(systemName: "chevron.right")
-                            .font(AppFont.system(size: 10, weight: .semibold))
+                        RemodexIcon.image(systemName: "chevron.right", size: 13, relativeTo: .body)
                             .foregroundStyle(.secondary)
                             .rotationEffect(.degrees(isExpanded ? 90 : 0))
-                        (
-                            Text(summaryCountLabel)
-                                .font(AppFont.subheadline(weight: .medium))
-                                .foregroundStyle(.secondary)
-                            +
-                            Text(" " + summaryNounLabel)
-                                .font(AppFont.subheadline())
-                                .foregroundStyle(.tertiary)
-                        )
+                        Text("\(summaryCountLabel) \(summaryNounLabel)")
+                            .font(AppFont.body(weight: .regular))
+                            .foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
@@ -232,28 +256,39 @@ private struct TurnTimelineToolBurstView: View {
                 .buttonStyle(.plain)
             }
 
-            if isExpanded {
-                ForEach(group.overflowMessages) { message in
-                    TurnTimelineMessageRow(
-                        message: message,
-                        isRetryAvailable: isRetryAvailable,
-                        cachedBlockInfoByMessageID: cachedBlockInfoByMessageID,
-                        planSessionSource: planSessionSource,
-                        allowsAssistantPlanFallbackRecovery: allowsAssistantPlanFallbackRecovery,
-                        completedTurnIDs: completedTurnIDs,
-                        threadMessagesForPlanMatching: threadMessagesForPlanMatching,
-                        currentWorkingDirectory: currentWorkingDirectory,
-                        planMatchingFingerprint: planMatchingFingerprint,
-                        newestStreamingMessageID: newestStreamingMessageID,
-                        autoScrollMode: autoScrollMode,
-                        showsGlobalRunningIndicator: showsGlobalRunningIndicator,
-                        onRetryUserMessage: onRetryUserMessage,
-                        onTapAssistantRevert: onTapAssistantRevert,
-                        onTapSubagent: onTapSubagent
-                    )
-                }
+            if let footerState = TurnTimelineToolBurstAccessoryResolver.copyFooterState(
+                for: group,
+                statesByMessageID: cachedBlockInfoByMessageID,
+                suppressesRunningIndicator: showsGlobalRunningIndicator
+            ) {
+                CopyBlockButton(
+                    text: footerState.allowsCopy ? footerState.copyText : nil,
+                    isRunning: footerState.showsRunningIndicator
+                )
             }
         }
+        .id(group.id)
+    }
+
+    private func toolMessageRow(_ message: CodexMessage) -> some View {
+        TurnTimelineMessageRow(
+            message: message,
+            isRetryAvailable: isRetryAvailable,
+            cachedBlockInfoByMessageID: cachedBlockInfoByMessageID,
+            planSessionSource: planSessionSource,
+            allowsAssistantPlanFallbackRecovery: allowsAssistantPlanFallbackRecovery,
+            completedTurnIDs: completedTurnIDs,
+            threadMessagesForPlanMatching: threadMessagesForPlanMatching,
+            currentWorkingDirectory: currentWorkingDirectory,
+            planMatchingFingerprint: planMatchingFingerprint,
+            newestStreamingMessageID: newestStreamingMessageID,
+            autoScrollMode: autoScrollMode,
+            showsGlobalRunningIndicator: showsGlobalRunningIndicator,
+            movesCopyAndRunningToGroupFooter: message.id == group.latestMessage?.id,
+            onRetryUserMessage: onRetryUserMessage,
+            onTapAssistantRevert: onTapAssistantRevert,
+            onTapSubagent: onTapSubagent
+        )
     }
 }
 
@@ -268,7 +303,7 @@ private struct TurnTimelinePreviousMessagesView: View {
     let currentWorkingDirectory: String?
     let planMatchingFingerprint: Int
     let newestStreamingMessageID: String?
-    let autoScrollMode: TurnAutoScrollMode
+    let autoScrollMode: TurnScrollOwnership
     let showsGlobalRunningIndicator: Bool
     let onRetryUserMessage: (String) -> Void
     let onTapAssistantRevert: (CodexMessage) -> Void
@@ -324,6 +359,7 @@ private struct TurnTimelinePreviousMessagesView: View {
                         newestStreamingMessageID: newestStreamingMessageID,
                         autoScrollMode: autoScrollMode,
                         showsGlobalRunningIndicator: showsGlobalRunningIndicator,
+                        movesCopyAndRunningToGroupFooter: false,
                         onRetryUserMessage: onRetryUserMessage,
                         onTapAssistantRevert: onTapAssistantRevert,
                         onTapSubagent: onTapSubagent
@@ -353,12 +389,14 @@ struct TurnTimelineRowsSection: View {
     let currentWorkingDirectory: String?
     let planMatchingFingerprint: Int
     let newestStreamingMessageID: String?
-    let autoScrollMode: TurnAutoScrollMode
+    let autoScrollMode: TurnScrollOwnership
     let onRetryUserMessage: (String) -> Void
     let onTapAssistantRevert: (CodexMessage) -> Void
     let onTapSubagent: (CodexSubagentThreadPresentation) -> Void
     let onLoadEarlierMessages: () -> Void
     let pendingStreamingAssistantPlaceholderID: String?
+
+    private static let runningIndicatorRowID = "turn-timeline-running-indicator-row"
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -407,6 +445,7 @@ struct TurnTimelineRowsSection: View {
                         newestStreamingMessageID: newestStreamingMessageID,
                         autoScrollMode: autoScrollMode,
                         showsGlobalRunningIndicator: shouldUseGlobalRunningIndicator,
+                        movesCopyAndRunningToGroupFooter: false,
                         onRetryUserMessage: onRetryUserMessage,
                         onTapAssistantRevert: onTapAssistantRevert,
                         onTapSubagent: onTapSubagent
@@ -450,12 +489,19 @@ struct TurnTimelineRowsSection: View {
                 }
             }
 
-            if let pendingStreamingAssistantPlaceholderID {
-                StreamingAssistantPlaceholderSlot()
-                    .id(pendingStreamingAssistantPlaceholderID)
+            if showsGlobalRunningIndicator {
+                // The running indicator is a real timeline row, not a floating overlay,
+                // so it can never draw over scrolled prose. It adopts the hidden empty
+                // streaming assistant row's ID so assistant-response scroll anchoring
+                // still resolves during the pre-first-delta gap.
+                TerminalRunningIndicator()
+                    .id(pendingStreamingAssistantPlaceholderID ?? Self.runningIndicatorRowID)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        // One selection scope for the whole timeline: starting a selection in any
+        // markdown row clears the active selection in every other row.
+        .remodex.textSelectionScope()
     }
 
     private var shouldUseGlobalRunningIndicator: Bool {

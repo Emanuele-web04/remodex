@@ -1,7 +1,7 @@
 // FILE: SidebarThreadRunBadgeView.swift
-// Purpose: Renders the compact run-state indicator dot for sidebar conversation rows.
+// Purpose: Renders compact active/failed run-state indicators for sidebar conversation rows.
 // Layer: View Component
-// Exports: SidebarThreadRunBadgeView
+// Exports: SidebarThreadRunBadgeView, CodexThreadRunBadgeState.isVisibleInSidebar
 // Depends on: SwiftUI, CodexThreadRunBadgeState
 
 import SwiftUI
@@ -10,9 +10,24 @@ struct SidebarThreadRunBadgeView: View {
     let state: CodexThreadRunBadgeState
 
     var body: some View {
+        switch state {
+        case .running:
+            RunningThreadSpinner(size: 13)
+        case .failed:
+            statusDot(color: .red)
+        case .goalActive:
+            statusDot(color: .purple)
+        case .goalAttention:
+            statusDot(color: .orange)
+        case .ready:
+            EmptyView()
+        }
+    }
+
+    private func statusDot(color: Color) -> some View {
         Circle()
-            .fill(state.color)
-            .frame(width: 10, height: 10)
+            .fill(color)
+            .frame(width: 15, height: 15)
             .overlay(
                 Circle()
                     .stroke(Color(.systemBackground), lineWidth: 1)
@@ -21,19 +36,13 @@ struct SidebarThreadRunBadgeView: View {
     }
 }
 
-private extension CodexThreadRunBadgeState {
-    var color: Color {
+extension CodexThreadRunBadgeState {
+    var isVisibleInSidebar: Bool {
         switch self {
-        case .running:
-            return .blue
+        case .running, .failed, .goalActive, .goalAttention:
+            return true
         case .ready:
-            return .green
-        case .failed:
-            return .red
-        case .goalActive:
-            return .purple
-        case .goalAttention:
-            return .orange
+            return false
         }
     }
 }

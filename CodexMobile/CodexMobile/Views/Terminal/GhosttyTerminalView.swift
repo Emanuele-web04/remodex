@@ -285,7 +285,7 @@ private final class TerminalSelectionOverlayView: UIView {
     }
 }
 
-final class GhosttyTerminalView: UIView, UITextFieldDelegate, UIGestureRecognizerDelegate {
+final class GhosttyTerminalView: UIView, UITextFieldDelegate, UIGestureRecognizerDelegate, UIEditMenuInteractionDelegate {
     private static let minimumVerticalScrollStepPoints: CGFloat = 18
     private static let verticalScrollStepMultiplier: CGFloat = 1.15
     private static let selectionDragActivationDistance: CGFloat = 10
@@ -301,6 +301,9 @@ final class GhosttyTerminalView: UIView, UITextFieldDelegate, UIGestureRecognize
     private let focusTapGesture = UITapGestureRecognizer()
     private let scrollPanGesture = UIPanGestureRecognizer()
     private let selectionLongPressGesture = UILongPressGestureRecognizer()
+    // Created in configureViewHierarchy (not lazy) so teardown paths can never
+    // instantiate a UIKit interaction while the view is deinitializing.
+    private var selectionEditMenuInteraction: UIEditMenuInteraction?
     private var lastViewportSize: CGSize = .zero
     private var lastContentScale: CGFloat = 0
     private var lastReportedGrid: (cols: Int, rows: Int)?
@@ -315,6 +318,8 @@ final class GhosttyTerminalView: UIView, UITextFieldDelegate, UIGestureRecognize
     private var handleDragTouchOffset: CGPoint?
     private var selectionGestureStartPoint: CGPoint?
     private var selectionGestureDidDrag = false
+    private var selectedTextForEditMenu = ""
+    private var selectionMenuTargetRect: CGRect?
     private var app: ghostty_app_t?
     private var surface: ghostty_surface_t?
     private var isCreatingSurface = false
@@ -508,6 +513,10 @@ final class GhosttyTerminalView: UIView, UITextFieldDelegate, UIGestureRecognize
         selectionLongPressGesture.cancelsTouchesInView = false
         selectionLongPressGesture.delegate = self
         terminalViewport.addGestureRecognizer(selectionLongPressGesture)
+
+        let editMenuInteraction = UIEditMenuInteraction(delegate: self)
+        terminalViewport.addInteraction(editMenuInteraction)
+        selectionEditMenuInteraction = editMenuInteraction
 
         addSubview(terminalViewport)
         addSubview(selectionOverlay)
@@ -710,8 +719,10 @@ final class GhosttyTerminalView: UIView, UITextFieldDelegate, UIGestureRecognize
                   let initialRange = wordSelectionRange(at: cell) else { return }
             selectionGestureStartPoint = location
             selectionGestureDidDrag = false
+            selectedTextForEditMenu = ""
             selectionAnchorCell = initialRange.anchor
             selectionFocusCell = initialRange.focus
+            selectionMenuTargetRect = nil
             isSelectingText = true
             updateSelectionOverlay()
             HapticFeedback.shared.triggerImpactFeedback(style: .light)
@@ -727,7 +738,7 @@ final class GhosttyTerminalView: UIView, UITextFieldDelegate, UIGestureRecognize
             isSelectingText = false
             selectionGestureStartPoint = nil
             selectionGestureDidDrag = false
-            copyCurrentSelectionToPasteboard()
+            presentCopyMenuIfSelectionExists()
         case .cancelled, .failed:
             clearAppSelection()
         default:
@@ -744,6 +755,30 @@ final class GhosttyTerminalView: UIView, UITextFieldDelegate, UIGestureRecognize
         shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
     ) -> Bool {
         false
+    }
+
+    func editMenuInteraction(
+        _ interaction: UIEditMenuInteraction,
+        menuFor configuration: UIEditMenuConfiguration,
+        suggestedActions: [UIMenuElement]
+    ) -> UIMenu? {
+        guard !selectedTextForEditMenu.isEmpty else { return nil }
+        let copyAction = UIAction(title: "Copy", image: RemodexIcon.menuUIImage(systemName: "doc.on.doc")) { [weak self] _ in
+            self?.copyCurrentSelectionToPasteboard()
+        }
+        return UIMenu(children: [copyAction])
+    }
+
+    func editMenuInteraction(
+        _ interaction: UIEditMenuInteraction,
+        targetRectFor configuration: UIEditMenuConfiguration
+    ) -> CGRect {
+        selectionMenuTargetRect ?? CGRect(
+            x: configuration.sourcePoint.x - 1,
+            y: configuration.sourcePoint.y - max(fontSize * 1.4, 18),
+            width: 2,
+            height: max(fontSize * 1.4, 18)
+        )
     }
 
     private func requestKeyboardFocus() {
@@ -784,13 +819,42 @@ final class GhosttyTerminalView: UIView, UITextFieldDelegate, UIGestureRecognize
         )
     }
 
-    // Avoid UIKit's edit menu inside the Ghostty surface; presenting/dismissing
-    // it during route teardown can crash, so selection copies directly.
+    // Reads Ghostty text only when the gesture ends, while UIKit owns the
+    // mobile selection handles/highlight above the renderer. Copies to the
+    // pasteboard immediately, then surfaces the "Copy" menu as visible
+    // confirmation; presentation is skipped when the view is mid-teardown so
+    // the edit menu cannot animate against a dead window (previous crash).
+    private func presentCopyMenuIfSelectionExists() {
+        guard let selectedText = readTextForCurrentSelection(),
+              !selectedText.isEmpty else {
+            clearAppSelection()
+            return
+        }
+
+        selectedTextForEditMenu = selectedText
+        copyCurrentSelectionToPasteboard()
+
+        guard window != nil, canRenderSurface else { return }
+        selectionMenuTargetRect = selectionOverlay.menuTargetRect() ?? terminalViewport.bounds
+        let sourcePoint = CGPoint(x: selectionMenuTargetRect?.midX ?? 0, y: selectionMenuTargetRect?.minY ?? 0)
+        let configuration = UIEditMenuConfiguration(identifier: nil, sourcePoint: sourcePoint)
+        selectionEditMenuInteraction?.presentEditMenu(with: configuration)
+    }
+
+    // Copy uses the captured menu text so live terminal output cannot change
+    // what the user selected while the menu is open.
     private func copyCurrentSelectionToPasteboard() {
-        let latestSelection = readTextForCurrentSelection() ?? ""
+        let latestSelection = selectedTextForEditMenu.isEmpty
+            ? readTextForCurrentSelection() ?? ""
+            : selectedTextForEditMenu
         guard !latestSelection.isEmpty else { return }
         UIPasteboard.general.string = latestSelection
         HapticFeedback.shared.triggerImpactFeedback(style: .light)
+    }
+
+    private func dismissSelectionEditMenu() {
+        guard window != nil else { return }
+        selectionEditMenuInteraction?.dismissMenu()
     }
 
     private func shouldExtendSelectionDrag(to location: CGPoint) -> Bool {
@@ -807,6 +871,7 @@ final class GhosttyTerminalView: UIView, UITextFieldDelegate, UIGestureRecognize
     private func updateSelectionFocus(at location: CGPoint) {
         guard let cell = terminalCell(at: location), cell != selectionFocusCell else { return }
         selectionFocusCell = cell
+        selectedTextForEditMenu = ""
         updateSelectionOverlay()
     }
 
@@ -821,6 +886,7 @@ final class GhosttyTerminalView: UIView, UITextFieldDelegate, UIGestureRecognize
             guard let metrics = currentSelectionMetrics() else { return }
             let startCell = handle == .start ? currentRange.start : currentRange.end
             let startLocation = handleBoundaryPoint(for: startCell, handle: handle, metrics: metrics)
+            dismissSelectionEditMenu()
             handleDragOppositeCell = handle == .start ? currentRange.end : currentRange.start
             handleDragStartCell = startCell
             handleDragStartLocation = startLocation
@@ -848,6 +914,7 @@ final class GhosttyTerminalView: UIView, UITextFieldDelegate, UIGestureRecognize
             selectionFocusCell = cell
         }
 
+        selectedTextForEditMenu = ""
         updateSelectionOverlay()
 
         if state == .ended {
@@ -855,7 +922,7 @@ final class GhosttyTerminalView: UIView, UITextFieldDelegate, UIGestureRecognize
             handleDragStartCell = nil
             handleDragStartLocation = nil
             handleDragTouchOffset = nil
-            copyCurrentSelectionToPasteboard()
+            presentCopyMenuIfSelectionExists()
         }
     }
 
@@ -863,12 +930,15 @@ final class GhosttyTerminalView: UIView, UITextFieldDelegate, UIGestureRecognize
         selectionOverlay.metrics = currentSelectionMetrics()
         if let selectionRange {
             selectionOverlay.selectionRange = selectionRange
+            selectionMenuTargetRect = selectionOverlay.menuTargetRect()
         } else {
             selectionOverlay.selectionRange = nil
+            selectionMenuTargetRect = nil
         }
     }
 
     private func clearAppSelection() {
+        dismissSelectionEditMenu()
         isSelectingText = false
         selectionAnchorCell = nil
         selectionFocusCell = nil
@@ -878,6 +948,8 @@ final class GhosttyTerminalView: UIView, UITextFieldDelegate, UIGestureRecognize
         handleDragTouchOffset = nil
         selectionGestureStartPoint = nil
         selectionGestureDidDrag = false
+        selectedTextForEditMenu = ""
+        selectionMenuTargetRect = nil
         selectionOverlay.selectionRange = nil
     }
 
@@ -1190,6 +1262,16 @@ final class GhosttyTerminalView: UIView, UITextFieldDelegate, UIGestureRecognize
                 anchor: TerminalSelectionCell(column: 0, row: 0),
                 focus: TerminalSelectionCell(column: metrics.columns - 1, row: metrics.rows - 1)
             )
+        )
+    }
+
+    /// Plain text of the currently visible grid, with per-line trailing blanks
+    /// removed. Backs the "Select text" sheet that offers classic iOS selection.
+    func visibleTextForSelection() -> String? {
+        guard let metrics = currentSelectionMetrics(),
+              let visualRows = visibleTerminalRows(metrics: metrics) else { return nil }
+        return TerminalSelectableTextNormalizer.normalizedText(
+            fromLines: visualRows.map(\.text)
         )
     }
 

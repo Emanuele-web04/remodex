@@ -14,12 +14,8 @@ struct FileChangeStatusSnapshot: Equatable {
     let detailBodyText: String
     let messageID: String
 
-    var title: String {
-        fileCount == 1 ? "1 file changed" : "\(fileCount) files changed"
-    }
-
     var compactTitle: String {
-        fileCount == 1 ? "1 change" : "\(fileCount) changes"
+        fileCount == 1 ? "1 file" : "\(fileCount) files"
     }
 
     var hasChanges: Bool {
@@ -165,20 +161,11 @@ struct FileChangeStatusCapsule: View {
     }
 
     private var capsuleContent: some View {
-        HStack(spacing: 8) {
-            Image("changes")
-                .renderingMode(.template)
-                .resizable()
-                .scaledToFit()
-                .frame(width: 16, height: 16)
-                .foregroundStyle(.secondary)
-
+        GlassStatusPill {
             Text(title)
-                .font(AppFont.subheadline(weight: .medium))
-                .foregroundStyle(.primary.opacity(0.78))
+                .font(AppFont.caption())
+                .foregroundStyle(.secondary)
                 .lineLimit(1)
-                .truncationMode(.middle)
-                .minimumScaleFactor(0.82)
 
             if let additions, let deletions, additions > 0 || deletions > 0 {
                 FileChangeStatusDiffCountsLabel(additions: additions, deletions: deletions)
@@ -186,14 +173,6 @@ struct FileChangeStatusCapsule: View {
                     .layoutPriority(1)
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-        .adaptiveGlass(.regular, in: Capsule())
-        .overlay {
-            Capsule()
-                .stroke(Color.white.opacity(0.22), lineWidth: 0.5)
-        }
-        .contentShape(Capsule())
         .accessibilityElement(children: .combine)
     }
 }
@@ -209,7 +188,7 @@ private struct FileChangeStatusDiffCountsLabel: View {
             Text("-\(Self.compactCount(deletions))")
                 .foregroundStyle(Color.red)
         }
-        .font(AppFont.subheadline(weight: .semibold))
+        .font(AppFont.caption())
         .lineLimit(1)
     }
 
@@ -233,7 +212,7 @@ private struct FileChangeStatusDiffCountsLabel: View {
 #if DEBUG
 #Preview("File Change Status Capsule") {
     VStack(spacing: 14) {
-        FileChangeStatusCapsule(title: "30 files changed", additions: 2700, deletions: 72)
+        FileChangeStatusCapsule(title: "30 files", additions: 2700, deletions: 72)
     }
     .padding()
 }

@@ -177,15 +177,86 @@ extension CodexService {
     func handleNotification(method: String, params: JSONValue?) {
         let paramsObject = params?.objectValue
         let previousReplayScope = isApplyingReplayedBridgeEvent
+        if isBufferedReplayResetEvent(paramsObject) {
+            handleBufferedReplayReset(paramsObject)
+            return
+        }
+        if isBufferedReplayGapEvent(paramsObject) {
+            handleBufferedReplayGap(paramsObject)
+            return
+        }
+        // Buffered reconnect replay delivers everything that happened while the
+        // phone was away. Rows apply closed/non-streaming, and timeline rebuilds
+        // batch into one settle instead of visually replaying the backlog
+        // event by event.
         if isReplayedBridgeEvent(paramsObject) {
             isApplyingReplayedBridgeEvent = true
+            if let threadId = resolveThreadID(from: paramsObject) {
+                beginTimelineCatchUpBurst(threadId: threadId)
+            }
+        }
+        // Rollout bootstrap replay is catch-up history for a run that is still
+        // active: rows must apply closed/non-streaming (replay scope), but unlike
+        // buffered replay the thread keeps its running state and active turn.
+        if isRolloutBootstrapBridgeEvent(paramsObject) {
+            isApplyingReplayedBridgeEvent = true
+            if let threadId = resolveThreadID(from: paramsObject) {
+                beginTimelineCatchUpBurst(threadId: threadId)
+            }
         }
         defer { isApplyingReplayedBridgeEvent = previousReplayScope }
+
+        if isRolloutBootstrapCompleteEvent(paramsObject),
+           let threadId = resolveThreadID(from: paramsObject) {
+            finishTimelineCatchUpBurst(threadId: threadId)
+        }
+
+        // Buffered reconnect replay spans threads and carries no threadId; its
+        // completion marker settles every open catch-up burst deterministically
+        // (the 500ms debounce stays as fallback for lost markers).
+        if isBufferedReplayCompleteEvent(paramsObject) {
+            finishAllTimelineCatchUpBursts()
+            return
+        }
+
+        // Live desktop-mirror polls emit multi-event batches (one per rollout poll
+        // tick). Coalesce their snapshot rebuilds into one settle per batch: data
+        // and streaming semantics apply per event as usual, only the visible
+        // timeline rebuild is deferred. Turn boundaries stay outside the gate:
+        // turn/completed settles first so a finished turn renders immediately, and
+        // turn/started renders ungated so the running indicator appears instantly
+        // (the batch's first content event opens the burst right after).
+        if isDesktopMirroredBridgeEvent(paramsObject),
+           !isApplyingReplayedBridgeEvent,
+           let threadId = resolveThreadID(from: paramsObject) {
+            switch method {
+            case "turn/completed", "turn/started":
+                finishTimelineCatchUpBurst(threadId: threadId)
+            case "turn/activity":
+                break
+            default:
+                beginTimelineCatchUpBurst(
+                    threadId: threadId,
+                    flushFallbackNanoseconds: Self.liveMirrorBatchFlushNanoseconds,
+                    kind: .liveMirror
+                )
+            }
+        }
 
         noteDesktopMirroredActivityIfNeeded(method: method, paramsObject: paramsObject)
 
         switch method {
-        case "turn/plan/updated", "item/plan/delta", "item/completed", "serverRequest/resolved":
+        case "item/completed":
+            if AppEnvironment.verboseDiagnosticsEnabled {
+                debugRuntimeLog(
+                    debugNotificationSummary(method: method, paramsObject: paramsObject)
+                )
+            } else {
+                recordCompactRuntimeItemCompletion(
+                    itemType: debugNotificationItemType(paramsObject: paramsObject)
+                )
+            }
+        case "turn/plan/updated", "item/plan/delta", "serverRequest/resolved":
             debugRuntimeLog(
                 debugNotificationSummary(method: method, paramsObject: paramsObject)
             )
@@ -202,6 +273,15 @@ extension CodexService {
 
         case "thread/status/changed":
             handleThreadStatusChanged(paramsObject)
+
+        case "thread/archived":
+            handleThreadArchiveStateChanged(paramsObject, isArchived: true)
+
+        case "thread/unarchived":
+            handleThreadArchiveStateChanged(paramsObject, isArchived: false)
+
+        case "thread/replaced":
+            handleThreadReplaced(paramsObject)
 
         case "turn/started":
             handleTurnStarted(paramsObject)
@@ -226,7 +306,7 @@ extension CodexService {
         case "item/reasoning/summaryTextDelta",
              "item/reasoning/summaryPartAdded",
              "item/reasoning/textDelta":
-            appendReasoningDelta(from: paramsObject)
+            appendReasoningDelta(from: paramsObject, method: method)
 
         case "item/fileChange/outputDelta":
             appendFileChangeDelta(from: paramsObject)
@@ -332,10 +412,28 @@ extension CodexService {
         }
     }
 
+    // Mirrored metadata/lifecycle events describe list or prompt state, not live
+    // desktop work; they must never mark a thread as running.
+    private static let nonActivityDesktopMirrorMethods: Set<String> = [
+        "thread/archived",
+        "thread/unarchived",
+        "thread/replaced",
+        "thread/name/updated",
+        "thread/status/changed",
+        "thread/tokenUsage/updated",
+        "thread/goal/updated",
+        "thread/goal/cleared",
+        "serverRequest/resolved",
+    ]
+
     private func noteDesktopMirroredActivityIfNeeded(
         method: String,
         paramsObject: IncomingParamsObject?
     ) {
+        if Self.nonActivityDesktopMirrorMethods.contains(method) {
+            return
+        }
+
         let isDesktopMirroredEvent = isDesktopMirroredBridgeEvent(paramsObject)
         let isMirrorActivityMethod = method.hasPrefix("item/")
             || method.hasPrefix("codex/event")
@@ -363,7 +461,13 @@ extension CodexService {
             return
         }
 
-        if isDesktopMirroredEvent && method != "turn/completed" {
+        // Completion events prove work finished, not that work is in progress.
+        // Idle Desktop turns mirror user prompts through item/completed alone,
+        // so letting completions start running UI showed phantom running chats.
+        let isCompletionOnlyMirrorMethod = method == "item/completed"
+            || method == "codex/event/item_completed"
+
+        if isDesktopMirroredEvent && method != "turn/completed" && !isCompletionOnlyMirrorMethod {
             if !threadHasActiveOrRunningTurn(threadId) {
                 markThreadAsRunning(threadId)
             }
@@ -372,7 +476,9 @@ extension CodexService {
             if activeTurnID(for: threadId) == nil, let turnId = mirroredTurnID {
                 setActiveTurnID(turnId, for: threadId)
                 threadIdByTurnID[turnId] = threadId
-                activeTurnId = turnId
+                if !isBackgroundDiscoveryBridgeEvent(paramsObject) || threadId == activeThreadId {
+                    activeTurnId = turnId
+                }
                 setProtectedRunningFallback(false, for: threadId)
             } else if activeTurnID(for: threadId) == nil {
                 setProtectedRunningFallback(true, for: threadId)
@@ -397,7 +503,7 @@ extension CodexService {
 
         // A re-delivered turn/started for an already-finished turn is replay noise,
         // so the terminal-turn check applies to it as well.
-        if let turnId, turnTerminalState(for: turnId) != nil {
+        if let turnId, turnTerminalState(for: turnId, threadId: threadId) != nil {
             return true
         }
 
@@ -588,15 +694,55 @@ extension CodexService {
         let threadId = resolveThreadID(from: paramsObject)
         let turnID = extractTurnIDForTurnLifecycleEvent(from: paramsObject)
         let isDesktopMirroredTurn = isDesktopMirroredBridgeEvent(paramsObject)
+        let isBackgroundDiscoveryTurn = isBackgroundDiscoveryBridgeEvent(paramsObject)
+        let isReplayedEvent = isReplayedBridgeEvent(paramsObject)
+        let preservesRunningSourceEpoch = paramsObject?["remodexTurnIdentityContinuity"]?.boolValue == true
+        let wasThreadRunning = threadId.map(threadHasActiveOrRunningTurn) ?? false
+        let previousActiveTurnID = threadId.flatMap { activeTurnIdByThread[$0] }
 
         // Replay/mirror paths can re-deliver turn/started for turns that already
-        // ended; never revive running UI for a turn with a known terminal outcome.
-        if turnTerminalState(for: turnID) != nil {
-            return
+        // ended. A live background snapshot is the exception only when the
+        // earlier state was a guessed interruption; projected ids are tracked
+        // with their thread so reuse in another chat stays independent.
+        if let terminalState = turnTerminalState(for: turnID, threadId: threadId) {
+            let mayReviveLiveBackgroundTurn = !isReplayedEvent
+                && isBackgroundDiscoveryTurn
+                && terminalState == .stopped
+            guard mayReviveLiveBackgroundTurn else { return }
+
+            if let turnID {
+                if CodexSyntheticIdentifiers.isProjectedDesktopTurnID(turnID),
+                   let threadId {
+                    projectedTerminalStateByThreadID[threadId]?.removeValue(forKey: turnID)
+                    if projectedTerminalStateByThreadID[threadId]?.isEmpty == true {
+                        projectedTerminalStateByThreadID.removeValue(forKey: threadId)
+                    }
+                } else if terminalStateByTurnID.removeValue(forKey: turnID) != nil {
+                    persistTurnTerminalStates()
+                }
+            }
         }
-        let isReplayedEvent = isReplayedBridgeEvent(paramsObject)
 
         if let threadId, !isReplayedEvent {
+            let preservesReconnectRun = pendingReconnectRunContinuityThreadIDs
+                .remove(threadId) != nil
+            let previousStartedTurnID = lastRunStartTurnIDByThread[threadId]
+            let previousKnownTurnID = previousStartedTurnID ?? previousActiveTurnID
+            let repeatsKnownTurn = turnID != nil && turnID == previousKnownTurnID
+            let startsDistinctIdentifiedTurn = turnID != nil
+                && previousKnownTurnID != nil
+                && turnID != previousKnownTurnID
+            if !preservesRunningSourceEpoch
+                && !repeatsKnownTurn
+                && !(preservesReconnectRun && !startsDistinctIdentifiedTurn)
+                && (!wasThreadRunning || startsDistinctIdentifiedTurn) {
+                runStartGenerationByThread[threadId, default: 0] += 1
+            }
+            if let turnID {
+                lastRunStartTurnIDByThread[threadId] = turnID
+            } else if !wasThreadRunning && !preservesReconnectRun {
+                lastRunStartTurnIDByThread.removeValue(forKey: threadId)
+            }
             markThreadAsRunning(threadId)
             if isDesktopMirroredTurn {
                 markDesktopMirroredRunning(for: threadId)
@@ -620,48 +766,73 @@ extension CodexService {
             setProtectedRunningFallback(true, for: threadId)
         }
 
-        if let turnID, !isReplayedEvent {
+        if let turnID,
+           !isReplayedEvent,
+           !isBackgroundDiscoveryTurn || threadId == activeThreadId {
             activeTurnId = turnID
         }
 
-        requestImmediateSync(threadId: threadId ?? activeThreadId)
+        // Lifecycle-only Litter discovery keeps unopened sidebar rows cheap.
+        // A real thread open will issue its own read/resume and promote the
+        // bridge projector; do not turn this badge signal into eager history.
+        if !isBackgroundDiscoveryTurn || threadId == activeThreadId {
+            requestImmediateSync(threadId: threadId ?? activeThreadId)
+        }
     }
 
     private func handleTurnCompleted(_ paramsObject: IncomingParamsObject?) {
         let completedTurnID = extractTurnIDForTurnLifecycleEvent(from: paramsObject)
         let turnFailureMessage = parseTurnFailureMessage(from: paramsObject)
+        let isBackgroundDiscoveryTurn = isBackgroundDiscoveryBridgeEvent(paramsObject)
 
         if let threadId = resolveThreadID(from: paramsObject, turnIdHint: completedTurnID) {
+            let shouldRemainLifecycleOnly = isBackgroundDiscoveryTurn && threadId != activeThreadId
             if let completedTurnID {
                 confirmLatestPendingUserMessage(threadId: threadId, turnId: completedTurnID)
             }
             let resolvedTurnID = completedTurnID ?? activeTurnIdByThread[threadId]
+            let currentActiveTurnID = activeTurnIdByThread[threadId]
+            let completesCurrentThreadRun = resolvedTurnID == nil
+                || currentActiveTurnID == nil
+                || resolvedTurnID == currentActiveTurnID
             let terminalState = parseTurnTerminalState(
                 from: paramsObject,
                 turnFailureMessage: turnFailureMessage
             )
-            recordTurnTerminalState(threadId: threadId, turnId: resolvedTurnID, state: terminalState)
-            noteTurnFinished(turnId: resolvedTurnID)
+            recordTurnTerminalState(
+                threadId: threadId,
+                turnId: resolvedTurnID,
+                state: terminalState,
+                updatesThreadState: completesCurrentThreadRun
+            )
+            noteTurnFinished(threadId: threadId, turnId: resolvedTurnID)
             markTurnCompleted(threadId: threadId, turnId: resolvedTurnID)
-            if terminalState == .completed {
-                Task { @MainActor [weak self] in
-                    await self?.captureTurnEndWorkspaceCheckpointIfPossible(
-                        threadId: threadId,
-                        turnId: resolvedTurnID
-                    )
+            if completesCurrentThreadRun, terminalState == .completed {
+                if !shouldRemainLifecycleOnly {
+                    Task { @MainActor [weak self] in
+                        await self?.captureTurnEndWorkspaceCheckpointIfPossible(
+                            threadId: threadId,
+                            turnId: resolvedTurnID
+                        )
+                    }
                 }
                 markReadyIfUnread(threadId: threadId)
                 notifyRunCompletionIfNeeded(threadId: threadId, turnId: resolvedTurnID, result: .completed)
-            } else if terminalState == .failed {
+            } else if completesCurrentThreadRun, terminalState == .failed {
                 discardTurnStartWorkspaceCheckpointCopyIfNeeded(turnId: resolvedTurnID)
                 markFailedIfUnread(threadId: threadId)
                 notifyRunCompletionIfNeeded(threadId: threadId, turnId: resolvedTurnID, result: .failed)
             } else {
+                // A late completion for an older overlapping turn must not
+                // capture B's still-changing workspace as A's final diff.
+                // Drop A's pending start copy so it cannot remain retained.
                 discardTurnStartWorkspaceCheckpointCopyIfNeeded(turnId: resolvedTurnID)
             }
-            requestImmediateSync(threadId: threadId)
-            requestThreadHistoryReconcile(threadId: threadId)
-            if terminalState == .completed {
+            if completesCurrentThreadRun && !shouldRemainLifecycleOnly {
+                requestImmediateSync(threadId: threadId)
+                requestThreadHistoryReconcile(threadId: threadId)
+            }
+            if completesCurrentThreadRun, terminalState == .completed, !shouldRemainLifecycleOnly {
                 scheduleAppReviewPromptAfterSuccessfulRun(threadId: threadId, turnId: resolvedTurnID)
             }
 
@@ -733,7 +904,7 @@ extension CodexService {
                 appendSystemMessage(threadId: threadId, text: "Error: \(userFacingErrorMessage)", turnId: turnId)
             }
             recordTurnTerminalState(threadId: threadId, turnId: resolvedTurnID, state: .failed)
-            noteTurnFinished(turnId: resolvedTurnID)
+            noteTurnFinished(threadId: threadId, turnId: resolvedTurnID)
             markTurnCompleted(threadId: threadId, turnId: resolvedTurnID)
             discardTurnStartWorkspaceCheckpointCopyIfNeeded(turnId: resolvedTurnID)
             markFailedIfUnread(threadId: threadId)
@@ -829,7 +1000,7 @@ extension CodexService {
                     turnId: activeTurnIdForThread,
                     state: terminalState
                 )
-                noteTurnFinished(turnId: activeTurnIdForThread)
+                noteTurnFinished(threadId: threadId, turnId: activeTurnIdForThread)
                 if let completionResult = runCompletionResult(for: terminalState) {
                     notifyRunCompletionIfNeeded(
                         threadId: threadId,
@@ -845,6 +1016,31 @@ extension CodexService {
                 markFailedIfUnread(threadId: threadId)
             }
         }
+    }
+
+    // Applies remote Desktop archive broadcasts to the local sidebar state.
+    private func handleThreadArchiveStateChanged(
+        _ paramsObject: IncomingParamsObject?,
+        isArchived: Bool
+    ) {
+        guard let threadId = extractThreadID(from: paramsObject), !threadId.isEmpty else {
+            return
+        }
+
+        applyRemoteThreadArchiveState(threadId: threadId, isArchived: isArchived)
+    }
+
+    // The bridge rebuilt a mirrored thread under new canonical ids (synthetic
+    // turn ids became real), so force a canonical history rebuild: a plain sync
+    // can early-return for running threads and leave stale synthetic rows behind.
+    private func handleThreadReplaced(_ paramsObject: IncomingParamsObject?) {
+        guard let threadId = extractThreadID(from: paramsObject), !threadId.isEmpty else {
+            return
+        }
+
+        projectedTerminalStateByThreadID.removeValue(forKey: threadId)
+        pendingCanonicalSourceReplacementThreadIDs.insert(threadId)
+        requestImmediateActiveThreadSync(threadId: threadId, forceHistoryRefresh: true)
     }
 
     // Parses the real terminal outcome so UI can distinguish completion from interruption.
@@ -910,11 +1106,28 @@ extension CodexService {
             ?? "Turn failed with no details"
     }
 
-    private func appendReasoningDelta(from paramsObject: IncomingParamsObject?) {
+    private func appendReasoningDelta(
+        from paramsObject: IncomingParamsObject?,
+        method: String
+    ) {
         guard let paramsObject else { return }
         let eventObject = envelopeEventObject(from: paramsObject)
 
-        let delta = extractTextDelta(from: paramsObject)
+        let delta: String
+        if method == "item/reasoning/summaryPartAdded" {
+            // A summary part is a separate visible trace. Preserve that boundary
+            // while streaming so `<!-- -->**Next summary**` cannot be parsed as
+            // disclosure detail before item/completed replaces the snapshot.
+            let summaryIndex = paramsObject["summaryIndex"]?.intValue
+                ?? paramsObject["summary_index"]?.intValue
+                ?? eventObject?["summaryIndex"]?.intValue
+                ?? eventObject?["summary_index"]?.intValue
+                ?? 0
+            let embeddedDelta = extractTextDelta(from: paramsObject)
+            delta = "\(summaryIndex > 0 ? "\n\n" : "")\(embeddedDelta)"
+        } else {
+            delta = extractTextDelta(from: paramsObject)
+        }
         guard !delta.isEmpty else { return }
 
         let turnId = extractTurnID(from: paramsObject)
@@ -2075,6 +2288,7 @@ extension CodexService {
             || itemType.hasPrefix("collabagentinteraction")
             || itemType == "diff"
             || itemType == "plan"
+            || itemType == "todolist"
             || itemType == "enteredreviewmode"
             || itemType == "contextcompaction" else {
             return false
@@ -2093,6 +2307,8 @@ extension CodexService {
 
         let kind: CodexMessageKind
         let body: String
+        var planState: CodexPlanState? = nil
+        var isProgressPlanItem = false
         switch itemType {
         case "reasoning":
             kind = .thinking
@@ -2137,9 +2353,11 @@ extension CodexService {
             }
             kind = .fileChange
             body = resolvedBody
-        case "plan":
+        case "plan", "todolist":
             kind = .plan
             body = decodePlanItemBody(itemObject)
+            planState = decodePlanState(from: itemObject)
+            isProgressPlanItem = CodexPlanItemPresentationPolicy.isProgressItem(itemObject)
         case "enteredreviewmode":
             kind = .commandExecution
             let reviewLabel = firstNonEmptyString([
@@ -2163,13 +2381,30 @@ extension CodexService {
         }
 
         if kind == .plan {
+            guard CodexPlanUpdateVisibilityPolicy.shouldApply(
+                text: body,
+                planState: planState
+            ) else {
+                if isCompleted, !isProgressPlanItem {
+                    finalizeExistingPlanMessage(
+                        threadId: threadId,
+                        turnId: turnId,
+                        itemId: itemId
+                    )
+                }
+                return true
+            }
             upsertPlanMessage(
                 threadId: threadId,
                 turnId: turnId,
                 itemId: itemId,
                 text: body,
+                explanation: planState?.explanation,
+                steps: planState?.steps,
                 isStreaming: !isCompleted,
-                planPresentation: isCompleted ? .resultCompletedItem : .resultStreaming
+                planPresentation: isProgressPlanItem
+                    ? .progress
+                    : (isCompleted ? .resultCompletedItem : .resultStreaming)
             )
             return true
         }
@@ -2332,6 +2567,13 @@ extension CodexService {
         return "rpc notification \(method) thread=\(paramsObject?["threadId"]?.stringValue ?? "") turn=\(paramsObject?["turnId"]?.stringValue ?? "") item=\(itemId) nestedItem=\(nestedItemId) type=\(itemType) event=\(eventType) path=\(pathName) resultLen=\(resultLength)"
     }
 
+    private func debugNotificationItemType(paramsObject: IncomingParamsObject?) -> String {
+        let eventObject = paramsObject.flatMap { envelopeEventObject(from: $0) }
+        let itemObject = paramsObject.flatMap { extractIncomingItemObject(from: $0, eventObject: eventObject) }
+        let itemType = normalizedItemType(itemObject?["type"]?.stringValue ?? "")
+        return itemType.isEmpty ? "unknown" : itemType
+    }
+
     private func extractItemID(
         from paramsObject: IncomingParamsObject?,
         eventObject: IncomingParamsObject?,
@@ -2427,7 +2669,9 @@ extension CodexService {
             return summary
         }
 
-        return "Planning..."
+        // The lifecycle coordinator decides whether an empty item should be
+        // ignored or used to finalize an existing streamed plan row.
+        return ""
     }
 
     private func decodeFileChangeItemBody(_ itemObject: IncomingParamsObject) -> String {
@@ -3100,6 +3344,158 @@ extension CodexService {
     func isDesktopMirroredBridgeEvent(_ paramsObject: IncomingParamsObject?) -> Bool {
         paramsObject?["remodexDesktopMirror"]?.boolValue == true
             || paramsObject?["remodexRolloutLiveMirror"]?.boolValue == true
+    }
+
+    // Sidebar-only lifecycle emitted from Litter for a thread the phone has not
+    // opened. It may update run badges, but must not trigger eager history sync.
+    func isBackgroundDiscoveryBridgeEvent(_ paramsObject: IncomingParamsObject?) -> Bool {
+        paramsObject?["remodexBackgroundDiscovery"]?.boolValue == true
+    }
+
+    // Rollout-mirror bootstrap replays the active desktop run as tagged catch-up
+    // events, closed by an explicit bootstrap-complete marker.
+    func isRolloutBootstrapBridgeEvent(_ paramsObject: IncomingParamsObject?) -> Bool {
+        paramsObject?["remodexRolloutBootstrapReplay"]?.boolValue == true
+    }
+
+    func isRolloutBootstrapCompleteEvent(_ paramsObject: IncomingParamsObject?) -> Bool {
+        paramsObject?["remodexRolloutBootstrapComplete"]?.boolValue == true
+    }
+
+    // Bridge-sent transient marker that closes a buffered reconnect replay burst.
+    func isBufferedReplayCompleteEvent(_ paramsObject: IncomingParamsObject?) -> Bool {
+        paramsObject?["remodexBufferedReplayComplete"]?.boolValue == true
+    }
+
+    // A bounded bridge buffer can no longer provide a contiguous event stream.
+    // The bridge drops that partial tail; invalidate hydration and advance its
+    // declared watermark so canonical history, not orphaned deltas, repairs it.
+    func isBufferedReplayGapEvent(_ paramsObject: IncomingParamsObject?) -> Bool {
+        paramsObject?["remodexBufferedReplayGap"]?.boolValue == true
+    }
+
+    func isBufferedReplayResetEvent(_ paramsObject: IncomingParamsObject?) -> Bool {
+        paramsObject?["remodexBufferedReplayReset"]?.boolValue == true
+    }
+
+    func handleBufferedReplayReset(_ paramsObject: IncomingParamsObject?) {
+        guard let resetSequence = paramsObject?["resetBridgeOutboundSeqTo"]?.intValue else {
+            return
+        }
+        setBridgeOutboundReplayCursor(to: resetSequence)
+        if let replayEpoch = paramsObject?["bridgeReplayEpoch"]?.stringValue {
+            setBridgeReplayEpoch(to: replayEpoch)
+        }
+        markReplayDiscontinuityForCanonicalRefresh()
+    }
+
+    func handleBufferedReplayGap(_ paramsObject: IncomingParamsObject?) {
+        guard let discardedThrough = paramsObject?["lastDiscardedBridgeOutboundSeq"]?.intValue,
+              discardedThrough > lastAppliedBridgeOutboundSeq else {
+            return
+        }
+        advanceBridgeOutboundReplayCursor(to: discardedThrough)
+        markReplayDiscontinuityForCanonicalRefresh()
+    }
+
+    func markReplayDiscontinuityForCanonicalRefresh() {
+        clearHydrationCaches()
+        pendingCanonicalHistoryRefreshAfterReplayDiscontinuity = true
+        flushPendingReplayDiscontinuityHistoryRefresh()
+    }
+
+    func flushPendingReplayDiscontinuityHistoryRefresh() {
+        guard pendingCanonicalHistoryRefreshAfterReplayDiscontinuity,
+              isConnected,
+              isInitialized,
+              let threadId = activeThreadId else {
+            return
+        }
+        pendingCanonicalHistoryRefreshAfterReplayDiscontinuity = false
+        requestImmediateActiveThreadSync(threadId: threadId, forceHistoryRefresh: true)
+    }
+
+    // MARK: - Timeline catch-up burst coalescing
+
+    // Settles a live-mirror batch shortly after its last event: below the
+    // bridge's 250ms rollout poll interval so consecutive batches never merge,
+    // and above main-actor jitter so one batch settles once.
+    static let liveMirrorBatchFlushNanoseconds: UInt64 = 80_000_000
+
+    // While a catch-up burst applies (rollout bootstrap replay, buffered
+    // reconnect replay, or a live-mirror batch), refreshThreadTimelineState
+    // defers work; one flush happens on the completion marker, with a debounce
+    // fallback sized per burst kind for lost markers and live batches.
+    //
+    // `kind` separates the two burst flavors: replayed history must apply fully
+    // closed (no visible per-event churn), but live-mirror micro-bursts only
+    // coalesce the reducer rebuild - the assistant/system streaming fast paths
+    // keep patching the visible snapshot so mirrored text still streams instead
+    // of materializing as one block at settle.
+    func beginTimelineCatchUpBurst(
+        threadId: String,
+        flushFallbackNanoseconds: UInt64 = 500_000_000,
+        kind: TimelineCatchUpBurstKind = .replay
+    ) {
+        timelineCatchUpBurstThreadIDs.insert(threadId)
+        if kind == .replay {
+            replayCatchUpBurstThreadIDs.insert(threadId)
+        }
+        // A stray live event mid-replay must not shrink the replay burst's
+        // settle window: keep the replay fallback timer as scheduled instead of
+        // settling the backlog early on the live micro-burst's short debounce.
+        if kind == .liveMirror, replayCatchUpBurstThreadIDs.contains(threadId) {
+            return
+        }
+        scheduleTimelineCatchUpFlushFallback(
+            threadId: threadId,
+            delayNanoseconds: flushFallbackNanoseconds
+        )
+    }
+
+    func finishAllTimelineCatchUpBursts() {
+        for threadId in Array(timelineCatchUpBurstThreadIDs) {
+            finishTimelineCatchUpBurst(threadId: threadId)
+        }
+    }
+
+    func finishTimelineCatchUpBurst(threadId: String) {
+        timelineCatchUpFlushTaskByThreadID[threadId]?.cancel()
+        timelineCatchUpFlushTaskByThreadID[threadId] = nil
+        guard timelineCatchUpBurstThreadIDs.contains(threadId) else {
+            return
+        }
+        // Coalesced streaming deltas ride 16-50ms flush timers and can outlive the
+        // completion marker; apply them while the thread is still burst-gated so
+        // the single settle below contains the full catch-up content.
+        flushPendingAssistantDeltas(for: threadId)
+        flushPendingSystemDeltasForTurn(threadId: threadId, turnId: nil)
+        // The gated fast path also skipped its replay-duplicate removal; run the
+        // same dedup once over the settled data before rebuilding the snapshot.
+        pruneStreamingAssistantReplayRowsAfterCatchUp(threadId: threadId)
+        timelineCatchUpBurstThreadIDs.remove(threadId)
+        replayCatchUpBurstThreadIDs.remove(threadId)
+        // Always rebuild once: fast-path mutations during the burst can bump the
+        // message revision without passing through the gated refresh.
+        updateCurrentOutput(for: threadId)
+    }
+
+    // Debounced from the last observed catch-up event. Firing early is safe but
+    // wasteful (the next gated event re-opens the burst and a second settle
+    // follows), so windows are sized above realistic main-actor stalls while
+    // still settling quickly once the gated stream goes quiet.
+    private func scheduleTimelineCatchUpFlushFallback(
+        threadId: String,
+        delayNanoseconds: UInt64
+    ) {
+        timelineCatchUpFlushTaskByThreadID[threadId]?.cancel()
+        timelineCatchUpFlushTaskByThreadID[threadId] = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: delayNanoseconds)
+            guard !Task.isCancelled else {
+                return
+            }
+            self?.finishTimelineCatchUpBurst(threadId: threadId)
+        }
     }
 
     func extractThreadID(from paramsObject: IncomingParamsObject?) -> String? {

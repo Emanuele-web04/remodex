@@ -3,7 +3,7 @@
 // Layer: Turn UI rendering
 // Exports: StreamingAssistantMarkdownTextView
 // Depends on: Foundation, SwiftUI, MarkdownTextView, StreamingMarkdownBlockSplitter,
-//   StreamingMarkdownReveal, MarkdownTextFormatter
+//   StreamingMarkdownReveal, StreamingInlineMarkupAutoCloser, MarkdownTextFormatter
 
 import Foundation
 import SwiftUI
@@ -164,7 +164,12 @@ struct StreamingAssistantMarkdownTextView: View {
             return (cached, revision)
         }
         let position = Double(bucket) / StreamingMarkdownRevealPolicy.positionQuantization
-        let faded = Self.applyFrontierFade(to: activeAttributed, position: position, window: Double(window))
+        let faded = Self.applyFrontierFade(
+            to: activeAttributed,
+            totalCharacters: count,
+            position: position,
+            window: Double(window)
+        )
         fadeCache.store(faded, revision: activeRevision, bucket: bucket, window: window)
         return (faded, revision)
     }
@@ -255,10 +260,13 @@ struct StreamingAssistantMarkdownTextView: View {
     }
 
     // Adopts a new active block value: one parse per delta, skipped when unchanged.
+    // The parsed copy virtually closes unterminated inline spans (`code`, **bold**) so
+    // they render styled from the first character instead of flashing raw markers that
+    // collapse into styling when the real closer streams in.
     private func applyActiveBlock(_ active: String) {
         guard active != activeText else { return }
         activeText = active
-        activeAttributed = Self.parse(active)
+        activeAttributed = Self.parse(StreamingInlineMarkupAutoCloser.autoClosed(active))
         activeParsedCount = activeAttributed.characters.count
         activeRevision &+= 1
         // First active block kind drives the seam's top edge; cheap (first line only).
@@ -290,12 +298,15 @@ struct StreamingAssistantMarkdownTextView: View {
     // `position` is fractional and advances every display frame, so a character's alpha rises
     // smoothly over `window / velocity` seconds (a fixed fade time) instead of snapping on whole
     // crossings. Only the suffix is mutated; the opaque prefix keeps its original markdown styling.
+    // `totalCharacters` is the caller's cached count for `attributed` (an AttributedString
+    // character count is an O(n) walk, too costly to redo on every frontier step).
     private static func applyFrontierFade(
         to attributed: AttributedString,
+        totalCharacters: Int,
         position: Double,
         window: Double
     ) -> AttributedString {
-        let total = attributed.characters.count
+        let total = totalCharacters
         let clamped = min(max(position, 0), Double(total))
         guard clamped < Double(total) else { return attributed }
 

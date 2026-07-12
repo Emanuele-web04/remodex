@@ -61,6 +61,58 @@ final class TurnMessageCachesTests: XCTestCase {
         )
     }
 
+    func testMarkdownFormatterKeepsFencedCodeVerbatim() {
+        let raw = """
+        # Steps
+
+        ```bash
+        # install deps
+        npm install
+        ```
+        """
+
+        let rendered = MarkdownTextFormatter.renderableText(
+            from: raw,
+            profile: .assistantProse,
+            usesCache: false
+        )
+
+        XCTAssertTrue(rendered.hasPrefix("**Steps**"))
+        XCTAssertTrue(rendered.contains("# install deps"))
+        XCTAssertFalse(rendered.contains("**install deps**"))
+    }
+
+    func testMarkdownFormatterKeepsTildeFencedCodeVerbatim() {
+        let raw = """
+        # Steps
+
+        ~~~bash
+        # install deps
+        npm install
+        ~~~
+        """
+
+        let rendered = MarkdownTextFormatter.renderableText(
+            from: raw,
+            profile: .userProse,
+            usesCache: false
+        )
+
+        XCTAssertTrue(rendered.hasPrefix("**Steps**"))
+        XCTAssertTrue(rendered.contains("# install deps"))
+        XCTAssertFalse(rendered.contains("**install deps**"))
+    }
+
+    func testMarkdownFormatterUserProseSkipsFilePathLinkification() {
+        let rendered = MarkdownTextFormatter.renderableText(
+            from: "please check `phodex-bridge/test/secure-transport.test.js` again",
+            profile: .userProse,
+            usesCache: false
+        )
+
+        XCTAssertEqual(rendered, "please check `phodex-bridge/test/secure-transport.test.js` again")
+    }
+
     func testStableTextFingerprintChangesForUnsampledTextEdits() {
         let prefix = String(repeating: "a", count: 48)
         let suffix = String(repeating: "z", count: 48)
@@ -114,6 +166,27 @@ final class TurnMessageCachesTests: XCTestCase {
 
         XCTAssertEqual(running.commandStatus?.statusLabel, "running")
         XCTAssertEqual(stopped.commandStatus?.statusLabel, "stopped")
+    }
+
+    func testSummaryOnlyThinkingRenderModelKeepsVisibleTitleWithoutActivityFallback() throws {
+        let rawText = "**Planning targeted test execution**\n\n<!-- -->"
+        let message = CodexMessage(
+            id: "thinking-summary-only",
+            threadId: "thread-1",
+            role: .system,
+            kind: .thinking,
+            text: rawText,
+            isStreaming: false
+        )
+
+        let model = MessageRowRenderModelCache.model(for: message, displayText: rawText)
+        let content = try XCTUnwrap(model.thinkingContent)
+
+        XCTAssertEqual(model.thinkingText, rawText)
+        XCTAssertNil(model.thinkingActivityPreview)
+        XCTAssertTrue(content.isSummaryOnly)
+        XCTAssertEqual(content.sections.map(\.title), ["Planning targeted test execution"])
+        XCTAssertEqual(content.sections.map(\.detail), [""])
     }
 
     func testCommandExecutionStatusCacheSeparatesEqualLengthTexts() {

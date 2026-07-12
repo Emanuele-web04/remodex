@@ -6,12 +6,14 @@
 
 const { readLatestContextWindowUsage } = require("./rollout-watch");
 
-function handleThreadContextRequest(rawMessage, sendResponse) {
-  let parsed;
-  try {
-    parsed = JSON.parse(rawMessage);
-  } catch {
-    return false;
+function handleThreadContextRequest(rawMessage, sendResponse, parsedMessage = null) {
+  let parsed = parsedMessage;
+  if (!parsed) {
+    try {
+      parsed = JSON.parse(rawMessage);
+    } catch {
+      return false;
+    }
   }
 
   const method = typeof parsed?.method === "string" ? parsed.method.trim() : "";

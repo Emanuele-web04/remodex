@@ -46,8 +46,8 @@ function createPushNotificationTracker({
 
   // ─── ENTRY POINT ─────────────────────────────────────────────
 
-  function handleOutbound(rawMessage) {
-    const message = parseOutboundMessage(rawMessage);
+  function handleOutbound(rawMessage, parsedMessage = null) {
+    const message = parseOutboundMessage(rawMessage, parsedMessage);
     if (!message) {
       return;
     }
@@ -115,25 +115,24 @@ function createPushNotificationTracker({
       return;
     }
 
-    const previousStatus = goalStatusByThreadId.get(resolvedThreadId);
+    const previousSnapshot = normalizeGoalPushSnapshot(goalStatusByThreadId.get(resolvedThreadId));
+    const nextSnapshot = {
+      status,
+      updatedAt: goal?.updatedAt ?? goal?.updated_at ?? null,
+    };
     if (!goalStatusByThreadId.has(resolvedThreadId) && goalStatusByThreadId.size >= MAX_GOAL_STATUS_ENTRIES) {
       const oldest = goalStatusByThreadId.keys().next().value;
       goalStatusByThreadId.delete(oldest);
     }
-    goalStatusByThreadId.set(resolvedThreadId, status);
-    if (previousStatus !== status) {
-      saveGoalPushState(goalPushStatePath, goalStatusByThreadId, logPrefix);
-    }
-
-    if (!pushServiceClient?.hasConfiguredBaseUrl) {
-      return;
-    }
-    if (previousStatus === undefined || previousStatus === status) {
-      return;
-    }
-
+    const isFirstObservation = previousSnapshot == null;
+    const isDuplicate = previousSnapshot?.status === nextSnapshot.status
+      && previousSnapshot?.updatedAt === nextSnapshot.updatedAt;
     const body = GOAL_PUSH_BODIES.get(status);
-    if (!body) {
+    if (isFirstObservation || isDuplicate || !body || !pushServiceClient?.hasConfiguredBaseUrl) {
+      if (!isDuplicate) {
+        goalStatusByThreadId.set(resolvedThreadId, nextSnapshot);
+        saveGoalPushState(goalPushStatePath, goalStatusByThreadId, logPrefix);
+      }
       return;
     }
 
@@ -149,6 +148,10 @@ function createPushNotificationTracker({
         // updatedAt keeps repeated legitimate transitions (blocked -> active -> blocked) notifiable.
         dedupeKey: [sessionId || "", resolvedThreadId, "goal", status, goal?.updatedAt ?? ""].join("|"),
       });
+      // Commit the dedupe cursor only after delivery succeeds so a repeated
+      // app-server snapshot can retry a transient push outage.
+      goalStatusByThreadId.set(resolvedThreadId, nextSnapshot);
+      saveGoalPushState(goalPushStatePath, goalStatusByThreadId, logPrefix);
     } catch (error) {
       console.error(`${logPrefix} goal push notify failed: ${error.message}`);
     }
@@ -366,7 +369,8 @@ function loadGoalPushState(filePath, logPrefix) {
       return new Map();
     }
     const entries = Object.entries(parsed)
-      .filter(([threadId, status]) => typeof threadId === "string" && typeof status === "string")
+      .map(([threadId, snapshot]) => [threadId, normalizeGoalPushSnapshot(snapshot)])
+      .filter(([threadId, snapshot]) => typeof threadId === "string" && snapshot != null)
       .slice(-MAX_GOAL_STATUS_ENTRIES);
     return new Map(entries);
   } catch (error) {
@@ -375,6 +379,19 @@ function loadGoalPushState(filePath, logPrefix) {
     }
     return new Map();
   }
+}
+
+function normalizeGoalPushSnapshot(value) {
+  if (typeof value === "string") {
+    return { status: value, updatedAt: null };
+  }
+  if (!value || typeof value !== "object" || typeof value.status !== "string") {
+    return null;
+  }
+  return {
+    status: value.status,
+    updatedAt: value.updatedAt ?? null,
+  };
 }
 
 function saveGoalPushState(filePath, goalStatusByThreadId, logPrefix) {
@@ -391,8 +408,8 @@ function saveGoalPushState(filePath, goalStatusByThreadId, logPrefix) {
 }
 
 // Normalizes the message envelope once so downstream helpers can share the same parsed view.
-function parseOutboundMessage(rawMessage) {
-  const parsed = safeParseJSON(rawMessage);
+function parseOutboundMessage(rawMessage, parsedMessage = null) {
+  const parsed = parsedMessage ?? safeParseJSON(rawMessage);
   if (!parsed || typeof parsed.method !== "string") {
     return null;
   }

@@ -132,6 +132,10 @@ extension CodexService {
             } catch let error as CodexThreadGoalError where error == .goalsUnsupported {
                 // Old runtime: sendGoalRequest already lowered the flag; stop probing.
                 return
+            } catch let error as CodexThreadGoalError where error == .ephemeralThread {
+                // One temporary thread must not prevent later persisted threads from hydrating.
+                goalByThreadID.removeValue(forKey: threadId)
+                continue
             } catch {
                 // Transient failure: stop the pass quietly; the next connect retries.
                 debugRuntimeLog("thread goal hydration stopped: \(error.localizedDescription)")

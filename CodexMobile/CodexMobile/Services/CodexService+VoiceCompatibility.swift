@@ -33,7 +33,7 @@ extension CodexService {
 
     // Normalizes voice failures from the recorder, bridge RPC, and transcription API into UI-friendly buckets.
     func classifyVoiceFailure(_ error: Error) -> CodexVoiceFailureReason {
-        if !supportsBridgeVoiceTranscription || shouldTreatAsUnsupportedVoiceBridgeMethod(error) {
+        if shouldTreatAsUnsupportedVoiceBridgeMethod(error) {
             return .bridgeSessionUnsupported
         }
 

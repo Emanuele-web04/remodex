@@ -158,8 +158,11 @@ private struct CodexManualWebSocketEndpoint {
     let scheme: String
 }
 
-nonisolated private func codexLogPairingTransport(_ message: String) {
+nonisolated private func codexLogPairingTransport(_ message: String, isFailure: Bool = false) {
+    #if DEBUG
+    guard isFailure || AppEnvironment.verboseDiagnosticsEnabled else { return }
     print("[PAIRING] \(message)")
+    #endif
 }
 
 extension CodexService {
@@ -798,7 +801,10 @@ extension CodexService {
             try await delegate.waitForOpen()
             codexLogPairingTransport("URLSessionWebSocketTask connected")
         } catch {
-            codexLogPairingTransport("URLSessionWebSocketTask failed: \(urlSessionWebSocketDebugDescription(for: error))")
+            codexLogPairingTransport(
+                "URLSessionWebSocketTask failed: \(urlSessionWebSocketDebugDescription(for: error))",
+                isFailure: true
+            )
             task.cancel(with: .goingAway, reason: nil)
             session.invalidateAndCancel()
             webSocketSessionDelegate = nil
@@ -893,7 +899,10 @@ extension CodexService {
                 case .waiting(let error):
                     waitState.recordWaitingError(error)
                 case .failed(let error):
-                    codexLogPairingTransport("\(configuration.logLabel) failed: \(error)")
+                    codexLogPairingTransport(
+                        "\(configuration.logLabel) failed: \(error)",
+                        isFailure: true
+                    )
                     waitState.finish(.failure(error))
                 case .cancelled:
                     waitState.finish(.failure(CodexServiceError.disconnected))
@@ -907,7 +916,10 @@ extension CodexService {
                 try? await Task.sleep(nanoseconds: configuration.timeoutNanoseconds)
                 guard !Task.isCancelled else { return }
                 let timeoutError = CodexServiceError.invalidInput(configuration.timeoutMessage)
-                codexLogPairingTransport(waitState.timeoutLogMessage(label: configuration.logLabel))
+                codexLogPairingTransport(
+                    waitState.timeoutLogMessage(label: configuration.logLabel),
+                    isFailure: true
+                )
                 waitState.finish(.failure(timeoutError))
                 connection?.cancel()
             }

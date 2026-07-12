@@ -9,10 +9,13 @@
 //
 // Design notes
 // ------------
-// * Top-level menu has three submenus: Model, Intelligence, Speed. Each parent
-//   carries `subtitle:` (current selection) so the row renders as the
-//   "Label / Value / >" pill you see in the screenshot.
-// * Submenus use `UIMenu.Options.singleSelection` so UIKit draws/clears the
+// * Intelligence (reasoning effort) is surfaced inline at the top of the menu
+//   so every level is directly selectable without drilling into a submenu. It
+//   is a `.displayInline` group whose `title` renders as the "Intelligence"
+//   section header, followed by Model and Speed as "Label / Value / >" submenus.
+// * Model and Speed submenus carry `subtitle:` (current selection) so the row
+//   renders as the "Label / Value / >" pill you see in the screenshot.
+// * Menus use `UIMenu.Options.singleSelection` so UIKit draws/clears the
 //   checkmarks for us. We pass `.on` for the active item as a hint; UIKit
 //   reconciles state when singleSelection is set.
 // * Long model lists keep the existing "featured + Other models…" split so the
@@ -36,16 +39,22 @@ enum TurnComposerRuntimeUIKitMenuBuilder {
     }
 
     static func makeMenu(_ input: Input) -> UIMenu {
+        // The pill lives in the composer bottom bar, so UIKit anchors the menu
+        // above the button and lays it out in `.priority` order: the first child
+        // renders closest to the button (at the BOTTOM), so the array is
+        // effectively reversed on screen. Author the children in reverse of the
+        // desired top-to-bottom order — Speed, Model, Intelligence — so the menu
+        // reads Intelligence → Model → Speed from the top.
         var children: [UIMenuElement] = []
+
+        if let speedMenu = speedMenu(input) {
+            children.append(speedMenu)
+        }
 
         children.append(modelMenu(input))
 
         if let intelligenceMenu = intelligenceMenu(input) {
             children.append(intelligenceMenu)
-        }
-
-        if let speedMenu = speedMenu(input) {
-            children.append(speedMenu)
         }
 
         return UIMenu(title: "", options: [.displayInline], children: children)
@@ -108,7 +117,7 @@ enum TurnComposerRuntimeUIKitMenuBuilder {
     private static func modelAction(model: CodexModelOption, input: Input) -> UIAction {
         let title = TurnComposerMetaMapper.modelTitle(for: model)
         let image: UIImage? = model.supportsServiceTier(.fast)
-            ? UIImage(systemName: CodexServiceTier.fast.iconName)
+            ? RemodexIcon.menuUIImage(systemName: CodexServiceTier.fast.iconName)
             : nil
 
         return UIAction(
@@ -144,6 +153,9 @@ enum TurnComposerRuntimeUIKitMenuBuilder {
 
     // MARK: - Intelligence (reasoning effort)
 
+    // Surfaced inline (not a submenu) so the reasoning levels are selectable
+    // directly from the top of the runtime menu. The inline group's title
+    // renders as the "Intelligence" section header above the options.
     private static func intelligenceMenu(_ input: Input) -> UIMenu? {
         let options = input.runtimeState.reasoningDisplayOptions
         guard !options.isEmpty else { return nil }
@@ -164,9 +176,7 @@ enum TurnComposerRuntimeUIKitMenuBuilder {
 
         return UIMenu(
             title: "Intelligence",
-            subtitle: input.runtimeState.selectedReasoningTitle,
-            image: RemodexIcon.menuUIImage(systemName: "brain"),
-            options: [.singleSelection],
+            options: [.displayInline, .singleSelection],
             children: actions
         )
     }
@@ -187,11 +197,7 @@ enum TurnComposerRuntimeUIKitMenuBuilder {
         let tierActions: [UIMenuElement] = CodexServiceTier.allCases.map { tier in
             UIAction(
                 title: tier.displayName,
-                // Keep the Fast tier on the native SF bolt to match the speed
-                // badge in the composer; other tiers can use Central artwork.
-                image: tier == .fast
-                    ? UIImage(systemName: tier.iconName)
-                    : RemodexIcon.menuUIImage(systemName: tier.iconName),
+                image: RemodexIcon.menuUIImage(systemName: tier.iconName),
                 state: input.runtimeState.isSelectedServiceTier(tier) ? .on : .off
             ) { _ in
                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
@@ -209,7 +215,7 @@ enum TurnComposerRuntimeUIKitMenuBuilder {
         return UIMenu(
             title: "Speed",
             subtitle: subtitle,
-            image: UIImage(systemName: "bolt.fill"),
+            image: RemodexIcon.menuUIImage(systemName: "bolt.fill"),
             options: [.singleSelection],
             children: [normalAction] + tierActions
         )

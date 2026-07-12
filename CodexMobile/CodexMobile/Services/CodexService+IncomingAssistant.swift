@@ -9,6 +9,7 @@ import Foundation
 private struct AssistantEventIdentity {
     let turnId: String?
     let itemId: String?
+    let sourceItemKey: String?
     let phase: String?
 }
 
@@ -31,11 +32,17 @@ extension CodexService {
         // Late/replayed deltas for finished turns still merge into closed rows via
         // applyLateTerminalAssistantDelta, but they must never revive running UI.
         let isReplayedEvent = isReplayedBridgeEvent(paramsObject)
+        // Rollout bootstrap catch-up (scoped via isApplyingReplayedBridgeEvent) keeps
+        // the thread running but must append text as closed history, not streaming.
+        let appliesAsReplay = isReplayedEvent || isApplyingReplayedBridgeEvent
 
         if let directThreadId = extractThreadID(from: paramsObject),
            !directThreadId.isEmpty,
            !isReplayedEvent,
-           turnTerminalState(for: extractTurnID(from: paramsObject)) == nil {
+           turnTerminalState(
+               for: extractTurnID(from: paramsObject),
+               threadId: directThreadId
+           ) == nil {
             markThreadAsRunning(directThreadId)
         }
 
@@ -48,7 +55,8 @@ extension CodexService {
             return
         }
 
-        if !isReplayedEvent, turnTerminalState(for: turnId) == nil {
+        if !isReplayedEvent,
+           turnTerminalState(for: turnId, threadId: context.threadId) == nil {
             markThreadAsRunning(context.threadId)
             if activeTurnID(for: context.threadId) == nil {
                 setActiveTurnID(turnId, for: context.threadId)
@@ -64,7 +72,7 @@ extension CodexService {
             itemId: context.identity.itemId,
             assistantPhase: context.identity.phase,
             delta: delta,
-            isReplay: isReplayedEvent
+            isReplay: appliesAsReplay
         )
     }
 
@@ -86,12 +94,17 @@ extension CodexService {
         ])
         guard let text else { return }
         let createdAt = decodeHistoryTimestamp(from: paramsObject)
+        let itemId = firstNonEmptyString([
+            paramsObject["itemId"]?.stringValue,
+            paramsObject["id"]?.stringValue,
+        ])
 
         markMirroredRunningCatchupNeeded(for: threadId)
         appendConfirmedMirroredUserMessage(
             threadId: threadId,
             turnId: turnId,
             text: text,
+            itemId: itemId,
             createdAt: createdAt
         )
     }
@@ -121,10 +134,25 @@ extension CodexService {
                 eventObject: eventObject,
                 itemObject: nil
             )
+            let appliesAsReplay = isReplayedBridgeEvent(paramsObject) || isApplyingReplayedBridgeEvent
+            if !appliesAsReplay,
+               isDesktopMirroredBridgeEvent(paramsObject),
+               let turnId {
+                appendAssistantDelta(
+                    threadId: context.threadId,
+                    turnId: turnId,
+                    itemId: context.identity.itemId,
+                    assistantPhase: context.identity.phase,
+                    delta: text,
+                    isReplay: false
+                )
+                return
+            }
             completeAssistantMessage(
                 threadId: context.threadId,
                 turnId: turnId,
                 itemId: context.identity.itemId,
+                sourceItemKey: context.identity.sourceItemKey,
                 assistantPhase: context.identity.phase,
                 text: text
             )
@@ -132,6 +160,16 @@ extension CodexService {
         }
 
         let itemType = normalizedItemType(itemObject["type"]?.stringValue ?? "")
+        // Non-active Desktop turns mirror user prompts through item/completed only
+        // (no item/started), so the prompt must upsert from here as well.
+        if handleMirroredUserMessageItem(
+            itemObject: itemObject,
+            paramsObject: paramsObject,
+            itemType: itemType
+        ) {
+            return
+        }
+
         if isCompletedGeneratedImageItemType(itemType) {
             appendCompletedGeneratedImageItem(
                 itemObject: itemObject,
@@ -164,6 +202,7 @@ extension CodexService {
                 threadId: context.threadId,
                 turnId: context.identity.turnId,
                 itemId: context.identity.itemId,
+                sourceItemKey: context.identity.sourceItemKey,
                 assistantPhase: context.identity.phase,
                 text: text
             )
@@ -195,6 +234,7 @@ extension CodexService {
             threadId: context.threadId,
             turnId: turnId,
             itemId: context.identity.itemId,
+            sourceItemKey: context.identity.sourceItemKey,
             assistantPhase: context.identity.phase,
             text: text
         )
@@ -257,8 +297,13 @@ extension CodexService {
             return
         }
 
+        let lifecycleTurnID = extractTurnID(from: paramsObject)
+        let lifecycleThreadID = resolveThreadID(
+            from: paramsObject,
+            turnIdHint: lifecycleTurnID
+        )
         // Replayed item lifecycle events for finished turns must not revive running UI.
-        if turnTerminalState(for: extractTurnID(from: paramsObject)) != nil {
+        if turnTerminalState(for: lifecycleTurnID, threadId: lifecycleThreadID) != nil {
             return
         }
 
@@ -273,6 +318,14 @@ extension CodexService {
         }
 
         let itemType = normalizedItemType(itemObject["type"]?.stringValue ?? "")
+        if handleMirroredUserMessageItem(
+            itemObject: itemObject,
+            paramsObject: paramsObject,
+            itemType: itemType
+        ) {
+            return
+        }
+
         if handleStructuredItemLifecycle(
             itemObject: itemObject,
             paramsObject: paramsObject,
@@ -327,6 +380,48 @@ extension CodexService {
 }
 
 private extension CodexService {
+    // Upserts Desktop-mirrored user prompts delivered as item lifecycle events
+    // (item/started for active turns, item/completed for non-active ones).
+    func handleMirroredUserMessageItem(
+        itemObject: IncomingParamsObject,
+        paramsObject: IncomingParamsObject,
+        itemType: String
+    ) -> Bool {
+        guard isDesktopMirroredBridgeEvent(paramsObject) else {
+            return false
+        }
+
+        let role = itemObject["role"]?.stringValue?.lowercased() ?? ""
+        let isUserMessage = itemType == "usermessage"
+            || (itemType == "message" && role.contains("user"))
+        guard isUserMessage else {
+            return false
+        }
+
+        let turnId = extractTurnID(from: paramsObject)
+        guard let threadId = resolveThreadID(from: paramsObject, turnIdHint: turnId) else {
+            return true
+        }
+        if let turnId {
+            threadIdByTurnID[turnId] = threadId
+        }
+
+        let text = extractIncomingMessageText(from: itemObject)
+        guard !text.isEmpty else {
+            return true
+        }
+
+        markMirroredRunningCatchupNeeded(for: threadId)
+        appendConfirmedMirroredUserMessage(
+            threadId: threadId,
+            turnId: turnId,
+            text: text,
+            itemId: itemObject["id"]?.stringValue,
+            createdAt: decodeHistoryTimestamp(from: paramsObject)
+        )
+        return true
+    }
+
     // Extracts assistant delta text across stable + legacy codex/event envelopes.
     func extractAssistantDeltaText(
         from paramsObject: IncomingParamsObject,
@@ -360,12 +455,33 @@ private extension CodexService {
         return AssistantEventIdentity(
             turnId: turnId,
             itemId: itemId,
+            sourceItemKey: extractRemodexSourceItemKey(
+                paramsObject: paramsObject,
+                eventObject: eventObject,
+                itemObject: itemObject
+            ),
             phase: extractAssistantPhase(
                 paramsObject: paramsObject,
                 eventObject: eventObject,
                 itemObject: itemObject
             )
         )
+    }
+
+    // The local bridge derives this from the source turn plus message content. It is not a
+    // provider id and is used only to reconcile the same assistant item across source handoffs.
+    func extractRemodexSourceItemKey(
+        paramsObject: IncomingParamsObject,
+        eventObject: IncomingParamsObject?,
+        itemObject: IncomingParamsObject?
+    ) -> String? {
+        firstNonEmptyString([
+            paramsObject["remodexSourceItemKey"]?.stringValue,
+            eventObject?["remodexSourceItemKey"]?.stringValue,
+            itemObject?["remodexSourceItemKey"]?.stringValue,
+            paramsObject["item"]?.objectValue?["remodexSourceItemKey"]?.stringValue,
+            eventObject?["item"]?.objectValue?["remodexSourceItemKey"]?.stringValue,
+        ])
     }
 
     // Resolves assistant event context and preserves turn->thread mapping when available.

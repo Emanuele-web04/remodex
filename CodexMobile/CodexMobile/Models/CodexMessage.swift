@@ -73,6 +73,9 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
     var timeZoneIdentifier: String?
     var turnId: String?
     var itemId: String?
+    // Bridge-provided, turn-scoped semantic alias. Unlike itemId it survives a
+    // rollout/JSONL event being re-emitted later with Codex's provider id.
+    var sourceItemKey: String?
     var isStreaming: Bool
     var deliveryState: CodexMessageDeliveryState
     var attachments: [CodexImageAttachment]
@@ -100,6 +103,7 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
         timeZoneIdentifier: String? = nil,
         turnId: String? = nil,
         itemId: String? = nil,
+        sourceItemKey: String? = nil,
         isStreaming: Bool = false,
         deliveryState: CodexMessageDeliveryState = .confirmed,
         attachments: [CodexImageAttachment] = [],
@@ -124,6 +128,7 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
         self.timeZoneIdentifier = Self.validatedTimeZoneIdentifier(timeZoneIdentifier)
         self.turnId = turnId
         self.itemId = itemId
+        self.sourceItemKey = sourceItemKey
         self.isStreaming = isStreaming
         self.deliveryState = deliveryState
         self.attachments = attachments
@@ -163,6 +168,7 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
         case timeZoneIdentifier
         case turnId
         case itemId
+        case sourceItemKey
         case isStreaming
         case deliveryState
         case attachments
@@ -192,6 +198,7 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
         )
         turnId = try container.decodeIfPresent(String.self, forKey: .turnId)
         itemId = try container.decodeIfPresent(String.self, forKey: .itemId)
+        sourceItemKey = try container.decodeIfPresent(String.self, forKey: .sourceItemKey)
         isStreaming = try container.decodeIfPresent(Bool.self, forKey: .isStreaming) ?? false
         deliveryState = try container.decodeIfPresent(CodexMessageDeliveryState.self, forKey: .deliveryState) ?? .confirmed
         attachments = try container.decodeIfPresent([CodexImageAttachment].self, forKey: .attachments) ?? []
@@ -237,6 +244,7 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
         try container.encodeIfPresent(timeZoneIdentifier, forKey: .timeZoneIdentifier)
         try container.encodeIfPresent(turnId, forKey: .turnId)
         try container.encodeIfPresent(itemId, forKey: .itemId)
+        try container.encodeIfPresent(sourceItemKey, forKey: .sourceItemKey)
         try container.encode(isStreaming, forKey: .isStreaming)
         try container.encode(deliveryState, forKey: .deliveryState)
         try container.encode(attachments, forKey: .attachments)
@@ -287,6 +295,7 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
             && lhs.timeZoneIdentifier == rhs.timeZoneIdentifier
             && lhs.turnId == rhs.turnId
             && lhs.itemId == rhs.itemId
+            && lhs.sourceItemKey == rhs.sourceItemKey
             && lhs.isStreaming == rhs.isStreaming
             && lhs.deliveryState == rhs.deliveryState
             && lhs.attachments == rhs.attachments
@@ -312,6 +321,7 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
         hasher.combine(timeZoneIdentifier)
         hasher.combine(turnId)
         hasher.combine(itemId)
+        hasher.combine(sourceItemKey)
         hasher.combine(isStreaming)
         hasher.combine(deliveryState)
         hasher.combine(attachments)

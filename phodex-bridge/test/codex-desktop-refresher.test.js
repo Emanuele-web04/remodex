@@ -114,6 +114,8 @@ test("readBridgeConfig keeps safe defaults and explicit overrides", () => {
     env: {
       REMODEX_REFRESH_COMMAND: "echo refresh",
       REMODEX_REFRESH_ENABLED: "false",
+      REMODEX_DESKTOP_IPC_LIVE_SYNC: "false",
+      REMODEX_DESKTOP_IPC_SNAPSHOT_DEBOUNCE_MS: "25",
       REMODEX_KEEP_MAC_AWAKE: "false",
     },
     platform: "darwin",
@@ -129,6 +131,8 @@ test("readBridgeConfig keeps safe defaults and explicit overrides", () => {
   assert.equal(macConfig.keepMacAwakeEnabled, false);
   assert.equal(macConfig.relayUrl, "");
   assert.equal(macConfig.pushServiceUrl, "");
+  assert.equal(macConfig.desktopIpcLiveSyncEnabled, true);
+  assert.equal(macConfig.desktopIpcSnapshotDebounceMs, 75);
   assert.equal(persistedKeepAwakeConfig.keepMacAwakeEnabled, false);
   assert.equal(macEndpointConfig.refreshEnabled, false);
   assert.equal(linuxConfig.refreshEnabled, false);
@@ -136,6 +140,8 @@ test("readBridgeConfig keeps safe defaults and explicit overrides", () => {
   assert.equal(explicitOnConfig.refreshEnabled, true);
   assert.equal(explicitOnConfig.desktopIpcSocketPath, "/tmp/remodex-ipc.sock");
   assert.equal(explicitOffConfig.refreshEnabled, false);
+  assert.equal(explicitOffConfig.desktopIpcLiveSyncEnabled, false);
+  assert.equal(explicitOffConfig.desktopIpcSnapshotDebounceMs, 25);
   assert.equal(explicitOffConfig.keepMacAwakeEnabled, false);
 });
 
@@ -302,6 +308,49 @@ test("thread/started cancels the fallback and refreshes the concrete thread rout
 
   refresher.handleTransportReset();
   assert.equal(stopCount, 1);
+});
+
+test("navigation-only mode refreshes phone turn starts but skips watchers and completion refreshes", async () => {
+  const refreshCalls = [];
+  const watchedThreads = [];
+  const refresher = new CodexDesktopRefresher({
+    enabled: true,
+    navigationOnly: true,
+    debounceMs: 0,
+    refreshExecutor: async (targetUrl) => {
+      refreshCalls.push(targetUrl);
+    },
+    watchThreadRolloutFactory: ({ threadId }) => {
+      watchedThreads.push(threadId);
+      return { stop() {} };
+    },
+  });
+
+  refresher.handleInbound(JSON.stringify({
+    method: "turn/start",
+    params: {
+      threadId: "thread-nav-only",
+      input: [{ type: "text", text: "hello" }],
+    },
+  }));
+  await waitFor(() => refreshCalls.length === 1);
+
+  refresher.handleOutbound(JSON.stringify({
+    method: "turn/completed",
+    params: {
+      turn: {
+        id: "turn-nav-1",
+        threadId: "thread-nav-only",
+      },
+    },
+  }));
+  await wait(25);
+
+  // One navigation deep link for the phone turn; no rollout watcher and no
+  // completion-driven refresh because IPC live sync owns content updates.
+  assert.deepEqual(refreshCalls, ["codex://threads/thread-nav-only"]);
+  assert.deepEqual(watchedThreads, []);
+  refresher.handleTransportReset();
 });
 
 test("rollout growth refreshes are throttled during long runs", async () => {

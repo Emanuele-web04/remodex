@@ -76,6 +76,9 @@ struct MarkdownTextView: View {
     var constrainsToAvailableWidth: Bool = false
     var usesCaches: Bool = true
     var usesScrollableCodeBlocks: Bool = false
+    // Overrides the accent-derived link color, e.g. inside tinted user bubbles
+    // where the accent palette can match the bubble background.
+    var linkColor: Color? = nil
 
     @Environment(\.colorScheme) private var colorScheme
     @AppStorage(UserBubbleColor.storageKey)
@@ -97,13 +100,13 @@ struct MarkdownTextView: View {
             return (markup, parser)
         }()
         // Keep prose on the app font, but let RemodexTextKit own markdown/code layout to avoid block sizing regressions.
-        // RemodexTextKit intentionally keeps the `.textual` namespace for its SwiftUI modifiers.
+        // RemodexTextKit exposes its SwiftUI modifiers under the `.remodex` namespace.
         // Default code-block overflow to wrap so horizontal ScrollViews
         // inside the timeline do not compete with the sidebar swipe gesture or let
         // the chat feel like a pannable canvas. Modal detail views can opt into scroll.
         let baseView = StructuredText(resolved.markup, parser: resolved.parser)
             .font(AppFont.body())
-            .textual.codeBlockStyle(
+            .remodex.codeBlockStyle(
                 .default(
                     actionIcons: .init(
                         copy: .custom {
@@ -118,24 +121,26 @@ struct MarkdownTextView: View {
                     )
                 )
             )
-            .textual.inlineStyle(markdownInlineStyle)
-            .textual.structuredTextStyle(.default)
-            .textual.overflowMode(usesScrollableCodeBlocks ? .scroll : .wrap)
+            .remodex.inlineStyle(markdownInlineStyle)
+            .remodex.structuredTextStyle(.default)
+            .remodex.overflowMode(usesScrollableCodeBlocks ? .scroll : .wrap)
 
         let renderedContent = Group {
             if enablesSelection {
                 baseView
-                    .textual.textSelection(.enabled)
+                    .remodex.textSelection(.enabled)
             } else {
                 baseView
             }
         }
 
         if constrainsToAvailableWidth {
+            // No .clipped() here: UIKit selection handles (the round grabbers) paint a few
+            // points outside the text bounds and would get cut. Width containment is already
+            // enforced by the frame + fixedSize pair and by the timeline-level clip.
             renderedContent
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
-                .clipped()
         } else {
             renderedContent
         }
@@ -150,6 +155,9 @@ struct MarkdownTextView: View {
     }
 
     private var markdownLinkColor: Color {
+        if let linkColor {
+            return linkColor
+        }
         let palette = (UserBubbleColor(rawValue: userBubbleColorRawValue) ?? .default).ctaPalette
         return palette.bubbleBackground(for: colorScheme)
     }

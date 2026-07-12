@@ -1,10 +1,83 @@
 // FILE: QueuedDraftsPanel.swift
-// Purpose: Displays queued message drafts in a compact composer-adjacent card with steer/delete controls.
+// Purpose: Displays queued message drafts as a compact carousel capsule that opens a sheet with steer/delete controls.
 // Layer: View Component
-// Exports: QueuedDraftsPanel
-// Depends on: SwiftUI, QueuedTurnDraft, AppFont, HapticFeedback
+// Exports: QueuedDraftsPanel, QueuedStatusCapsule, QueuedDraftsSheet
+// Depends on: SwiftUI, QueuedTurnDraft, AppFont, HapticFeedback, GlassStatusPill
 
 import SwiftUI
+
+/// Compact carousel capsule summarizing queued follow-ups next to the plan pill.
+struct QueuedStatusCapsule: View {
+    let count: Int
+    let onTap: () -> Void
+
+    var body: some View {
+        Button {
+            HapticFeedback.shared.triggerImpactFeedback(style: .light)
+            onTap()
+        } label: {
+            GlassStatusPill {
+                Text("Queued")
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
+
+                Text("\(count)")
+                    .font(AppFont.caption())
+                    .foregroundStyle(.primary.opacity(0.78))
+                    .fixedSize()
+            }
+        }
+        .buttonStyle(.plain)
+        .fixedSize()
+        .accessibilityLabel("Queued messages")
+        .accessibilityValue("\(count)")
+        .accessibilityHint("Shows the queued follow-ups in a sheet")
+    }
+}
+
+/// Sheet presentation of the queued drafts with the full restore/steer/delete controls.
+struct QueuedDraftsSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    let drafts: [QueuedTurnDraft]
+    let canSteerDrafts: Bool
+    let canRestoreDrafts: Bool
+    let steeringDraftID: String?
+    let onRestore: (String) -> Void
+    let onSteer: (String) -> Void
+    let onRemove: (String) -> Void
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                QueuedDraftsPanel(
+                    drafts: drafts,
+                    canSteerDrafts: canSteerDrafts,
+                    canRestoreDrafts: canRestoreDrafts,
+                    steeringDraftID: steeringDraftID,
+                    onRestore: onRestore,
+                    onSteer: onSteer,
+                    onRemove: onRemove,
+                    rowHeight: 44
+                )
+                .padding(.horizontal, 8)
+                .padding(.top, 8)
+            }
+            .background(Color(.systemBackground))
+            .navigationTitle("Queued")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+    }
+}
 
 struct QueuedDraftsPanel: View {
     let drafts: [QueuedTurnDraft]

@@ -115,9 +115,7 @@ struct CodexMobileApp: App {
             return
         }
 
-        #if DEBUG
-        Purchases.logLevel = .debug
-        #endif
+        Purchases.logLevel = AppEnvironment.verboseDiagnosticsEnabled ? .debug : .warn
 
         Purchases.configure(withAPIKey: apiKey)
     }

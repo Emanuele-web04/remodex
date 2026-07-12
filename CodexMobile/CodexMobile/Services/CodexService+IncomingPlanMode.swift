@@ -6,6 +6,41 @@
 
 import Foundation
 
+enum CodexPlanUpdateVisibilityPolicy {
+    static func shouldApply(
+        text: String? = nil,
+        explanation: String? = nil,
+        steps: [CodexPlanStep] = []
+    ) -> Bool {
+        if !steps.isEmpty {
+            return true
+        }
+        return [text, explanation].contains { candidate in
+            candidate?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        }
+    }
+
+    static func shouldApply(text: String, planState: CodexPlanState?) -> Bool {
+        shouldApply(
+            text: text,
+            explanation: planState?.explanation,
+            steps: planState?.steps ?? []
+        )
+    }
+}
+
+enum CodexPlanItemPresentationPolicy {
+    static func isProgressItem(_ itemObject: [String: JSONValue]) -> Bool {
+        let normalizedType = itemObject["type"]?.stringValue?
+            .lowercased()
+            .replacingOccurrences(of: "-", with: "")
+            .replacingOccurrences(of: "_", with: "")
+        return normalizedType == "todolist"
+            || itemObject["remodexProgressPlan"]?.boolValue == true
+            || itemObject["remodexJsonlProgressPlan"]?.boolValue == true
+    }
+}
+
 extension CodexService {
     // Applies the latest structured plan snapshot for a turn while plan text keeps streaming separately.
     func handleTurnPlanUpdated(_ paramsObject: IncomingParamsObject?) {
@@ -18,6 +53,15 @@ extension CodexService {
         threadIdByTurnID[turnId] = threadId
         let explanation = normalizedOptionalPlanText(paramsObject["explanation"]?.stringValue)
         let steps = decodePlanSteps(from: paramsObject["plan"])
+
+        // Empty snapshots are transport noise, not an authoritative clear. Keeping
+        // the last meaningful plan matches Desktop rollout and item lifecycle paths.
+        guard CodexPlanUpdateVisibilityPolicy.shouldApply(
+            explanation: explanation,
+            steps: steps
+        ) else {
+            return
+        }
 
         upsertPlanMessage(
             threadId: threadId,

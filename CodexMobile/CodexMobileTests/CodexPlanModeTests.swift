@@ -679,6 +679,309 @@ final class CodexPlanModeTests: XCTestCase {
         XCTAssertEqual(planMessages[0].planState?.steps[1].status, .inProgress)
     }
 
+    func testEmptyTurnPlanUpdateDoesNotCreateTimelineCard() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        service.handleNotification(
+            method: "turn/plan/updated",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "plan": .array([]),
+            ])
+        )
+
+        XCTAssertTrue(service.messages(for: threadID).filter { $0.kind == .plan }.isEmpty)
+    }
+
+    func testEmptyTurnPlanUpdatePreservesExistingProgressCard() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        service.handleNotification(
+            method: "turn/plan/updated",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "plan": .array([
+                    .object([
+                        "step": .string("Inspect the current flow"),
+                        "status": .string("inProgress"),
+                    ]),
+                ]),
+            ])
+        )
+        XCTAssertEqual(service.messages(for: threadID).filter { $0.kind == .plan }.count, 1)
+
+        service.handleNotification(
+            method: "turn/plan/updated",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "plan": .array([]),
+            ])
+        )
+
+        let planMessages = service.messages(for: threadID).filter { $0.kind == .plan }
+        XCTAssertEqual(planMessages.count, 1)
+        XCTAssertEqual(planMessages[0].planState?.steps.first?.step, "Inspect the current flow")
+        XCTAssertEqual(planMessages[0].planState?.steps.first?.status, .inProgress)
+    }
+
+    func testEmptyTurnPlanUpdatePreservesCompletedPlanResult() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        service.upsertPlanMessage(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: "plan-result",
+            text: "1. Inspect the flow\n2. Implement the fix",
+            isStreaming: false,
+            planPresentation: .resultReady
+        )
+
+        service.handleNotification(
+            method: "turn/plan/updated",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "plan": .array([]),
+            ])
+        )
+
+        let planMessages = service.messages(for: threadID).filter { $0.kind == .plan }
+        XCTAssertEqual(planMessages.count, 1)
+        XCTAssertEqual(planMessages[0].resolvedPlanPresentation, .resultReady)
+    }
+
+    func testEmptyPlanItemLifecycleDoesNotCreateTimelineCard() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        service.handleNotification(
+            method: "item/started",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "item": .object([
+                    "id": .string("empty-plan"),
+                    "type": .string("todoList"),
+                    "content": .array([]),
+                    "plan": .array([]),
+                ]),
+            ])
+        )
+
+        XCTAssertTrue(service.messages(for: threadID).filter { $0.kind == .plan }.isEmpty)
+    }
+
+    func testEmptyCompletedPlanItemFinalizesExistingStreamedPlan() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let itemID = "plan-\(UUID().uuidString)"
+        let streamedText = "1. Inspect the mirror\n2. Preserve the timeline"
+
+        service.handleNotification(
+            method: "item/plan/delta",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "itemId": .string(itemID),
+                "delta": .string(streamedText),
+            ])
+        )
+
+        service.handleNotification(
+            method: "item/completed",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "item": .object([
+                    "id": .string(itemID),
+                    "type": .string("plan"),
+                    "content": .array([]),
+                ]),
+            ])
+        )
+
+        let planMessages = service.messages(for: threadID).filter { $0.kind == .plan }
+        XCTAssertEqual(planMessages.count, 1)
+        XCTAssertEqual(planMessages[0].text, streamedText)
+        XCTAssertFalse(planMessages[0].isStreaming)
+        XCTAssertEqual(planMessages[0].resolvedPlanPresentation, .resultCompletedItem)
+    }
+
+    func testUnmarkedTodoListItemUsesProgressPresentation() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        service.handleNotification(
+            method: "item/started",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "item": .object([
+                    "id": .string("structured-plan"),
+                    "type": .string("todoList"),
+                    "explanation": .string("Keep the mirror stable."),
+                    "plan": .array([
+                        .object([
+                            "step": .string("Reconcile live state"),
+                            "status": .string("inProgress"),
+                        ]),
+                    ]),
+                ]),
+            ])
+        )
+
+        let planMessages = service.messages(for: threadID).filter { $0.kind == .plan }
+        XCTAssertEqual(planMessages.count, 1)
+        XCTAssertEqual(planMessages[0].planState?.explanation, "Keep the mirror stable.")
+        XCTAssertEqual(planMessages[0].planState?.steps.first?.step, "Reconcile live state")
+        XCTAssertEqual(planMessages[0].planState?.steps.first?.status, .inProgress)
+        XCTAssertEqual(planMessages[0].resolvedPlanPresentation, .progress)
+        XCTAssertNil(planMessages[0].proposedPlan)
+    }
+
+    func testMarkedProgressPlanItemStaysInPinnedCapsulePresentation() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        service.handleNotification(
+            method: "item/started",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "item": .object([
+                    "id": .string("progress-plan"),
+                    "type": .string("todoList"),
+                    "remodexProgressPlan": .bool(true),
+                    "plan": .array([
+                        .object([
+                            "step": .string("Keep one live source"),
+                            "status": .string("inProgress"),
+                        ]),
+                    ]),
+                ]),
+            ])
+        )
+
+        let planMessages = service.messages(for: threadID).filter { $0.kind == .plan }
+        XCTAssertEqual(planMessages.count, 1)
+        XCTAssertEqual(planMessages[0].resolvedPlanPresentation, .progress)
+        XCTAssertTrue(planMessages[0].shouldDisplayPinnedPlanAccessory)
+    }
+
+    func testEmptyHistoryPlanItemDoesNotRestoreTimelineCard() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+
+        let messages = service.decodeMessagesFromThreadRead(
+            threadId: threadID,
+            threadObject: [
+                "turns": .array([
+                    .object([
+                        "id": .string("turn-empty-plan"),
+                        "items": .array([
+                            .object([
+                                "id": .string("empty-plan"),
+                                "type": .string("plan"),
+                                "content": .array([]),
+                                "plan": .array([]),
+                            ]),
+                        ]),
+                    ]),
+                ]),
+            ]
+        )
+
+        XCTAssertTrue(messages.filter { $0.kind == .plan }.isEmpty)
+    }
+
+    func testMarkedProgressPlanHistoryWithOnlyStepsRestoresPinnedCapsule() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+
+        let messages = service.decodeMessagesFromThreadRead(
+            threadId: threadID,
+            threadObject: [
+                "turns": .array([
+                    .object([
+                        "id": .string("turn-progress-plan"),
+                        "status": .string("inProgress"),
+                        "items": .array([
+                            .object([
+                                "id": .string("progress-plan"),
+                                "type": .string("todo-list"),
+                                "remodexProgressPlan": .bool(true),
+                                "plan": .array([
+                                    .object([
+                                        "step": .string("Keep the capsule visible"),
+                                        "status": .string("inProgress"),
+                                    ]),
+                                ]),
+                            ]),
+                        ]),
+                    ]),
+                ]),
+            ]
+        )
+
+        let planMessages = messages.filter { $0.kind == .plan }
+        XCTAssertEqual(planMessages.count, 1)
+        XCTAssertEqual(planMessages[0].resolvedPlanPresentation, .progress)
+        XCTAssertTrue(planMessages[0].shouldDisplayPinnedPlanAccessory)
+    }
+
+    func testUnmarkedCompletedLitterTodoListHistoryNeverBecomesProposedPlan() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+
+        let messages = service.decodeMessagesFromThreadRead(
+            threadId: threadID,
+            threadObject: [
+                "turns": .array([
+                    .object([
+                        "id": .string("turn-litter-plan"),
+                        "status": .string("completed"),
+                        "items": .array([
+                            .object([
+                                "id": .string("dae353b0-litter-plan"),
+                                "type": .string("todo-list"),
+                                "explanation": .string("All review fixes are complete."),
+                                "plan": .array([
+                                    .object([
+                                        "step": .string("Fix history"),
+                                        "status": .string("completed"),
+                                    ]),
+                                    .object([
+                                        "step": .string("Verify mirroring"),
+                                        "status": .string("completed"),
+                                    ]),
+                                ]),
+                            ]),
+                        ]),
+                    ]),
+                ]),
+            ]
+        )
+
+        let planMessages = messages.filter { $0.kind == .plan }
+        XCTAssertEqual(planMessages.count, 1)
+        XCTAssertEqual(planMessages[0].resolvedPlanPresentation, .progress)
+        XCTAssertNil(planMessages[0].proposedPlan)
+        XCTAssertFalse(planMessages[0].shouldDisplayPinnedPlanAccessory)
+    }
+
     func testTurnPlanUpdatedWithoutThreadIDUsesTurnMapping() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"
@@ -1648,6 +1951,114 @@ final class CodexPlanModeTests: XCTestCase {
         )
 
         XCTAssertTrue(activePlan.shouldDisplayPinnedPlanAccessory)
+    }
+
+    func testMisclassifiedStructuredProgressPlanStillUsesPinnedAccessory() {
+        let progressPlan = CodexMessage(
+            threadId: "thread-\(UUID().uuidString)",
+            role: .system,
+            kind: .plan,
+            text: "Investigate the mirroring path.",
+            itemId: "todo-list-\(UUID().uuidString)",
+            isStreaming: false,
+            planState: CodexPlanState(
+                explanation: "Trace the live and restored state.",
+                steps: [
+                    CodexPlanStep(step: "Inspect Litter", status: .inProgress),
+                    CodexPlanStep(step: "Fix projection", status: .pending),
+                ]
+            ),
+            planPresentation: .resultCompletedItem,
+            proposedPlan: CodexProposedPlan(body: "Planning...")
+        )
+
+        XCTAssertTrue(progressPlan.isTaskProgressPlanMessage)
+        XCTAssertTrue(progressPlan.shouldDisplayPinnedPlanAccessory)
+        XCTAssertFalse(progressPlan.shouldDisplayInlinePlanResult)
+    }
+
+    func testLatestCompletedProgressSnapshotClearsOlderPinnedSnapshot() {
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let staleActive = CodexMessage(
+            id: "stale-active-plan",
+            threadId: threadID,
+            role: .system,
+            kind: .plan,
+            text: "Starting investigation.",
+            turnId: turnID,
+            itemId: "todo-list-start",
+            planState: CodexPlanState(
+                explanation: "Starting investigation.",
+                steps: [CodexPlanStep(step: "Inspect Litter", status: .inProgress)]
+            ),
+            planPresentation: .progress
+        )
+        let completed = CodexMessage(
+            id: "completed-plan",
+            threadId: threadID,
+            role: .system,
+            kind: .plan,
+            text: "Investigation complete.",
+            turnId: turnID,
+            itemId: "todo-list-complete",
+            planState: CodexPlanState(
+                explanation: "Investigation complete.",
+                steps: [CodexPlanStep(step: "Inspect Litter", status: .completed)]
+            ),
+            planPresentation: .progress
+        )
+
+        XCTAssertNil(TurnConversationContainerView.pinnedTaskPlanMessage(
+            from: [staleActive, completed]
+        ))
+        XCTAssertEqual(
+            TurnConversationContainerView.pinnedTaskPlanMessage(
+                from: [completed, staleActive]
+            )?.id,
+            staleActive.id
+        )
+    }
+
+    func testLateCompletedSnapshotFromOlderTurnDoesNotClearActiveTurnPlan() {
+        let threadID = "thread-\(UUID().uuidString)"
+        let activeTurnID = "turn-active-\(UUID().uuidString)"
+        let activePlan = CodexMessage(
+            id: "active-turn-plan",
+            threadId: threadID,
+            role: .system,
+            kind: .plan,
+            text: "Implementing the current plan.",
+            turnId: activeTurnID,
+            itemId: "todo-list-active",
+            planState: CodexPlanState(
+                explanation: "Implementing the current plan.",
+                steps: [CodexPlanStep(step: "Verify the fix", status: .inProgress)]
+            ),
+            planPresentation: .progress
+        )
+        let lateOlderCompletedPlan = CodexMessage(
+            id: "late-older-completed-plan",
+            threadId: threadID,
+            role: .system,
+            kind: .plan,
+            text: "The previous plan completed.",
+            turnId: "turn-older-\(UUID().uuidString)",
+            itemId: "todo-list-older-complete",
+            planState: CodexPlanState(
+                explanation: "The previous plan completed.",
+                steps: [CodexPlanStep(step: "Inspect Litter", status: .completed)]
+            ),
+            planPresentation: .progress
+        )
+
+        XCTAssertEqual(
+            TurnConversationContainerView.pinnedTaskPlanMessage(
+                from: [activePlan, lateOlderCompletedPlan],
+                activeTurnID: activeTurnID
+            )?.id,
+            activePlan.id
+        )
     }
 
     func testCompletedNativePlanItemRendersInlineUntilTurnTerminalStateResolves() {

@@ -39,8 +39,10 @@ struct SidebarProjectSectionHeader: View {
 
     @ViewBuilder
     private var leadingIcon: some View {
-        if group.iconSystemName == "arrow.triangle.branch" {
-            CodexWorktreeIcon(pointSize: 16, weight: .medium)
+        if group.iconSystemName == "remodex.worktree" {
+            // The split-arrow artwork has a narrower intrinsic drawing than
+            // the folder asset, so 17pt gives both project glyphs equal visual weight.
+            CodexWorktreeIcon(pointSize: 17, weight: .medium)
                 .foregroundStyle(.primary)
         } else {
             RemodexIcon.image(systemName: resolvedIconName)
@@ -59,7 +61,7 @@ struct SidebarProjectSectionHeader: View {
         // other section trailing affordance — but the tap target lives on
         // the button itself.
         HapticButton(hapticStyle: .medium, action: onCreate) {
-            RemodexIcon.image(systemName: "square.and.pencil", size: 20, weight: .medium)
+            RemodexIcon.image(systemName: "square.and.pencil", size: 18, weight: .medium)
                 .foregroundStyle(.secondary)
                 .frame(
                     width: SidebarSectionHeaderTrailingSlotSize.length,

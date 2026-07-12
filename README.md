@@ -54,10 +54,10 @@ If you scan the pairing QR with a generic camera or QR reader before installing 
 │  app         │    WebSocket bridge    │ bridge        │    JSON-RPC              │ app-server  │
 └──────────────┘                        └───────────────┘                          └─────────────┘
                                                │                                         │
-                                               │  AppleScript route bounce                │ JSONL rollout
+                                               │  Local Codex IPC live state              │ JSONL rollout
                                                ▼                                         ▼
                                         ┌─────────────┐                           ┌─────────────┐
-                                        │  Codex.app  │ ◄─── reads from ──────── │  ~/.codex/  │
+                                        │  Codex.app  │ ◄─── persisted fallback ─│  ~/.codex/  │
                                         │  (desktop)  │      disk on navigate     │  sessions   │
                                         └─────────────┘                           └─────────────┘
 ```
@@ -68,7 +68,7 @@ If you scan the pairing QR with a generic camera or QR reader before installing 
 4. After the first handshake, the iPhone can resolve the Mac's live session through the configured relay and reconnect automatically
 5. Your phone sends instructions to Codex through the bridge and receives responses in real-time
 6. The bridge handles git operations and local session persistence on your Mac
-7. `Codex.app` can read the same thread history from disk, but it is not a true live mirror unless you enable the optional refresh workaround
+7. When the local Codex IPC bus is available, Remodex broadcasts live conversation state to Codex Desktop / VSCode; persisted JSONL history and the optional refresh workaround remain as fallbacks
 
 ## Repository Structure
 
@@ -330,6 +330,9 @@ remodex watch
 | `REMODEX_RELAY` | empty in source checkouts; optional in published packages | Session base URL used for QR bootstrap, trusted-session resolve, and phone/Mac session routing |
 | `REMODEX_PUSH_SERVICE_URL` | disabled by default | Optional HTTP base URL for managed push registration/completion |
 | `REMODEX_CODEX_ENDPOINT` | — | Connect to an existing Codex WebSocket instead of spawning a local `codex app-server` |
+| `REMODEX_DESKTOP_IPC_LIVE_SYNC` | `true` | Broadcast Remodex-owned active threads over the local Codex Desktop / VSCode IPC bus |
+| `REMODEX_DESKTOP_IPC_SOCKET` | auto-detected | Override the local Codex IPC socket or Windows named pipe path |
+| `REMODEX_DESKTOP_IPC_SNAPSHOT_DEBOUNCE_MS` | `75` | Debounce window (ms) for IPC `conversationState` snapshot / patch broadcasts |
 | `REMODEX_REFRESH_ENABLED` | `false` | Auto-refresh Codex.app when phone activity is detected (`true` enables it explicitly) |
 | `REMODEX_REFRESH_DEBOUNCE_MS` | `1200` | Debounce window (ms) for coalescing refresh events |
 | `REMODEX_REFRESH_COMMAND` | — | Custom shell command to run instead of the built-in AppleScript refresh |
@@ -339,6 +342,9 @@ remodex watch
 ```sh
 # Enable desktop refresh explicitly
 REMODEX_REFRESH_ENABLED=true remodex up
+
+# Disable local Desktop / VSCode IPC live sync
+REMODEX_DESKTOP_IPC_LIVE_SYNC=false remodex up
 
 # Connect to an existing Codex instance
 REMODEX_CODEX_ENDPOINT=ws://localhost:8080 remodex up
@@ -432,16 +438,19 @@ What is live today:
 
 - The iPhone conversation is live while the bridge session is connected.
 - The Mac-side Codex runtime is the real runtime doing the work.
+- Desktop-owned threads mirror live to the phone: when you open a thread that Codex Desktop is running, the bridge follows Desktop's IPC `conversationState` stream and projects the timeline, approvals, archive state, title, status, and token usage to the phone.
+- Remodex-owned active threads are broadcast over the local Codex IPC bus as Desktop / VSCode-compatible `conversationState` updates, and the bridge answers `thread-follower-*` requests (continue, steer, interrupt, approvals, user input) from any IPC client that chooses to follow them.
 
-What is not fully live today:
+Current boundaries:
 
-- `Codex.app` does not act like a second live subscriber to the active run by default.
-- The desktop app catches up from the persisted session files and can be nudged with the optional refresh workaround below.
-- True phone-to-desktop live sync in the `Codex.app` GUI is not supported today.
+- Phone-to-Desktop is not a live GUI mirror: Codex Desktop renders conversations through its own embedded runtime and does not follow streams owned by external IPC clients. Phone-driven threads reach Desktop through the shared on-disk session store (`~/.codex/sessions`), so they appear in Desktop's sidebar and open with full history, but Desktop only catches up when it (re)mounts the thread.
+- Remodex joins the local IPC bus when Codex Desktop or VSCode has created it. If no local IPC router is running, Remodex starts a compatible local router.
+- IPC sync keeps a short debounce and falls back to a full snapshot when a patch would be too large or when a client reconnect requires a fresh baseline.
+- The IPC protocol is private to Codex clients, so future Codex Desktop / VSCode changes may require bridge updates.
 
-To make that limitation more practical, Remodex also includes a hand-off button in the iPhone app. It lets you explicitly continue the current chat on your Mac by opening the matching thread in `Codex.app` when you are ready to switch devices.
+Remodex also keeps the hand-off button in the iPhone app. It explicitly opens the matching thread in `Codex.app` when you want to switch devices or force Desktop to mount a thread.
 
-**Known limitation**: The Codex desktop app does not live-reload when an external `app-server` process writes new data to disk. Threads created or updated from your phone won't appear in the desktop app until it remounts that route. Remodex keeps desktop refresh off by default for now because the current deep-link bounce is still disruptive. You can still enable it manually if you want the old remount workaround.
+The old deep-link refresh workaround remains available, but it is off by default because it is more disruptive than IPC live sync.
 
 ```sh
 # Enable the old deep-link refresh workaround manually
@@ -488,10 +497,10 @@ Run `remodex reset-pairing`, then start the bridge again with `remodex up`. You 
 Yes — set `REMODEX_CODEX_ENDPOINT=ws://host:port` to skip spawning a local `codex app-server`.
 
 **Why don't my phone threads show up in the Codex desktop app immediately?**
-The desktop app reads session data from disk (`~/.codex/sessions`) but doesn't live-reload when an external process writes new data. Your phone still gets the live stream; it is the desktop GUI that lags unless you explicitly enable the refresh workaround with `REMODEX_REFRESH_ENABLED=true`.
+With `REMODEX_DESKTOP_IPC_LIVE_SYNC=true`, Remodex broadcasts active phone-owned threads over the local Codex IPC bus. If no IPC router is available yet, Remodex starts one locally so Desktop or VSCode can connect later; disk persistence and the older refresh workaround remain fallbacks.
 
 **Does Remodex support true live sync between phone and `Codex.app`?**
-No. The phone session is live, but the `Codex.app` GUI is not a true live mirror of the active run. To help with that, the iPhone app includes a `Hand off to Mac app` button so you can explicitly continue the same thread on your Mac.
+Desktop-to-phone: yes — threads running in Codex Desktop mirror live to the phone over the local IPC bus. Phone-to-Desktop: not as a live GUI mirror, because Codex Desktop only renders conversations owned by its own runtime; phone-driven threads reach Desktop through the shared session store on disk and appear when Desktop mounts them (the hand-off button and the optional refresh workaround make that switch explicit).
 
 **Can I self-host the relay?**
 Yes. That is the intended forking path. The transport and push-service code are in [`relay/`](relay/); point `REMODEX_RELAY` at the instance you run.

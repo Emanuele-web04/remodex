@@ -28,9 +28,9 @@ enum CodexThreadGoalStatus: String, Codable, Equatable, Sendable, CaseIterable {
     // States the user can resume back to `active` from the UI.
     var isResumable: Bool {
         switch self {
-        case .paused, .blocked, .usageLimited, .budgetLimited:
+        case .paused, .blocked, .usageLimited:
             return true
-        case .active, .complete:
+        case .active, .budgetLimited, .complete:
             return false
         }
     }

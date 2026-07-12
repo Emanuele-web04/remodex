@@ -50,25 +50,21 @@ struct ComposerBottomBar: View {
 
     private let metaLabelColor = Color(.secondaryLabel)
     private var metaTextFont: Font { AppFont.subheadline() }
-    private let composerIconSide: CGFloat = 22
-    private let composerCircleDiameter: CGFloat = 30
+    private let composerCircleDiameter: CGFloat = 32
     private let composerActionIconSize: CGFloat = 14
     private let inlineAccessControlSize: CGFloat = 32
     private let inlineAccessControlIconSize: CGFloat = 20
     // Send stays the primary CTA, so give it a slightly larger tap target than
-    // the neutral composer chrome; the mic sits a notch smaller than the "+".
-    private let sendButtonDiameter: CGFloat = 32
-    private let voiceIconSide: CGFloat = 19
+    // the neutral composer chrome.
+    // Keep the send circle two points larger than its previous 32pt size.
+    private let sendButtonDiameter: CGFloat = 34
 
     private var selectedUserBubbleColor: UserBubbleColor {
         UserBubbleColor(rawValue: userBubbleColorRawValue) ?? .default
     }
 
-    // The send button is a CTA: treat the neutral "Default" palette the same
-    // as the "Primary" (.black) palette so it stays a bold label-colored circle
-    // regardless of which neutral the user picked.
     private var sendButtonPaletteColor: UserBubbleColor {
-        selectedUserBubbleColor == .default ? .black : selectedUserBubbleColor
+        selectedUserBubbleColor.ctaPalette
     }
 
     private var sendButtonIconColor: Color {
@@ -88,14 +84,30 @@ struct ComposerBottomBar: View {
     // MARK: - Body
 
     var body: some View {
-        HStack(spacing: 8) {
-            attachmentMenu
-                .padding(.leading, 6)
+        // 10pt base spacing + each control's own edge padding lands every
+        // visual gap (ring/pill, pill/mic, mic/stop-send) at ~14pt.
+        HStack(spacing: 10) {
+            ComposerAttachmentMenu(
+                isPlanModeArmed: isPlanModeArmed,
+                runtimeState: runtimeState,
+                runtimeActions: runtimeActions,
+                remainingAttachmentSlots: remainingAttachmentSlots,
+                isInteractionLocked: isComposerInteractionLocked,
+                onSetPlanModeArmed: onSetPlanModeArmed,
+                onTapAddImage: onTapAddImage,
+                onTapTakePhoto: onTapTakePhoto
+            )
+            .padding(.leading, 6)
             inlineAccessMenuLabel
             Spacer(minLength: 0)
 
-            inlineStatusControl
-            runtimeMenuControl
+            // Ring + runtime pill travel together on the trailing side; the
+            // tight inner spacing keeps the ring visually attached to the
+            // model/effort block instead of floating in the Spacer gap.
+            HStack(spacing: 4) {
+                inlineStatusControl
+                runtimeMenuControl
+            }
 
             if isQueuePaused && queuedCount > 0 {
                 Button {
@@ -112,34 +124,22 @@ struct ComposerBottomBar: View {
                 .accessibilityLabel("Resume queued messages")
             }
 
-            Button {
-                HapticFeedback.shared.triggerImpactFeedback()
-                onTapVoice()
-            } label: {
-                voiceButtonLabel
-            }
-            .disabled(voiceButtonPresentation.isDisabled)
-            .accessibilityLabel(voiceButtonPresentation.accessibilityLabel)
+            ComposerVoiceButton(
+                presentation: voiceButtonPresentation,
+                onTap: onTapVoice
+            )
 
-            if showsStopButton && isSending && activeTurnID == nil {
-                ProgressView()
-                    .tint(Color(.label))
-                    .frame(width: composerCircleDiameter, height: composerCircleDiameter)
-                    .accessibilityLabel("Starting run")
-            } else if showsStopButton {
-                Button {
-                    HapticFeedback.shared.triggerImpactFeedback()
-                    onStopTurn(activeTurnID)
-                } label: {
-                    RemodexCircleBadge(
-                        systemName: "stop.fill",
-                        foreground: sendButtonPaletteColor.bubbleForeground(for: colorScheme),
-                        background: sendButtonPaletteColor.bubbleBackground(for: colorScheme),
-                        diameter: composerCircleDiameter,
-                        iconSize: composerActionIconSize
-                    )
-                }
-                .accessibilityLabel("Stop current run")
+            if showsStopButton {
+                ComposerStopControl(
+                    activeTurnID: activeTurnID,
+                    isSending: isSending,
+                    onStopTurn: onStopTurn,
+                    diameter: composerCircleDiameter,
+                    iconSize: composerActionIconSize
+                )
+                // Match the send button's extra leading air so the mic never
+                // sits flush against the filled stop circle.
+                .padding(.leading, 4)
             }
 
             if showsSendButton {
@@ -155,7 +155,7 @@ struct ComposerBottomBar: View {
                             .offset(x: 8, y: -8)
                     }
                 }
-                .padding(.leading, 3)
+                .padding(.leading, 4)
                 .disabled(isSendDisabled)
             }
         }
@@ -189,40 +189,6 @@ struct ComposerBottomBar: View {
             .foregroundStyle(sendButtonIconColor, sendButtonBackgroundColor)
             .frame(width: sendButtonDiameter, height: sendButtonDiameter)
             .contentShape(Circle())
-    }
-
-    private var voiceButtonLabel: some View {
-        Group {
-            if voiceButtonPresentation.showsProgress {
-                CircularIconBadge(
-                    foreground: voiceButtonPresentation.foregroundColor,
-                    background: voiceButtonPresentation.backgroundColor,
-                    diameter: composerCircleDiameter
-                ) {
-                    ProgressView()
-                }
-            } else if voiceButtonPresentation.hasCircleBackground {
-                // Keep circular voice states on the same icon pipeline as the
-                // rest of the composer chrome.
-                RemodexCircleBadge(
-                    systemName: voiceButtonPresentation.systemImageName,
-                    foreground: voiceButtonPresentation.foregroundColor,
-                    background: voiceButtonPresentation.backgroundColor,
-                    diameter: composerCircleDiameter
-                )
-            } else {
-                // Use explicit size so the Central mic artwork compensates for
-                // its internal padding (glyph fills ~77% of the SVG viewBox)
-                // and renders at the same visual size as the SF `plus` glyph.
-                RemodexIcon.image(
-                    systemName: voiceButtonPresentation.systemImageName,
-                    size: voiceIconSide
-                )
-                .foregroundStyle(metaLabelColor)
-                .frame(width: voiceIconSide, height: voiceIconSide)
-                .contentShape(Rectangle())
-            }
-        }
     }
 
     // MARK: - Menus
@@ -280,72 +246,11 @@ struct ComposerBottomBar: View {
             shouldAutoRefreshStatus: shouldAutoRefreshUsageStatus,
             showsGlassBackground: false,
             progressColorOverride: .primary,
+            // Slimmer tap target than the standalone default so the ring's
+            // internal air matches the ~12pt visual rhythm of the bar.
+            tapTargetSize: 28,
             onRefreshStatus: onRefreshUsageStatus
         )
-    }
-
-    private var attachmentMenu: some View {
-        Menu {
-            // `RemodexIcon.menuLabel` keeps Central artwork in SwiftUI Menus
-            // by routing through `Label(_, image:)` for mapped assets and
-            // falling back to `Label(_, systemImage:)` for plain SF Symbols.
-            Toggle(isOn: Binding(
-                get: { isPlanModeArmed },
-                set: { newValue in
-                    HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                    onSetPlanModeArmed(newValue)
-                }
-            )) {
-                RemodexIcon.menuLabel("Plan mode", systemName: "remodex.plan-mode")
-            }
-
-            if runtimeState.supportsFastMode {
-                Button {
-                    HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                    toggleFastMode()
-                } label: {
-                    // Native SF bolt on purpose so the menu item matches the
-                    // speed badge / Speed submenu icon used elsewhere.
-                    Label("Fast Mode", systemImage: fastModePlusMenuIconName)
-                }
-            }
-
-            Section {
-                Button {
-                    HapticFeedback.shared.triggerImpactFeedback()
-                    onTapAddImage()
-                } label: {
-                    RemodexIcon.menuLabel("Photo library", systemName: "photo")
-                }
-                .disabled(remainingAttachmentSlots == 0)
-
-                Button {
-                    HapticFeedback.shared.triggerImpactFeedback()
-                    onTapTakePhoto()
-                } label: {
-                    RemodexIcon.menuLabel("Take a photo", systemName: "camera.fill")
-                }
-                .disabled(remainingAttachmentSlots == 0)
-            }
-        } label: {
-            RemodexIcon.image(systemName: "plus")
-                .font(AppFont.title3(weight: .regular))
-                .foregroundStyle(Color.primary)
-                .frame(width: composerIconSide, height: composerIconSide)
-                .contentShape(Capsule())
-        }
-        .tint(metaLabelColor)
-        .disabled(isComposerInteractionLocked)
-        .accessibilityLabel("Composer options")
-    }
-
-    // Toggling Fast Mode from the plus menu mirrors the runtime speed menu without adding another visible pill.
-    private func toggleFastMode() {
-        runtimeActions.selectServiceTier(runtimeState.isSelectedServiceTier(.fast) ? nil : .fast)
-    }
-
-    private var fastModePlusMenuIconName: String {
-        runtimeState.isSelectedServiceTier(.fast) ? "bolt.fill" : "bolt"
     }
 
     // Mirrors the bridge-provided runtime capability instead of guessing from the model name.
@@ -384,9 +289,8 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
 
     private let metaLabelColor = Color(.secondaryLabel)
     private var metaTextFont: Font { AppFont.callout() }
-    private var leadingIconFont: Font { AppFont.subheadline() }
-    private let maxInlineRuntimeControlWidth: CGFloat = 128
-    private let maxInlineRuntimeTextWidth: CGFloat = 104
+    private var effortTextFont: Font { AppFont.subheadline() }
+    private var leadingIconFont: Font { AppFont.callout() }
 
     static func == (lhs: ComposerRuntimeMenuControl, rhs: ComposerRuntimeMenuControl) -> Bool {
         lhs.orderedModelOptions == rhs.orderedModelOptions
@@ -428,7 +332,9 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
                 )
             )
         }
-        .frame(minWidth: 0, maxWidth: maxInlineRuntimeControlWidth, alignment: .trailing)
+        // Let the pill hug its content; the Spacer in the bottom bar absorbs
+        // leftover width, and layoutPriority(-1) makes the effort label the
+        // first thing to truncate when the bar runs out of room.
         .layoutPriority(-1)
         .tint(metaLabelColor)
         .accessibilityLabel(runtimeAccessibilityLabel)
@@ -489,10 +395,7 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
     ) -> some View {
         HStack(spacing: 6) {
             if let leadingImageName {
-                // Native SF Symbol on purpose: the Central lightning artwork
-                // reads as a different glyph from the system bolt that the
-                // user expects in the speed badge.
-                Image(systemName: leadingImageName)
+                RemodexIcon.image(systemName: leadingImageName)
                     .font(leadingIconFont)
                     .foregroundStyle(Color.primary)
             }
@@ -508,21 +411,17 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
 
                 if let effortPart, !effortPart.isEmpty {
                     Text(effortPart)
-                        .font(metaTextFont)
+                        .font(effortTextFont)
                         .fontWeight(.regular)
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
                         .truncationMode(.tail)
                         .layoutPriority(0)
-                        .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
                 }
             }
-            // Grow left from the mic; truncate effort first when space is tight.
-            .frame(maxWidth: maxInlineRuntimeTextWidth, alignment: .trailing)
         }
         .padding(.vertical, 6)
         .padding(.horizontal, 4)
-        .frame(minWidth: 0, maxWidth: maxInlineRuntimeControlWidth, alignment: .trailing)
         .contentShape(Rectangle())
     }
 }
@@ -593,8 +492,7 @@ private struct AllModelsSheet: View {
                         .font(AppFont.body(weight: .medium))
                         .foregroundStyle(Color(.label))
                     if modelSupportsFastMode(model) {
-                        Image(systemName: CodexServiceTier.fast.iconName)
-                            .font(.system(size: fastModeIconSide, weight: .regular))
+                        RemodexIcon.image(systemName: CodexServiceTier.fast.iconName, size: fastModeIconSide)
                             .frame(width: fastModeIconSide, height: fastModeIconSide)
                             .foregroundStyle(Color(.secondaryLabel))
                     }

@@ -56,34 +56,35 @@ struct SystemMessageContentView: View {
     }
 
     private var toolActivitySystemView: some View {
-        // Read the cached display text + icon (built once per text revision) instead
+        // Read the cached per-line models (built once per text revision) instead
         // of re-splitting/re-classifying the full text on every body evaluation.
         let model = renderModel.toolActivity
             ?? ToolActivityRenderCache.model(messageID: message.id, text: text)
-        let joined = model.displayText
 
-        return VStack(alignment: .leading, spacing: 4) {
-            if !joined.isEmpty {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    RemodexIcon.image(systemName: model.iconSystemName, size: 17, relativeTo: .body)
+        // One icon + label row per tool call, spaced and aligned exactly like the
+        // humanized command rows so merged activity never reads as a text blob.
+        return VStack(alignment: .leading, spacing: 14) {
+            ForEach(model.lines) { line in
+                HStack(spacing: 6) {
+                    RemodexIcon.image(systemName: line.iconSystemName, size: 17, relativeTo: .body)
                         .foregroundStyle(.secondary)
 
-                    Text(joined)
+                    Text(line.text)
                         .font(AppFont.body(weight: .regular))
                         .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .truncationMode(.tail)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
-
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 2)
         // Tool rows update often while activity streams; keep the subtree static to avoid whole-row flashing.
         .transaction { transaction in
             transaction.animation = nil
         }
         .contextMenu {
-            selectableTextActions(text: actionText, usesMarkdownSelection: false)
+            selectableTextActions(text: actionText)
         }
     }
 
@@ -116,10 +117,15 @@ struct SystemMessageContentView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .contextMenu {
-                selectableTextActions(text: actionText, usesMarkdownSelection: false)
+                selectableTextActions(text: actionText)
             }
         }
     }
+
+    // Long Desktop turns accumulate dozens of per-file rows; cap the live list
+    // to the most recent files so the timeline stays readable. The full recap
+    // still renders as one compact card when the turn completes.
+    private static let maxVisibleStreamingFileChangeEntries = 4
 
     private func fileChangeStreamingSystemView(
         entries: [TurnFileChangeSummaryEntry],
@@ -132,7 +138,13 @@ struct SystemMessageContentView: View {
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
-                ForEach(entries) { entry in
+                let hiddenCount = entries.count - Self.maxVisibleStreamingFileChangeEntries
+                if hiddenCount > 0 {
+                    Text("+\(hiddenCount) more files")
+                        .font(AppFont.caption())
+                        .foregroundStyle(.secondary.opacity(0.6))
+                }
+                ForEach(Array(entries.suffix(Self.maxVisibleStreamingFileChangeEntries))) { entry in
                     FileChangeInlineActionRow(entry: entry)
                 }
             }
@@ -140,7 +152,7 @@ struct SystemMessageContentView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contextMenu {
-            selectableTextActions(text: actionText, usesMarkdownSelection: false)
+            selectableTextActions(text: actionText)
         }
     }
 
@@ -198,7 +210,7 @@ struct SystemMessageContentView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 2)
             .contextMenu {
-                selectableTextActions(text: actionText, usesMarkdownSelection: false)
+                selectableTextActions(text: actionText)
             }
     }
 
@@ -224,7 +236,7 @@ struct SystemMessageContentView: View {
         .frame(maxWidth: .infinity)
         .padding(.vertical, 12)
         .contextMenu {
-            selectableTextActions(text: actionText, usesMarkdownSelection: false)
+            selectableTextActions(text: actionText)
         }
     }
 
@@ -241,17 +253,14 @@ struct SystemMessageContentView: View {
     }
 
     @ViewBuilder
-    private func selectableTextActions(text: String, usesMarkdownSelection: Bool) -> some View {
+    private func selectableTextActions(text: String) -> some View {
         if let selectableText = timelineSelectableActionText(text) {
             Button {
                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                onSelectText(
-                    SelectableMessageTextSheetState(
-                        role: message.role,
-                        text: selectableText,
-                        usesMarkdownSelection: usesMarkdownSelection
-                    )
-                )
+                onSelectText(SelectableMessageTextSheetState(
+                    contentKind: .systemPlainText,
+                    text: selectableText
+                ))
             } label: {
                 Label("Select Text", systemImage: "text.cursor")
             }

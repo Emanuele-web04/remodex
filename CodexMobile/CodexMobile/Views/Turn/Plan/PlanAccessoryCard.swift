@@ -1,7 +1,7 @@
 // FILE: PlanAccessoryCard.swift
-// Purpose: Hosts the compact active-plan accessory as a standalone, previewable view.
+// Purpose: Hosts the compact active-plan capsule as a standalone, previewable view.
 // Layer: View Component
-// Exports: PlanAccessoryCard, PlanAccessorySnapshot, PlanAccessoryPreviewFixtures
+// Exports: PlanAccessoryCard, PlanAccessorySnapshot, PinnedPlanAccessoryContext, PlanAccessoryPreviewFixtures
 // Depends on: SwiftUI, CodexMessage, CodexCollaboration
 
 import SwiftUI
@@ -35,10 +35,8 @@ enum PlanAccessoryStatus: Equatable {
 
     var tint: Color {
         switch self {
-        case .pending:
+        case .pending, .inProgress:
             return Color(.plan)
-        case .inProgress:
-            return .orange
         case .completed:
             return .green
         }
@@ -51,8 +49,9 @@ struct PlanAccessorySnapshot: Equatable {
     let status: PlanAccessoryStatus
     let completedStepCount: Int
     let totalStepCount: Int
-    let isStreaming: Bool
     let stepStatuses: [CodexPlanStepStatus]
+    let isStreaming: Bool
+    let currentStepNumber: Int
 
     init(
         title: String = "Plan",
@@ -60,16 +59,23 @@ struct PlanAccessorySnapshot: Equatable {
         status: PlanAccessoryStatus,
         completedStepCount: Int,
         totalStepCount: Int,
+        stepStatuses: [CodexPlanStepStatus]? = nil,
         isStreaming: Bool = false,
-        stepStatuses: [CodexPlanStepStatus] = []
+        currentStepNumber: Int? = nil
     ) {
         self.title = title
         self.summary = summary
         self.status = status
         self.completedStepCount = completedStepCount
         self.totalStepCount = totalStepCount
+        self.stepStatuses = stepStatuses ?? (0..<max(totalStepCount, 0)).map { index in
+            index < completedStepCount ? .completed : .pending
+        }
         self.isStreaming = isStreaming
-        self.stepStatuses = stepStatuses
+        let fallbackStepNumber = min(completedStepCount + 1, totalStepCount)
+        self.currentStepNumber = totalStepCount > 0
+            ? min(max(currentStepNumber ?? fallbackStepNumber, 1), totalStepCount)
+            : 0
     }
 
     init(message: CodexMessage) {
@@ -77,25 +83,28 @@ struct PlanAccessorySnapshot: Equatable {
         let completedStepCount = steps.filter { $0.status == .completed }.count
         let totalStepCount = steps.count
         let status = Self.resolveStatus(from: steps, completedStepCount: completedStepCount)
+        let highlightedStepIndex = Self.highlightedStepIndex(in: steps)
 
         self.init(
             summary: Self.resolveSummary(from: message, steps: steps),
             status: status,
             completedStepCount: completedStepCount,
             totalStepCount: totalStepCount,
+            stepStatuses: steps.map(\.status),
             isStreaming: message.isStreaming,
-            stepStatuses: steps.map(\.status)
+            currentStepNumber: highlightedStepIndex.map { $0 + 1 }
         )
     }
 
-    var progressText: String? {
+    /// 1-based index of the step currently being worked on, capped at the total.
+    var stepProgressText: String? {
         guard totalStepCount > 0 else { return nil }
-        return "\(completedStepCount)/\(totalStepCount)"
+        return "Step \(currentStepNumber) / \(totalStepCount)"
     }
 
     var progressDescription: String {
         guard totalStepCount > 0 else { return status.label }
-        return "\(completedStepCount) of \(totalStepCount) complete"
+        return "Step \(currentStepNumber) of \(totalStepCount)"
     }
 
     private static func resolveStatus(
@@ -112,10 +121,8 @@ struct PlanAccessorySnapshot: Equatable {
     }
 
     private static func resolveSummary(from message: CodexMessage, steps: [CodexPlanStep]) -> String {
-        if let highlightedStep = steps.first(where: { $0.status == .inProgress })
-            ?? steps.first(where: { $0.status == .pending })
-            ?? steps.last {
-            return highlightedStep.step
+        if let highlightedStepIndex = highlightedStepIndex(in: steps) {
+            return steps[highlightedStepIndex].step
         }
 
         let explanation = normalizedPlanText(message.planState?.explanation)
@@ -125,6 +132,12 @@ struct PlanAccessorySnapshot: Equatable {
 
         let body = normalizedPlanText(message.text)
         return body ?? "Open plan details"
+    }
+
+    private static func highlightedStepIndex(in steps: [CodexPlanStep]) -> Int? {
+        steps.firstIndex(where: { $0.status == .inProgress })
+            ?? steps.firstIndex(where: { $0.status == .pending })
+            ?? steps.indices.last
     }
 
     // Filters placeholder copy so the compact UI only surfaces useful context.
@@ -176,108 +189,142 @@ struct GlassAccessoryCard<LeadingMarker: View, Header: View, Summary: View, Trai
     }
 }
 
+/// Carries the pinned active-plan state from the conversation container down to
+/// the composer's carousel row without widening the composer parameter chain.
+struct PinnedPlanAccessoryContext {
+    let snapshot: PlanAccessorySnapshot
+    let onTap: () -> Void
+}
+
+private struct PinnedPlanAccessoryKey: EnvironmentKey {
+    static let defaultValue: PinnedPlanAccessoryContext? = nil
+}
+
+extension EnvironmentValues {
+    var pinnedPlanAccessory: PinnedPlanAccessoryContext? {
+        get { self[PinnedPlanAccessoryKey.self] }
+        set { self[PinnedPlanAccessoryKey.self] = newValue }
+    }
+}
+
 struct PlanAccessoryCard: View {
     let snapshot: PlanAccessorySnapshot
     let onTap: () -> Void
 
     var body: some View {
-        GlassAccessoryCard(onTap: onTap) {
-            leadingMarker
-        } header: {
-            headerRow
-        } summary: {
-            summaryRow
-        } trailing: {
-            trailingMetric
+        Button {
+            HapticFeedback.shared.triggerImpactFeedback(style: .light)
+            onTap()
+        } label: {
+            GlassStatusPill {
+                leadingMarker
+
+                stepLabel
+            }
         }
+        .buttonStyle(.plain)
+        .fixedSize()
         .accessibilityLabel("Open active plan")
         .accessibilityValue("\(snapshot.status.label), \(snapshot.progressDescription)")
         .accessibilityHint("Shows the current plan steps in a sheet")
     }
 
+    // Segmented ring split by step count that fills as steps complete; falls
+    // back to a simple tinted dot while the plan is still forming (no steps yet).
+    @ViewBuilder
     private var leadingMarker: some View {
-        ZStack {
-            Circle()
-                .fill(snapshot.status.tint.opacity(0.1))
-                .frame(width: 22, height: 22)
+        if snapshot.totalStepCount > 0 {
+            PlanStepProgressRing(
+                stepStatuses: snapshot.stepStatuses,
+                tint: snapshot.status.tint
+            )
+        } else {
+            ZStack {
+                Circle()
+                    .fill(snapshot.status.tint.opacity(0.14))
+                    .frame(width: 14, height: 14)
 
-            Circle()
-                .fill(snapshot.status.tint)
-                .frame(width: 7, height: 7)
+                Circle()
+                    .fill(snapshot.status.tint)
+                    .frame(width: 5, height: 5)
+            }
         }
     }
 
-    private var headerRow: some View {
-        HStack(alignment: .center, spacing: 6) {
-            Text(snapshot.title)
-                .font(AppFont.mono(.caption2))
+    @ViewBuilder
+    private var stepLabel: some View {
+        if let stepProgressText = snapshot.stepProgressText {
+            Text(stepProgressText)
+                .font(AppFont.caption())
                 .foregroundStyle(.secondary)
-
-            Circle()
-                .fill(Color(.separator).opacity(0.6))
-                .frame(width: 3, height: 3)
-
-            Text(snapshot.status.label)
-                .font(AppFont.caption(weight: .regular))
-                .foregroundStyle(snapshot.status.tint)
-
-            if !snapshot.stepStatuses.isEmpty {
-                stepRail
-                    .padding(.leading, 2)
-            }
+                .fixedSize()
+        } else {
+            Text(snapshot.title)
+                .font(AppFont.caption())
+                .foregroundStyle(.secondary)
 
             if snapshot.isStreaming {
                 ProgressView()
                     .controlSize(.mini)
                     .scaleEffect(0.8)
-                    .padding(.leading, 2)
             }
         }
     }
+}
 
-    private var summaryRow: some View {
-        Text(snapshot.summary)
-            .font(AppFont.subheadline(weight: .medium))
-            .foregroundStyle(.primary)
-            .lineLimit(1)
-            .multilineTextAlignment(.leading)
-    }
+/// Compact circular progress indicator divided into one arc per plan step.
+/// Each segment mirrors its own step: completed arcs light up in the plan
+/// tint, the in-progress arc glows at partial strength, and pending arcs stay
+/// a faint track — so the ring fills (and moves) as the plan advances.
+private struct PlanStepProgressRing: View {
+    let stepStatuses: [CodexPlanStepStatus]
+    let tint: Color
+    var size: CGFloat = 14
+    var lineWidth: CGFloat = 2.25
 
-    private var trailingMetric: some View {
-        VStack(alignment: .trailing, spacing: 1) {
-            if let progressText = snapshot.progressText {
-                Text(progressText)
-                    .font(AppFont.mono(.caption))
-                    .foregroundStyle(.primary)
-            } else {
-                Text(snapshot.status.label)
-                    .font(AppFont.caption(weight: .medium))
-                    .foregroundStyle(snapshot.status.tint)
+    var body: some View {
+        ZStack {
+            ForEach(stepStatuses.indices, id: \.self) { index in
+                Circle()
+                    .trim(from: trim(for: index).start, to: trim(for: index).end)
+                    .stroke(
+                        segmentColor(for: stepStatuses[index]),
+                        style: StrokeStyle(lineWidth: lineWidth, lineCap: .butt)
+                    )
             }
         }
-        .frame(minWidth: 36, alignment: .trailing)
-    }
-
-    private var stepRail: some View {
-        HStack(spacing: 3) {
-            ForEach(Array(snapshot.stepStatuses.enumerated()), id: \.offset) { _, status in
-                Capsule()
-                    .fill(stepTint(for: status))
-                    .frame(width: 10, height: 3)
-            }
-        }
+        .rotationEffect(.degrees(-90))
+        .frame(width: size, height: size)
+        .animation(.easeOut(duration: 0.25), value: stepStatuses)
         .accessibilityHidden(true)
     }
 
-    private func stepTint(for status: CodexPlanStepStatus) -> Color {
+    private func segmentColor(for status: CodexPlanStepStatus) -> Color {
         switch status {
-        case .pending:
-            return Color(.separator).opacity(0.22)
-        case .inProgress:
-            return snapshot.status.tint.opacity(0.72)
         case .completed:
-            return Color.primary.opacity(0.72)
+            return tint
+        case .inProgress:
+            return tint.opacity(0.45)
+        case .pending:
+            return tint.opacity(0.16)
         }
+    }
+
+    private var segmentCount: Int {
+        max(stepStatuses.count, 1)
+    }
+
+    // Gap between segments, scaled down as the step count grows so dense plans
+    // still keep a positive-length arc per step.
+    private var gap: Double {
+        segmentCount > 1 ? min(0.05, 0.4 / Double(segmentCount)) : 0
+    }
+
+    private func trim(for index: Int) -> (start: CGFloat, end: CGFloat) {
+        let slice = 1.0 / Double(segmentCount)
+        let start = Double(index) * slice + gap / 2
+        let end = Double(index + 1) * slice - gap / 2
+        return (CGFloat(start), CGFloat(end))
     }
 }
 

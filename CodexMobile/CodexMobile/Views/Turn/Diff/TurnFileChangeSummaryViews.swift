@@ -52,6 +52,8 @@ struct FileChangeInlineActionRow: View {
 // MARK: - FileChangeSummaryBox
 // Renders turn-end file edits as one compact recap instead of chat-like rows.
 struct FileChangeSummaryBox: View {
+    private static let previewEntryLimit = 3
+
     let entries: [TurnFileChangeSummaryEntry]
     let fallbackText: String
     let detailBodyText: String
@@ -62,10 +64,19 @@ struct FileChangeSummaryBox: View {
     // Default to expanded so the recap stays informative without an extra tap;
     // collapse remains available for long lists or visual decluttering.
     @State private var isExpanded: Bool = true
+    @State private var showsAllEntries: Bool = false
     @State private var activeDiffPresentation: FileChangeSummaryDiffPresentation?
 
     private var canCollapse: Bool {
         !entries.isEmpty || !fallbackText.isEmpty
+    }
+
+    private var visibleEntries: ArraySlice<TurnFileChangeSummaryEntry> {
+        showsAllEntries ? entries[...] : entries.prefix(Self.previewEntryLimit)
+    }
+
+    private var hiddenEntryCount: Int {
+        max(0, entries.count - Self.previewEntryLimit)
     }
 
     var body: some View {
@@ -76,16 +87,14 @@ struct FileChangeSummaryBox: View {
                 if !entries.isEmpty {
                     softDivider
 
-                    ForEach(entries.indices, id: \.self) { index in
-                        let entry = entries[index]
-                        let isLastEntry = index == entries.index(before: entries.endIndex)
+                    ForEach(Array(visibleEntries.enumerated()), id: \.element.id) { index, entry in
+                        let isLastEntry = index == visibleEntries.count - 1
 
                         Button {
                             activeDiffPresentation = .singleEntry(entry)
                         } label: {
                             HStack(alignment: .firstTextBaseline, spacing: 8) {
                                 Text(entry.compactPath)
-                                    .font(AppFont.subheadline())
                                     .foregroundStyle(.primary)
                                     .lineLimit(1)
                                     .truncationMode(.middle)
@@ -94,19 +103,47 @@ struct FileChangeSummaryBox: View {
 
                                 if entry.additions > 0 || entry.deletions > 0 {
                                     DiffCountsLabel(additions: entry.additions, deletions: entry.deletions)
-                                        .font(AppFont.subheadline())
                                 }
                             }
+                            .font(AppFont.subheadline())
                             .padding(.horizontal, 12)
                             .padding(.vertical, 9)
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
 
-                        if !isLastEntry {
+                        if !isLastEntry || hiddenEntryCount > 0 {
                             softDivider
                                 .padding(.leading, 12)
                         }
+                    }
+
+                    if hiddenEntryCount > 0 {
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.18)) {
+                                showsAllEntries.toggle()
+                            }
+                        } label: {
+                            HStack(spacing: 6) {
+                                Text(showsAllEntries ? "Show less" : "Show more")
+                                    .font(AppFont.subheadline(weight: .medium))
+
+                                RemodexIcon.image(systemName: "chevron.down")
+                                    .font(AppFont.system(size: 10, weight: .semibold))
+                                    .rotationEffect(.degrees(showsAllEntries ? 180 : 0))
+                            }
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 9)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(
+                            showsAllEntries
+                                ? "Show fewer file changes"
+                                : "Show \(hiddenEntryCount) more file changes"
+                        )
                     }
                 } else if !fallbackText.isEmpty {
                     Text(fallbackText)
@@ -212,7 +249,7 @@ struct FileChangeSummaryBox: View {
         }
         .padding(.leading, 12)
         .padding(.trailing, 8)
-        .padding(.top, 6)
+        .padding(.top, 4)
         .padding(.bottom, isExpanded && !entries.isEmpty ? 6 : 8)
     }
 

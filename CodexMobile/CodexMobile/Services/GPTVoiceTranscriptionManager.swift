@@ -12,8 +12,15 @@ private func codexLogVoiceRecording(_ message: String) {
     print("[VOICE] \(message)")
 }
 
+private struct VoiceAudioSessionSnapshot: Sendable {
+    let inputRoutes: [String]
+    let sampleRate: Double
+    let inputChannelCount: Int
+}
+
 struct GPTVoiceRecordingClip: Sendable {
     let url: URL
+    let mimeType: String
     let durationSeconds: TimeInterval
     let byteCount: Int
 }
@@ -55,13 +62,21 @@ enum GPTVoiceTranscriptionError: LocalizedError {
 
 final class GPTVoiceTranscriptionManager: ObservableObject {
     private let audioSession = AVAudioSession.sharedInstance()
+    private static let audioSessionQueue = DispatchQueue(label: "com.remodex.voice.audio-session")
     private static let targetSampleRate: Double = 24_000
+    private static let wavMimeType = "audio/wav"
+    private static let m4aMimeType = "audio/mp4"
     private static let maxRecordingDurationSeconds = CodexVoiceTranscriptionPreflight.maxDurationSeconds
-    // Keeps enough metering history for the capsule to resample across the full composer width.
+    // Keeps enough metering history for the capsule to fill the composer width.
     private static let maxAudioLevels = 240
+    // One waveform bar per fixed time window. Aggregating tap buffers into
+    // windows keeps the bar cadence deterministic: iOS treats installTap's
+    // bufferSize as a hint, so real devices deliver buffers of varying size.
+    static let meterWindowSeconds: TimeInterval = 0.08
 
     private var engine: AVAudioEngine?
     private let collector = AudioSampleCollector()
+    private let meterAccumulator = MeterWindowAccumulator()
     private var captureSampleRate: Double = 0
     private var isRecording = false
     private var isStarting = false
@@ -110,7 +125,11 @@ final class GPTVoiceTranscriptionManager: ObservableObject {
         }
 
         do {
-            try configureAudioSession()
+            try await configureAudioSession()
+            guard isStarting, recordingSessionID == sessionID else {
+                teardownEngine()
+                throw GPTVoiceTranscriptionError.notRecording
+            }
 
             let engine = AVAudioEngine()
             let inputNode = engine.inputNode
@@ -132,22 +151,18 @@ final class GPTVoiceTranscriptionManager: ObservableObject {
 
             resetMeteringState()
 
+            meterAccumulator.beginSession(sampleRate: format.sampleRate)
+
             // Copy tap samples immediately; AVAudioEngine owns the callback buffer lifetime.
-            inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { [collector, weak self] buffer, _ in
+            inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { [collector, meterAccumulator, weak self] buffer, _ in
                 guard let samples = collector.append(buffer, sessionID: sessionID) else { return }
 
-                // Compute RMS power for waveform visualization.
-                var sumOfSquares: Float = 0
-                for sample in samples {
-                    sumOfSquares += sample * sample
-                }
-                let rms = sqrt(sumOfSquares / Float(samples.count))
-                let dB = 20 * log10(max(rms, 1e-6))
-                let normalized = CGFloat(max(0, min(1, (dB + 50) / 50)))
+                let newLevels = meterAccumulator.append(samples)
+                guard !newLevels.isEmpty else { return }
 
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
-                    self.audioLevels.append(normalized)
+                    self.audioLevels.append(contentsOf: newLevels)
                     if self.audioLevels.count > Self.maxAudioLevels {
                         self.audioLevels.removeFirst(self.audioLevels.count - Self.maxAudioLevels)
                     }
@@ -183,9 +198,9 @@ final class GPTVoiceTranscriptionManager: ObservableObject {
         }
     }
 
-    // Stops the capture, resamples collected audio to 24 kHz mono WAV, and returns the clip.
+    // Stops the capture, resamples collected audio to 24 kHz mono, and returns the clip.
     @MainActor
-    func stopRecording() throws -> GPTVoiceRecordingClip? {
+    func stopRecording(preferM4A: Bool = false) throws -> GPTVoiceRecordingClip? {
         guard isRecording else { return nil }
         let sessionID = recordingSessionID
         isRecording = false
@@ -201,26 +216,22 @@ final class GPTVoiceTranscriptionManager: ObservableObject {
         let boundedSamples = Array(resampled.prefix(maxSampleCount))
         guard !boundedSamples.isEmpty else { return nil }
 
-        let wavData = Self.encodeWAV(samples: boundedSamples, sampleRate: UInt32(Self.targetSampleRate))
-
-        let fileURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("remodex-voice-\(UUID().uuidString)")
-            .appendingPathExtension("wav")
-
-        do {
-            try wavData.write(to: fileURL)
-        } catch {
-            codexLogVoiceRecording("WAV write failed: \(error.localizedDescription)")
-            throw GPTVoiceTranscriptionError.unableToCreateOutputFile
-        }
-
         let durationSeconds = Double(boundedSamples.count) / Self.targetSampleRate
-        codexLogVoiceRecording("clip ready: \(String(format: "%.1f", durationSeconds))s, \(wavData.count) bytes")
+        let clipFile: (url: URL, mimeType: String, byteCount: Int)
+        if preferM4A {
+            clipFile = try Self.writeM4AFile(samples: boundedSamples)
+        } else {
+            clipFile = try Self.writeWAVFile(samples: boundedSamples)
+        }
+        codexLogVoiceRecording(
+            "clip ready: \(String(format: "%.1f", durationSeconds))s, \(clipFile.byteCount) bytes mime=\(clipFile.mimeType)"
+        )
 
         return GPTVoiceRecordingClip(
-            url: fileURL,
+            url: clipFile.url,
+            mimeType: clipFile.mimeType,
             durationSeconds: durationSeconds,
-            byteCount: wavData.count
+            byteCount: clipFile.byteCount
         )
     }
 
@@ -326,20 +337,27 @@ final class GPTVoiceTranscriptionManager: ObservableObject {
     // ─── Audio session ───────────────────────────────────────────
 
     @MainActor
-    private func configureAudioSession() throws {
+    private func configureAudioSession() async throws {
         do {
-            try audioSession.setCategory(
-                .playAndRecord,
-                mode: .default,
-                options: [.defaultToSpeaker, .allowBluetoothHFP]
-            )
-            try audioSession.setActive(true)
+            let snapshot = try await Self.performAudioSessionWork {
+                let audioSession = AVAudioSession.sharedInstance()
+                try audioSession.setCategory(
+                    .playAndRecord,
+                    mode: .default,
+                    options: [.defaultToSpeaker, .allowBluetoothHFP]
+                )
+                try audioSession.setActive(true)
+                return VoiceAudioSessionSnapshot(
+                    inputRoutes: audioSession.currentRoute.inputs.map { "\($0.portType.rawValue):\($0.portName)" },
+                    sampleRate: audioSession.sampleRate,
+                    inputChannelCount: audioSession.inputNumberOfChannels
+                )
+            }
 
-            let inputs = audioSession.currentRoute.inputs.map { "\($0.portType.rawValue):\($0.portName)" }
-            codexLogVoiceRecording("active input route: \(inputs.isEmpty ? "none" : inputs.joined(separator: ", "))")
-            codexLogVoiceRecording("hardware sampleRate=\(audioSession.sampleRate) channels=\(audioSession.inputNumberOfChannels)")
+            codexLogVoiceRecording("active input route: \(snapshot.inputRoutes.isEmpty ? "none" : snapshot.inputRoutes.joined(separator: ", "))")
+            codexLogVoiceRecording("hardware sampleRate=\(snapshot.sampleRate) channels=\(snapshot.inputChannelCount)")
 
-            guard !audioSession.currentRoute.inputs.isEmpty else {
+            guard !snapshot.inputRoutes.isEmpty else {
                 throw GPTVoiceTranscriptionError.missingMicrophoneInput
             }
         } catch {
@@ -460,7 +478,33 @@ final class GPTVoiceTranscriptionManager: ObservableObject {
             if engine.isRunning { engine.stop() }
         }
         engine = nil
-        try? audioSession.setActive(false, options: .notifyOthersOnDeactivation)
+        Self.deactivateAudioSessionInBackground()
+    }
+
+    // Keeps AVAudioSession activation/deactivation off the main actor to avoid
+    // system-gesture stalls on iOS 26 while preserving ordering across retries.
+    private static func performAudioSessionWork<T: Sendable>(
+        _ work: @Sendable @escaping () throws -> T
+    ) async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            audioSessionQueue.async {
+                do {
+                    continuation.resume(returning: try work())
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    private static func deactivateAudioSessionInBackground() {
+        audioSessionQueue.async {
+            do {
+                try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            } catch {
+                codexLogVoiceRecording("audio session deactivate failed: \(error.localizedDescription)")
+            }
+        }
     }
 
     // ─── Resampling ──────────────────────────────────────────────
@@ -494,6 +538,74 @@ final class GPTVoiceTranscriptionManager: ObservableObject {
 
     private static func floatToInt16(_ value: Float) -> Int16 {
         Int16(max(-1.0, min(1.0, value)) * Float(Int16.max))
+    }
+
+    // ─── File encoding ───────────────────────────────────────────
+
+    private static func writeWAVFile(samples: [Int16]) throws -> (url: URL, mimeType: String, byteCount: Int) {
+        let wavData = encodeWAV(samples: samples, sampleRate: UInt32(targetSampleRate))
+        let fileURL = temporaryVoiceURL(fileExtension: "wav")
+        do {
+            try wavData.write(to: fileURL)
+            return (fileURL, wavMimeType, wavData.count)
+        } catch {
+            codexLogVoiceRecording("WAV write failed: \(error.localizedDescription)")
+            throw GPTVoiceTranscriptionError.unableToCreateOutputFile
+        }
+    }
+
+    private static func writeM4AFile(samples: [Int16]) throws -> (url: URL, mimeType: String, byteCount: Int) {
+        let fileURL = temporaryVoiceURL(fileExtension: "m4a")
+        guard let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: targetSampleRate,
+            channels: 1,
+            interleaved: false
+        ),
+              let buffer = AVAudioPCMBuffer(
+                pcmFormat: format,
+                frameCapacity: AVAudioFrameCount(samples.count)
+              ),
+              let channel = buffer.floatChannelData?[0] else {
+            throw GPTVoiceTranscriptionError.unableToCreateOutputFile
+        }
+
+        buffer.frameLength = AVAudioFrameCount(samples.count)
+        for index in samples.indices {
+            channel[index] = Float(samples[index]) / Float(Int16.max)
+        }
+
+        do {
+            let settings: [String: Any] = [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: targetSampleRate,
+                AVNumberOfChannelsKey: 1,
+                AVEncoderBitRateKey: 48_000,
+            ]
+            let file = try AVAudioFile(
+                forWriting: fileURL,
+                settings: settings,
+                commonFormat: .pcmFormatFloat32,
+                interleaved: false
+            )
+            try file.write(from: buffer)
+            let attributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+            let byteCount = (attributes[.size] as? NSNumber)?.intValue ?? 0
+            guard byteCount > 0 else {
+                throw GPTVoiceTranscriptionError.unableToCreateOutputFile
+            }
+            return (fileURL, m4aMimeType, byteCount)
+        } catch {
+            try? FileManager.default.removeItem(at: fileURL)
+            codexLogVoiceRecording("M4A write failed: \(error.localizedDescription)")
+            throw GPTVoiceTranscriptionError.unableToCreateOutputFile
+        }
+    }
+
+    private static func temporaryVoiceURL(fileExtension: String) -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("remodex-voice-\(UUID().uuidString)")
+            .appendingPathExtension(fileExtension)
     }
 
     // ─── WAV encoding ────────────────────────────────────────────
@@ -532,8 +644,12 @@ extension GPTVoiceTranscriptionManager {
     static var transcribeOverride: ((Data, String) async throws -> String)?
 
     static func transcribe(wavData: Data, token: String) async throws -> String {
+        try await transcribe(audioData: wavData, mimeType: wavMimeType, token: token)
+    }
+
+    static func transcribe(audioData: Data, mimeType: String, token: String) async throws -> String {
         if let transcribeOverride {
-            return try await transcribeOverride(wavData, token)
+            return try await transcribeOverride(audioData, token)
         }
 
         let normalizedToken = token
@@ -546,10 +662,11 @@ extension GPTVoiceTranscriptionManager {
         let boundary = "Remodex-\(UUID().uuidString)"
 
         var body = Data()
+        let fileExtension = mimeType == m4aMimeType ? "m4a" : "wav"
         body.appendUTF8("--\(boundary)\r\n")
-        body.appendUTF8("Content-Disposition: form-data; name=\"file\"; filename=\"voice.wav\"\r\n")
-        body.appendUTF8("Content-Type: audio/wav\r\n\r\n")
-        body.append(wavData)
+        body.appendUTF8("Content-Disposition: form-data; name=\"file\"; filename=\"voice.\(fileExtension)\"\r\n")
+        body.appendUTF8("Content-Type: \(mimeType)\r\n\r\n")
+        body.append(audioData)
         body.appendUTF8("\r\n--\(boundary)--\r\n")
 
         var request = URLRequest(url: chatGPTTranscriptionURL)
@@ -599,6 +716,54 @@ extension GPTVoiceTranscriptionManager {
 }
 
 // ─── Thread-safe sample collector ────────────────────────────────
+
+// Converts the audio-thread sample stream into one normalized waveform level
+// per fixed time window (`meterWindowSeconds`), independent of how iOS sizes
+// the tap buffers. Each emitted level is the RMS power of exactly one window,
+// so a bar's height is the decibel reading of that moment and never changes.
+private final class MeterWindowAccumulator: @unchecked Sendable {
+    private let lock = NSLock()
+    private var windowSampleCount = 1
+    private var sumOfSquares: Float = 0
+    private var sampleCount = 0
+
+    func beginSession(sampleRate: Double) {
+        lock.lock()
+        windowSampleCount = max(1, Int(sampleRate * GPTVoiceTranscriptionManager.meterWindowSeconds))
+        sumOfSquares = 0
+        sampleCount = 0
+        lock.unlock()
+    }
+
+    /// Feeds tap samples and returns the levels for every window completed by
+    /// this buffer (usually zero or one; more when a large buffer spans several).
+    func append(_ samples: [Float]) -> [CGFloat] {
+        lock.lock()
+        defer { lock.unlock() }
+
+        var levels: [CGFloat] = []
+        var index = 0
+        while index < samples.count {
+            let needed = windowSampleCount - sampleCount
+            let take = min(needed, samples.count - index)
+            for offset in index..<(index + take) {
+                let sample = samples[offset]
+                sumOfSquares += sample * sample
+            }
+            sampleCount += take
+            index += take
+
+            if sampleCount >= windowSampleCount {
+                let rms = sqrt(sumOfSquares / Float(sampleCount))
+                let dB = 20 * log10(max(rms, 1e-6))
+                levels.append(CGFloat(max(0, min(1, (dB + 50) / 50))))
+                sumOfSquares = 0
+                sampleCount = 0
+            }
+        }
+        return levels
+    }
+}
 
 private final class AudioSampleCollector: @unchecked Sendable {
     private let lock = NSLock()

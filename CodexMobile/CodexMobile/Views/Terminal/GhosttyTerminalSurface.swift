@@ -68,6 +68,17 @@ struct RemodexTerminalTheme: Equatable {
     }
 }
 
+/// Lets SwiftUI callers pull text out of the live UIKit terminal view on
+/// demand (e.g. for the "Select text" sheet) without owning the view itself.
+@MainActor
+final class GhosttyTerminalTextReader {
+    fileprivate weak var view: GhosttyTerminalView?
+
+    func visibleText() -> String? {
+        view?.visibleTextForSelection()
+    }
+}
+
 struct GhosttyTerminalSurface: UIViewRepresentable {
     let terminalKey: String
     let buffer: Data
@@ -77,6 +88,7 @@ struct GhosttyTerminalSurface: UIViewRepresentable {
     let onInput: (Data) -> Void
     let onResize: (Int, Int) -> Void
     var onNativeAvailabilityChanged: ((Bool) -> Void)? = nil
+    var textReader: GhosttyTerminalTextReader? = nil
 
     func makeUIView(context: Context) -> GhosttyTerminalView {
         let view = GhosttyTerminalView()
@@ -99,5 +111,6 @@ struct GhosttyTerminalSurface: UIViewRepresentable {
         view.backgroundColorHex = theme.background
         view.themeConfig = theme.ghosttyConfig
         view.initialBuffer = buffer
+        textReader?.view = view
     }
 }

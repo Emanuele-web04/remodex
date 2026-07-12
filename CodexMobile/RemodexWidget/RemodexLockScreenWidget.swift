@@ -117,21 +117,37 @@ struct RemodexDisplayIslandLiveActivity: Widget {
                     RemodexDisplayIslandCountView(
                         value: context.state.runningConversations.count,
                         title: context.isStale ? "Paused" : "Running",
-                        tint: context.isStale ? .secondary : .green
+                        tint: runningCountTint(for: context.state, isStale: context.isStale)
                     )
                     .padding(.leading, 8)
                 }
                 DynamicIslandExpandedRegion(.trailing) {
                     RemodexDisplayIslandCountView(
-                        value: context.state.completedConversations.count + context.state.failedConversations.count,
+                        value: reviewCount(for: context.state),
                         title: "Review",
-                        tint: context.state.failedConversations.isEmpty ? .cyan : .orange
+                        tint: reviewCountTint(for: context.state)
                     )
                     .padding(.trailing, 8)
                 }
                 DynamicIslandExpandedRegion(.bottom) {
-                    RemodexDisplayIslandExpandedList(state: context.state, isStale: context.isStale)
-                        .padding(.horizontal, 8)
+                    VStack(alignment: .leading, spacing: 6) {
+                        RemodexDisplayIslandExpandedList(state: context.state, isStale: context.isStale, style: .island)
+
+                        // When the app can no longer push updates the counts/timers
+                        // freeze; surface how old the data is instead of hiding it,
+                        // so a "Paused" island still tells the truth.
+                        if context.isStale {
+                            Label {
+                                Text(context.state.updatedAt, style: .relative)
+                            } icon: {
+                                Image(systemName: "clock")
+                            }
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.top, 2)
                 }
             } compactLeading: {
                 RemodexDisplayIslandMark()
@@ -144,9 +160,29 @@ struct RemodexDisplayIslandLiveActivity: Widget {
                 RemodexDisplayIslandMark()
                     .padding(.vertical, 2)
             }
-            .keylineTint(.green)
+            .keylineTint(context.isStale ? .gray : .green)
             .widgetURL(context.state.primaryThreadURL)
         }
+    }
+
+    private func runningCountTint(for state: RemodexDisplayIslandAttributes.ContentState, isStale: Bool) -> Color {
+        // Only assert live-green when there is something actually running; a stale
+        // or zero count is neutral so it doesn't read as active progress.
+        if isStale || state.runningConversations.isEmpty {
+            return .secondary
+        }
+        return .green
+    }
+
+    private func reviewCount(for state: RemodexDisplayIslandAttributes.ContentState) -> Int {
+        state.completedConversations.count + state.failedConversations.count
+    }
+
+    private func reviewCountTint(for state: RemodexDisplayIslandAttributes.ContentState) -> Color {
+        if reviewCount(for: state) == 0 {
+            return .secondary
+        }
+        return state.failedConversations.isEmpty ? .cyan : .orange
     }
 
     private func compactStatusText(for state: RemodexDisplayIslandAttributes.ContentState) -> String {
@@ -211,19 +247,29 @@ private struct RemodexDisplayIslandLockScreenView: View {
     }
 }
 
+// Distinguishes the Dynamic Island expanded rows (which sit beneath the
+// "Running"/"Review" count headers) from the standalone banner rows, so the
+// island can drop the per-row status labels the headers already convey while
+// the banner keeps them.
+private enum RemodexDisplayIslandRowStyle {
+    case banner
+    case island
+}
+
 private struct RemodexDisplayIslandExpandedList: View {
     let state: RemodexDisplayIslandAttributes.ContentState
     var isStale: Bool = false
+    var style: RemodexDisplayIslandRowStyle = .banner
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             ForEach(displayRows) { row in
                 if let url = row.threadURL {
                     Link(destination: url) {
-                        RemodexDisplayIslandRow(conversation: row, isStale: isStale)
+                        RemodexDisplayIslandRow(conversation: row, isStale: isStale, style: style)
                     }
                 } else {
-                    RemodexDisplayIslandRow(conversation: row, isStale: isStale)
+                    RemodexDisplayIslandRow(conversation: row, isStale: isStale, style: style)
                 }
             }
         }
@@ -237,6 +283,7 @@ private struct RemodexDisplayIslandExpandedList: View {
 private struct RemodexDisplayIslandRow: View {
     let conversation: RemodexDisplayIslandConversation
     var isStale: Bool = false
+    var style: RemodexDisplayIslandRowStyle = .banner
 
     var body: some View {
         HStack(spacing: 7) {
@@ -257,21 +304,35 @@ private struct RemodexDisplayIslandRow: View {
             .frame(maxWidth: .infinity, alignment: .leading)
 
             VStack(alignment: .trailing, spacing: 1) {
-                Text(displayState)
-                    .font(.caption2.weight(.medium))
-                    .foregroundStyle(tint)
-                    .lineLimit(1)
+                if !hidesRedundantStatusLabel {
+                    Text(displayState)
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(tint)
+                        .lineLimit(1)
+                }
 
                 if let runningStartedAt = conversation.runningStartedAt, !isStaleRunningRow {
                     Text(runningStartedAt, style: .timer)
                         .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(hidesRedundantStatusLabel ? tint : .secondary)
                         .lineLimit(1)
                         .multilineTextAlignment(.trailing)
                 }
             }
             .frame(width: 62, alignment: .trailing)
         }
+    }
+
+    // In the Dynamic Island the leading header already reads "Running", so the
+    // per-row "Running" label is pure duplication: drop it for live running rows
+    // and let the timer (tinted with the state color) carry the status. The
+    // banner keeps the label, and non-running / stale rows keep it too since the
+    // header does not disambiguate ready vs failed.
+    private var hidesRedundantStatusLabel: Bool {
+        style == .island
+            && !isStale
+            && conversation.resolvedState == .running
+            && conversation.runningStartedAt != nil
     }
 
     // Without updates from the app (suspended/offline) a "Running" row is only a

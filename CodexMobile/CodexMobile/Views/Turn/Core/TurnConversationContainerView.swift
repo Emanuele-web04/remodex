@@ -12,6 +12,7 @@ struct TurnConversationContainerView: View {
     let timelineChangeToken: Int
     let activeTurnID: String?
     let isThreadRunning: Bool
+    let runStartGeneration: Int
     let isSendInFlight: Bool
     let latestTurnTerminalState: CodexTurnTerminalState?
     let completedTurnIDs: Set<String>
@@ -31,7 +32,7 @@ struct TurnConversationContainerView: View {
     let initialTurnsLoaded: Bool
     let isLoadingRemoteEarlierMessages: Bool
     let olderHistoryLoadErrorMessage: String?
-    let shouldAnchorToAssistantResponse: Binding<Bool>
+    let isAwaitingAssistantResponse: Binding<Bool>
     let isComposerFocused: Bool
     let isComposerAutocompletePresented: Bool
     let emptyState: AnyView
@@ -83,6 +84,7 @@ struct TurnConversationContainerView: View {
         // be starved by rapid assistant streaming and hide a just-sent user row.
         let messageLayout = Self.buildMessageLayout(
             from: messages,
+            activeTurnID: activeTurnID,
             planSessionSource: planSessionSource
         )
 
@@ -93,6 +95,7 @@ struct TurnConversationContainerView: View {
                 timelineChangeToken: timelineChangeToken,
                 activeTurnID: activeTurnID,
                 isThreadRunning: isThreadRunning,
+                runStartGeneration: runStartGeneration,
                 isSendInFlight: isSendInFlight,
                 latestTurnTerminalState: latestTurnTerminalState,
                 completedTurnIDs: completedTurnIDs,
@@ -113,7 +116,7 @@ struct TurnConversationContainerView: View {
                 initialTurnsLoaded: initialTurnsLoaded,
                 isLoadingRemoteEarlierMessages: isLoadingRemoteEarlierMessages,
                 olderHistoryLoadErrorMessage: olderHistoryLoadErrorMessage,
-                shouldAnchorToAssistantResponse: shouldAnchorToAssistantResponse,
+                isAwaitingAssistantResponse: isAwaitingAssistantResponse,
                 isComposerFocused: isComposerFocused,
                 isComposerAutocompletePresented: isComposerAutocompletePresented,
                 onRetryUserMessage: onRetryUserMessage,
@@ -151,15 +154,6 @@ struct TurnConversationContainerView: View {
     // Keeps the active plan discoverable without covering the message timeline.
     private func composerWithPinnedPlanAccessory(for messageLayout: TimelineMessageLayout) -> some View {
         VStack(spacing: 8) {
-            if let pinnedTaskPlanMessage = messageLayout.pinnedTaskPlanMessage {
-                PlanExecutionAccessory(message: pinnedTaskPlanMessage) {
-                    isShowingPinnedPlanSheet = true
-                }
-                .padding(.horizontal, 12)
-                .padding(.top, 8)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
-
             if let composerRecoveryAccessory {
                 composerRecoveryAccessory
                     .padding(.horizontal, 12)
@@ -173,24 +167,36 @@ struct TurnConversationContainerView: View {
                 composer
             }
         }
-        .animation(.easeInOut(duration: 0.18), value: messageLayout.pinnedTaskPlanMessage?.id)
+        // The active plan renders as a capsule inside the composer's carousel
+        // row; the environment carries it there without widening the composer API.
+        .environment(\.pinnedPlanAccessory, messageLayout.pinnedTaskPlanMessage.map { message in
+            PinnedPlanAccessoryContext(snapshot: PlanAccessorySnapshot(message: message)) {
+                isShowingPinnedPlanSheet = true
+            }
+        })
         .animation(.easeInOut(duration: 0.18), value: messageLayout.activeStructuredPromptMessage?.id)
     }
 
     // Separates pinned plan content from renderable timeline rows in one pass.
     private static func buildMessageLayout(
         from messages: [CodexMessage],
+        activeTurnID: String?,
         planSessionSource: CodexPlanSessionSource?
     ) -> TimelineMessageLayout {
         var timelineMessages: [CodexMessage] = []
         timelineMessages.reserveCapacity(messages.count)
-        var pinnedTaskPlanMessage: CodexMessage?
+        let pinnedTaskPlanMessage = pinnedTaskPlanMessage(
+            from: messages,
+            activeTurnID: activeTurnID
+        )
         var activeStructuredPromptMessage: CodexMessage?
         let canReplaceComposerWithPrompt = planSessionSource?.isNative == true
 
         for message in messages {
-            if message.shouldDisplayPinnedPlanAccessory {
-                pinnedTaskPlanMessage = message
+            if message.isTaskProgressPlanMessage {
+                // Progress snapshots belong only in the compact composer chip.
+                // Older snapshots stay hidden even after a newer one completes.
+                continue
             } else if message.shouldDisplayInlinePlanResult {
                 timelineMessages.append(message)
             } else if message.isPlanSystemMessage {
@@ -214,6 +220,31 @@ struct TurnConversationContainerView: View {
             pinnedTaskPlanMessage: pinnedTaskPlanMessage,
             activeStructuredPromptMessage: activeStructuredPromptMessage
         )
+    }
+
+    // Litter keeps every update_plan snapshot. Only the newest snapshot may
+    // drive the chip. Prefer the active turn so a late replay from an older turn
+    // cannot replace or clear the plan that currently belongs above the composer.
+    static func pinnedTaskPlanMessage(
+        from messages: [CodexMessage],
+        activeTurnID: String? = nil
+    ) -> CodexMessage? {
+        let normalizedActiveTurnID = activeTurnID?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let activeTurnPlan: CodexMessage? = normalizedActiveTurnID.flatMap { activeTurnID in
+            guard !activeTurnID.isEmpty else {
+                return nil
+            }
+            return messages.last { message in
+                message.isTaskProgressPlanMessage
+                    && message.turnId?.trimmingCharacters(in: .whitespacesAndNewlines) == activeTurnID
+            }
+        }
+        guard let latest = activeTurnPlan
+                ?? messages.last(where: { $0.isTaskProgressPlanMessage }),
+              latest.shouldDisplayPinnedPlanAccessory else {
+            return nil
+        }
+        return latest
     }
 }
 
@@ -279,10 +310,28 @@ extension CodexMessage {
         role == .system && kind == .plan
     }
 
+    // Structured todo-list state is task progress even if an old bridge or
+    // cached message incorrectly labeled it as a result. Real proposed-plan
+    // results do not carry mutable step statuses.
+    var isTaskProgressPlanMessage: Bool {
+        guard isPlanSystemMessage else {
+            return false
+        }
+        if resolvedPlanPresentation?.isProgressAccessory == true {
+            return true
+        }
+
+        let steps = planState?.steps ?? []
+        guard !steps.isEmpty else {
+            return false
+        }
+        let proposedBody = proposedPlan?.body.trimmingCharacters(in: .whitespacesAndNewlines)
+        return proposedBody == nil || proposedBody == "Planning..."
+    }
+
     // Hides terminal 3/3-style plans so only genuinely active plans stay pinned above the composer.
     var shouldDisplayPinnedPlanAccessory: Bool {
-        guard isPlanSystemMessage,
-              resolvedPlanPresentation?.isProgressAccessory == true else {
+        guard isTaskProgressPlanMessage else {
             return false
         }
 
@@ -299,7 +348,7 @@ extension CodexMessage {
     }
 
     var shouldDisplayInlinePlanResult: Bool {
-        guard isPlanSystemMessage, !shouldDisplayPinnedPlanAccessory else {
+        guard isPlanSystemMessage, !isTaskProgressPlanMessage else {
             return false
         }
 

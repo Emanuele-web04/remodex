@@ -19,18 +19,22 @@ enum TurnTimelineReducer {
     // Applies all render-only timeline transforms in one pass.
     static func project(messages: [CodexMessage]) -> TurnTimelineProjection {
         let visibleMessages = removeHiddenSystemMarkers(in: messages)
-        let reordered = enforceIntraTurnOrder(in: visibleMessages)
+        let anchored = anchorLateFileChangesToOwningTurn(in: visibleMessages)
+        let reordered = enforceIntraTurnOrder(in: anchored)
         let collapsedThinking = collapseThinkingMessages(in: reordered)
         let withoutCommandThinkingEchoes = removeRedundantThinkingCommandActivityMessages(in: collapsedThinking)
-        let dedupedUsers = removeDuplicateUserMessages(in: withoutCommandThinkingEchoes)
+        let withoutRepeatedReasoningSummaries = removeDuplicateReasoningSummaryMessages(
+            in: withoutCommandThinkingEchoes
+        )
+        let dedupedUsers = removeDuplicateUserMessages(in: withoutRepeatedReasoningSummaries)
         let dedupedFileChanges = removeDuplicateFileChangeMessages(in: dedupedUsers)
         let dedupedSubagentActions = removeDuplicateSubagentActionMessages(in: dedupedFileChanges)
         let dedupedAssistant = removeDuplicateAssistantMessages(in: dedupedSubagentActions)
         return TurnTimelineProjection(messages: dedupedAssistant)
     }
 
-    // Resolves where the viewport should anchor when assistant output starts streaming.
-    static func assistantResponseAnchorMessageID(
+    // Resolves whether the active assistant response has entered the timeline.
+    static func assistantResponseMessageID(
         in messages: [CodexMessage],
         activeTurnID: String?
     ) -> String? {
@@ -61,8 +65,26 @@ enum TurnTimelineReducer {
 
         var result = messages
 
-        for (_, indices) in indicesByTurn {
+        for (turnId, indices) in indicesByTurn {
             guard indices.count > 1 else { continue }
+
+            // A late row from an older turn can sit beyond an entire newer turn
+            // after cache reconciliation. Never permute that older turn through
+            // another stable turn's slots; canonical history owns that repair.
+            if let firstIndex = indices.first, let lastIndex = indices.last {
+                let crossesStableBoundary = result[firstIndex...lastIndex].contains { message in
+                    if let candidateTurnId = message.turnId,
+                       !candidateTurnId.isEmpty,
+                       candidateTurnId != turnId {
+                        return true
+                    }
+                    return message.role == .user
+                        && (message.turnId == nil || message.turnId?.isEmpty == true)
+                }
+                if crossesStableBoundary {
+                    continue
+                }
+            }
 
             let turnMessages = indices.map { result[$0] }
 
@@ -212,6 +234,84 @@ enum TurnTimelineReducer {
         }
     }
 
+    // Turn-end file-change snapshots can land after the user already sent the next
+    // message: the append gives them a tail orderIndex, so the diff card would render
+    // glued to the start of the NEW turn. enforceIntraTurnOrder cannot fix this (it
+    // only reorders within a turn's own slots), so relocate the card back to the end
+    // of its owning turn whenever another turn already started after it.
+    static func anchorLateFileChangesToOwningTurn(in messages: [CodexMessage]) -> [CodexMessage] {
+        // Last non-fileChange row per turn: the anchor the card should trail.
+        var lastContentIndexByTurn: [String: Int] = [:]
+        for (index, message) in messages.enumerated() {
+            guard let turnId = message.turnId, !turnId.isEmpty,
+                  !(message.role == .system && message.kind == .fileChange) else {
+                continue
+            }
+            lastContentIndexByTurn[turnId] = index
+        }
+        guard !lastContentIndexByTurn.isEmpty else {
+            return messages
+        }
+
+        // Collect misplaced cards: a fileChange sitting past its turn's last content
+        // row with a different turn (or a new optimistic user prompt) in between.
+        var relocatedIndicesByAnchor: [Int: [Int]] = [:]
+        var relocatedIndices = Set<Int>()
+        for (index, message) in messages.enumerated() {
+            guard message.role == .system,
+                  message.kind == .fileChange,
+                  let turnId = message.turnId, !turnId.isEmpty,
+                  let anchorIndex = lastContentIndexByTurn[turnId],
+                  anchorIndex < index else {
+                continue
+            }
+
+            // Only a confirmed different turnId proves the next turn started. A
+            // nil-turnId user row can still be an in-flight steer of the SAME
+            // running turn (turn ids attach on turn/started); relocating on it
+            // would bounce the card around during live steering.
+            let crossesIntoLaterTurn = messages[(anchorIndex + 1)..<index].contains { between in
+                guard let betweenTurnId = between.turnId, !betweenTurnId.isEmpty else {
+                    return false
+                }
+                return betweenTurnId != turnId
+            }
+            guard crossesIntoLaterTurn else {
+                continue
+            }
+
+            // Preserve any existing same-turn file-change card ahead of the newer
+            // late snapshot so the following dedupe pass still treats late as newest.
+            let insertionAnchorIndex = (0..<index).reversed().first { priorIndex in
+                guard !relocatedIndices.contains(priorIndex),
+                      let priorTurnId = messages[priorIndex].turnId,
+                      !priorTurnId.isEmpty else {
+                    return false
+                }
+                return priorTurnId == turnId
+            } ?? anchorIndex
+
+            relocatedIndicesByAnchor[insertionAnchorIndex, default: []].append(index)
+            relocatedIndices.insert(index)
+        }
+        guard !relocatedIndices.isEmpty else {
+            return messages
+        }
+
+        var result: [CodexMessage] = []
+        result.reserveCapacity(messages.count)
+        for (index, message) in messages.enumerated() {
+            if relocatedIndices.contains(index) {
+                continue
+            }
+            result.append(message)
+            if let lateCards = relocatedIndicesByAnchor[index] {
+                result.append(contentsOf: lateCards.map { messages[$0] })
+            }
+        }
+        return result
+    }
+
     // Mac-started rollout mirrors can interleave many assistant/tool rows before the
     // final answer; edited-file cards are still turn-end artifacts and must trail it.
     private static func movingFileChangesToTurnTail(in messages: [CodexMessage]) -> [CodexMessage] {
@@ -266,17 +366,7 @@ enum TurnTimelineReducer {
         }
     }
 
-    // Late terminal replays can arrive with a newer raw order index; stable closed assistant
-    // rows should still render by their semantic creation time inside one turn.
     private static func intraTurnTieBreak(_ a: CodexMessage, _ b: CodexMessage) -> Bool {
-        if a.role == .assistant,
-           b.role == .assistant,
-           !a.isStreaming,
-           !b.isStreaming,
-           a.createdAt != b.createdAt {
-            return a.createdAt < b.createdAt
-        }
-
         return a.orderIndex < b.orderIndex
     }
 
@@ -398,12 +488,18 @@ enum TurnTimelineReducer {
         return previousTurnId == incomingTurnId
     }
 
-    // Treats synthetic turn-scoped thinking ids as unstable so a later real item can reuse the row.
+    // Treats synthetic turn-scoped and rollout-mirror thinking ids as unstable
+    // so a later real item can reuse the row instead of stacking a duplicate.
+    // Deliberately narrower than isMirrorMintedItemID: only this kind's own
+    // "turn:" placeholder is unstable, other kinds' placeholders stay distinct.
     private static func hasStableThinkingIdentity(_ message: CodexMessage) -> Bool {
         guard let itemId = normalizedIdentifier(message.itemId) else {
             return false
         }
-        return !(itemId.hasPrefix("turn:") && itemId.contains("|kind:\(CodexMessageKind.thinking.rawValue)"))
+        if CodexSyntheticIdentifiers.isRolloutMintedItemID(itemId) {
+            return false
+        }
+        return !CodexSyntheticIdentifiers.isPlaceholderItemID(itemId, kind: .thinking)
     }
 
     // Identifies placeholder-only rows that should be reused instead of stacked.
@@ -570,6 +666,62 @@ enum TurnTimelineReducer {
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
         return command.isEmpty ? nil : command
+    }
+
+    // Codex can emit cumulative reasoning summaries under several stable item
+    // ids in one turn (event_msg plus response_item snapshots). Keep each short
+    // trace title once while preserving the first-seen position and any unseen
+    // suffix titles. Detailed reasoning items remain independent.
+    static func removeDuplicateReasoningSummaryMessages(
+        in messages: [CodexMessage]
+    ) -> [CodexMessage] {
+        var seenSummaryKeysByTurn: [String: Set<String>] = [:]
+        var result: [CodexMessage] = []
+        result.reserveCapacity(messages.count)
+
+        for var message in messages {
+            guard message.role == .system,
+                  message.kind == .thinking,
+                  message.text.utf8.count <= largeTextDedupeByteLimit,
+                  message.text.contains("**"),
+                  let turnID = normalizedIdentifier(message.turnId) else {
+                result.append(message)
+                continue
+            }
+
+            let content = ThinkingDisclosureParser.parse(from: message.text)
+            guard content.isSummaryOnly else {
+                result.append(message)
+                continue
+            }
+
+            var seenKeys = seenSummaryKeysByTurn[turnID, default: Set<String>()]
+            let unseenSections = content.sections.filter { section in
+                let key = reasoningSummaryKey(section.title)
+                guard !key.isEmpty else { return true }
+                return seenKeys.insert(key).inserted
+            }
+            seenSummaryKeysByTurn[turnID] = seenKeys
+
+            guard !unseenSections.isEmpty else {
+                continue
+            }
+            if unseenSections.count != content.sections.count {
+                message.text = unseenSections
+                    .map { "**\($0.title)**\n\n<!-- -->" }
+                    .joined(separator: "\n\n")
+            }
+            result.append(message)
+        }
+
+        return result
+    }
+
+    private static func reasoningSummaryKey(_ title: String) -> String {
+        title
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
+            .lowercased()
     }
 
     // Collapses optimistic phone-send rows with their confirmed runtime echoes so
@@ -900,6 +1052,14 @@ enum TurnTimelineReducer {
             return false
         }
 
+        if let previousItemID = normalizedIdentifier(previous.itemId),
+           let incomingItemID = normalizedIdentifier(incoming.itemId),
+           previousItemID != incomingItemID,
+           !isProvisionalAssistantIdentity(previousItemID),
+           !isProvisionalAssistantIdentity(incomingItemID) {
+            return false
+        }
+
         let minimumTextLength = min(previous.text.utf8.count, incoming.text.utf8.count)
         guard minimumTextLength >= 24,
               messageTextsMatchForDedupe(previous.text, incoming.text) else {
@@ -962,6 +1122,7 @@ enum TurnTimelineReducer {
             in: messages,
             threadId: incoming.threadId,
             turnId: incoming.turnId,
+            itemId: incoming.itemId,
             text: incoming.text,
             excludingMessageID: incoming.id
         )
@@ -971,7 +1132,7 @@ enum TurnTimelineReducer {
         guard let itemId else {
             return true
         }
-        return itemId.hasPrefix("turn:") || itemId.hasPrefix("rollout-")
+        return CodexSyntheticIdentifiers.isMirrorMintedItemID(itemId)
     }
 
     // Keeps only the newest matching file-change card when multiple event channels emit the same diff.
@@ -989,16 +1150,26 @@ enum TurnTimelineReducer {
         var supersededIndices: Set<Int> = []
         for olderSlot in fileChangeIndices.indices {
             let olderIndex = fileChangeIndices[olderSlot]
-            guard let olderSignature = signatures[olderIndex] else { continue }
+            guard let olderSignature = signatures[olderIndex],
+                  !supersededIndices.contains(olderIndex) else { continue }
 
             for newerSlot in (olderSlot + 1)..<fileChangeIndices.count {
                 let newerIndex = fileChangeIndices[newerSlot]
                 guard let newerSignature = signatures[newerIndex],
-                      fileChangeMessage(newerSignature, supersedes: olderSignature) else {
+                      !supersededIndices.contains(newerIndex) else {
                     continue
                 }
-                supersededIndices.insert(olderIndex)
-                break
+                if fileChangeMessage(newerSignature, supersedes: olderSignature)
+                    || fileChangeAggregateAbsorbs(newerSignature, card: olderSignature) {
+                    supersededIndices.insert(olderIndex)
+                    break
+                }
+                // A cumulative aggregate absorbs later completed per-patch
+                // cards whose files it already covers; rendering both stacks the
+                // compact card on top of the aggregate for the same turn.
+                if fileChangeAggregateAbsorbs(olderSignature, card: newerSignature) {
+                    supersededIndices.insert(newerIndex)
+                }
             }
         }
 
@@ -1122,6 +1293,10 @@ enum TurnTimelineReducer {
 
         let turnId = normalizedIdentifier(message.turnId)
         let key = duplicateFileChangeKey(for: message)
+        // Accepted residual: oversized aggregates (>64KB) opt out of dedupe
+        // entirely. A bounded/partial parse would yield partial path sets, and
+        // partial paths can falsely win subset comparisons and delete rows
+        // that should survive — opting out is the safe failure mode.
         let entries = message.text.utf8.count <= largeTextDedupeByteLimit
             ? (TurnFileChangeSummaryParser.parse(from: message.text)?.entries ?? [])
             : []
@@ -1149,13 +1324,42 @@ enum TurnTimelineReducer {
             key: key,
             paths: paths,
             singleEntryDescriptor: singleEntryDescriptor,
-            isStreaming: message.isStreaming
+            isStreaming: message.isStreaming,
+            isKnownAggregate: normalizedIdentifier(message.itemId)
+                .map(CodexSyntheticIdentifiers.isCumulativeFileChangeAggregateItemID) ?? false
         )
     }
 
     // Treats newer file-change snapshots as authoritative only when they describe the
     // same turn (or a turnless→turnful upgrade) and either the same dedupe key or a
     // provisional-to-final snapshot upgrade with matching paths.
+    // A cumulative aggregate and completed per-patch cards can coexist for the
+    // same turn (long Desktop runs emit both). While streaming — or when the
+    // row's item id proves it IS the aggregate — it is the authoritative view
+    // and absorbs any covered card, equal path sets included. Otherwise (the
+    // aggregate often adopts a real item id mid-turn or via history merge, so
+    // identity is unknown) it only absorbs STRICTLY covered cards; equal path
+    // sets stay with the key/streaming arbitration so the wrong row of an
+    // identical pair is never killed.
+    private static func fileChangeAggregateAbsorbs(
+        _ aggregate: FileChangeDedupSignature,
+        card: FileChangeDedupSignature
+    ) -> Bool {
+        guard !card.isStreaming,
+              !card.isKnownAggregate,
+              let aggregateTurn = aggregate.turnId,
+              let cardTurn = card.turnId,
+              aggregateTurn == cardTurn,
+              !card.paths.isEmpty,
+              !aggregate.paths.isEmpty else {
+            return false
+        }
+        if aggregate.isStreaming || aggregate.isKnownAggregate {
+            return card.paths.isSubset(of: aggregate.paths)
+        }
+        return card.paths.isStrictSubset(of: aggregate.paths)
+    }
+
     private static func fileChangeMessage(
         _ newer: FileChangeDedupSignature,
         supersedes older: FileChangeDedupSignature
@@ -1241,6 +1445,9 @@ private struct FileChangeDedupSignature: Equatable {
     let paths: Set<String>
     let singleEntryDescriptor: FileChangeSingleEntryDescriptor?
     let isStreaming: Bool
+    // Positive-only: true when the item id can only belong to the cumulative
+    // aggregate row; false means "identity unknown", not "per-patch card".
+    let isKnownAggregate: Bool
 }
 
 private struct FileChangeSingleEntryDescriptor: Equatable {

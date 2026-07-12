@@ -108,6 +108,22 @@ function createAPNsClient({
 
 function sendRequest(client, headers, body) {
   return new Promise((resolve, reject) => {
+    let settled = false;
+    const settleReject = (error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    };
+    const settleResolve = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+
+    client.on("error", (error) => {
+      settleReject(apnsError("apns_session_error", `APNs session error: ${error?.message || error}`, 502));
+    });
+
     const request = client.request(headers);
     const chunks = [];
     let responseHeaders = null;
@@ -120,12 +136,12 @@ function sendRequest(client, headers, body) {
       chunks.push(chunk);
     });
     request.on("end", () => {
-      resolve({
+      settleResolve({
         status: Number(responseHeaders?.[":status"] || 0),
         body: safeParseJSON(chunks.join("")),
       });
     });
-    request.on("error", reject);
+    request.on("error", settleReject);
     request.end(body);
   });
 }

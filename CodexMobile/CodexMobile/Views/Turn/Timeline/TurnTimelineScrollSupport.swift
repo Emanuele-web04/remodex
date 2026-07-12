@@ -1,19 +1,18 @@
 // FILE: TurnTimelineScrollSupport.swift
 // Purpose: Provides scroll geometry batching and UIKit axis clamping for the timeline.
 // Layer: View Support
-// Exports: ScrollBottomGeometry, TurnTimelineRenderItemsCacheSignature, TurnTimelineRenderItemsCache,
-//   TurnTimelinePendingAssistantState, VerticalScrollAxisGuard, ScrollGeometryCoalescer
+// Exports: ScrollBottomState, TurnTimelineRenderItemsCacheSignature, TurnTimelineRenderItemsCache,
+//   TurnTimelinePendingAssistantState, TurnTimelineNativeScrollController,
+//   VerticalScrollAxisGuard, ScrollGeometryCoalescer
 // Depends on: SwiftUI, UIKit, CodexMessage, TurnTimelineRenderProjection
 
 import SwiftUI
 import UIKit
 
-struct ScrollBottomGeometry: Equatable {
+struct ScrollBottomState: Equatable {
     let isAtBottom: Bool
-    let viewportHeight: CGFloat
-    let contentHeight: CGFloat
 
-    static func from(_ geometry: ScrollGeometry) -> ScrollBottomGeometry {
+    static func from(_ geometry: ScrollGeometry) -> ScrollBottomState {
         let viewportHeight = geometry.visibleRect.height
         let isAtBottom: Bool
         if geometry.contentSize.height <= 0 || viewportHeight <= 0 {
@@ -24,11 +23,7 @@ struct ScrollBottomGeometry: Equatable {
             isAtBottom = geometry.visibleRect.maxY
                 >= geometry.contentSize.height - TurnScrollStateTracker.bottomThreshold
         }
-        return ScrollBottomGeometry(
-            isAtBottom: isAtBottom,
-            viewportHeight: viewportHeight,
-            contentHeight: geometry.contentSize.height
-        )
+        return ScrollBottomState(isAtBottom: isAtBottom)
     }
 }
 
@@ -77,20 +72,20 @@ enum TurnTimelinePendingAssistantState {
     // The optimistic user row appears before the first assistant row; keep both
     // the thinking indicator and bottom anchor active during that short gap.
     static func isWaitingForAssistantResponse(
-        shouldAnchorToAssistantResponse: Bool,
+        isAwaitingAssistantResponse: Bool,
         messages: [CodexMessage]
     ) -> Bool {
-        shouldAnchorToAssistantResponse
+        isAwaitingAssistantResponse
             && messages.last?.role == .user
     }
 
     static func shouldTrackScrollGeometry(
-        shouldAnchorToAssistantResponse: Bool,
-        autoScrollMode: TurnAutoScrollMode,
+        isAwaitingAssistantResponse: Bool,
+        autoScrollMode: TurnScrollOwnership,
         isWaitingForAssistantResponse: Bool
     ) -> Bool {
-        !shouldAnchorToAssistantResponse
-            && autoScrollMode != .anchorAssistantResponse
+        !isAwaitingAssistantResponse
+            && autoScrollMode != .awaitingAssistantResponse
             && !isWaitingForAssistantResponse
     }
 
@@ -99,23 +94,62 @@ enum TurnTimelinePendingAssistantState {
     }
 }
 
+// Gives app-owned scroll actions a narrow bridge to UIKit. SwiftUI's scrollTo
+// does not reliably interrupt an in-flight UIScrollView deceleration by itself.
+@MainActor
+final class TurnTimelineNativeScrollController {
+    private weak var scrollView: UIScrollView?
+
+    func attach(_ scrollView: UIScrollView) {
+        self.scrollView = scrollView
+    }
+
+    func cancelUserMomentum() {
+        guard let scrollView,
+              scrollView.isDragging || scrollView.isDecelerating else {
+            return
+        }
+
+        let currentOffset = scrollView.contentOffset
+        // Cancelling and immediately restoring the pan recognizer terminates
+        // UIKit's current drag/deceleration without moving the viewport.
+        scrollView.panGestureRecognizer.isEnabled = false
+        scrollView.panGestureRecognizer.isEnabled = true
+        scrollView.setContentOffset(currentOffset, animated: false)
+    }
+}
+
 // Pins SwiftUI's backing UIScrollView to the vertical axis when an oversized row
 // briefly makes UIKit preserve a horizontal content offset.
 struct VerticalScrollAxisGuard: UIViewRepresentable {
+    let nativeScrollController: TurnTimelineNativeScrollController
+
     func makeUIView(context: Context) -> VerticalScrollAxisGuardView {
-        VerticalScrollAxisGuardView()
+        VerticalScrollAxisGuardView(nativeScrollController: nativeScrollController)
     }
 
     func updateUIView(_ uiView: VerticalScrollAxisGuardView, context: Context) {
+        uiView.nativeScrollController = nativeScrollController
         uiView.attachToNearestScrollViewIfNeeded()
     }
 }
 
 // Internal because UIViewRepresentable witnesses expose this concrete UIView type.
 final class VerticalScrollAxisGuardView: UIView {
+    var nativeScrollController: TurnTimelineNativeScrollController
     private weak var guardedScrollView: UIScrollView?
     private var contentOffsetObservation: NSKeyValueObservation?
     private var boundsObservation: NSKeyValueObservation?
+
+    init(nativeScrollController: TurnTimelineNativeScrollController) {
+        self.nativeScrollController = nativeScrollController
+        super.init(frame: .zero)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
@@ -123,7 +157,11 @@ final class VerticalScrollAxisGuardView: UIView {
     }
 
     func attachToNearestScrollViewIfNeeded() {
-        guard let scrollView = enclosingScrollView(), guardedScrollView !== scrollView else {
+        guard let scrollView = enclosingScrollView() else {
+            return
+        }
+        nativeScrollController.attach(scrollView)
+        guard guardedScrollView !== scrollView else {
             clampHorizontalOffset()
             return
         }
@@ -163,10 +201,16 @@ final class VerticalScrollAxisGuardView: UIView {
 /// "tried to update multiple times per frame" cycling.
 @MainActor
 final class ScrollGeometryCoalescer {
-    var pending: (old: ScrollBottomGeometry, new: ScrollBottomGeometry)?
-    var applyTask: Task<Void, Never>?
+    var pending: (old: ScrollBottomState, new: ScrollBottomState)?
+    private(set) var latestObservedIsAtBottom: Bool?
+    private var applyTask: Task<Void, Never>?
+    private var applyGeneration = 0
+    private var followBottomTask: Task<Void, Never>?
+    private var followBottomGeneration = 0
+    private var isFollowBottomCorrectionAnimating = false
+    private var pendingFollowBottomRequest: (@MainActor () -> Void)?
 
-    func record(old: ScrollBottomGeometry, new: ScrollBottomGeometry) {
+    func record(old: ScrollBottomState, new: ScrollBottomState) {
         if let pending {
             self.pending = (old: pending.old, new: new)
         } else {
@@ -174,10 +218,88 @@ final class ScrollGeometryCoalescer {
         }
     }
 
+    func observe(_ state: ScrollBottomState) {
+        latestObservedIsAtBottom = state.isAtBottom
+    }
+
+    func markLatestObservedNotAtBottom() {
+        latestObservedIsAtBottom = false
+    }
+
+    func scheduleApply(
+        after nanoseconds: UInt64,
+        action: @escaping @MainActor (ScrollBottomState, ScrollBottomState) -> Void
+    ) {
+        guard applyTask == nil else { return }
+        applyGeneration &+= 1
+        let expectedGeneration = applyGeneration
+        applyTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: nanoseconds)
+            guard let self,
+                  !Task.isCancelled,
+                  applyGeneration == expectedGeneration,
+                  let pending else {
+                return
+            }
+            self.pending = nil
+            applyTask = nil
+            action(pending.old, pending.new)
+        }
+    }
+
+    func scheduleFollowBottom(
+        after nanoseconds: UInt64,
+        action: @escaping @MainActor (@escaping @MainActor () -> Void) -> Void
+    ) {
+        guard followBottomTask == nil else { return }
+        if isFollowBottomCorrectionAnimating {
+            pendingFollowBottomRequest = { [weak self] in
+                self?.scheduleFollowBottom(after: nanoseconds, action: action)
+            }
+            return
+        }
+        followBottomGeneration &+= 1
+        let expectedGeneration = followBottomGeneration
+        followBottomTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: nanoseconds)
+            guard let self,
+                  !Task.isCancelled,
+                  followBottomGeneration == expectedGeneration else {
+                return
+            }
+            followBottomTask = nil
+            isFollowBottomCorrectionAnimating = true
+            action { [weak self] in
+                self?.completeFollowBottom(generation: expectedGeneration)
+            }
+        }
+    }
+
+    private func completeFollowBottom(generation: Int) {
+        guard followBottomGeneration == generation else { return }
+        isFollowBottomCorrectionAnimating = false
+
+        let pendingRequest = pendingFollowBottomRequest
+        pendingFollowBottomRequest = nil
+        guard latestObservedIsAtBottom == false else { return }
+        pendingRequest?()
+    }
+
+    func cancelFollowBottom() {
+        followBottomGeneration &+= 1
+        followBottomTask?.cancel()
+        followBottomTask = nil
+        isFollowBottomCorrectionAnimating = false
+        pendingFollowBottomRequest = nil
+    }
+
     func cancel() {
+        cancelFollowBottom()
+        applyGeneration &+= 1
         applyTask?.cancel()
         applyTask = nil
         pending = nil
+        latestObservedIsAtBottom = nil
     }
 }
 

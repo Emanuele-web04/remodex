@@ -5,6 +5,7 @@
 // Depends on: ws, crypto, os, ./bridge-status, ./codex-desktop-refresher, ./codex-transport, ./rollout-watch, ./voice-handler
 
 const WebSocket = require("ws");
+const { constants: bufferConstants } = require("buffer");
 const { createHash, randomBytes } = require("crypto");
 const { execFile, spawn } = require("child_process");
 const fs = require("fs");
@@ -53,9 +54,18 @@ const {
 const { createBridgeSecureTransport } = require("./secure-transport");
 const { createRolloutLiveMirrorController } = require("./rollout-live-mirror");
 const {
+  isContextualUserText,
+  isUserRoleItem,
+  readUserItemText,
+  sanitizeUserRoleItem,
+  visibleUserPromptText,
+} = require("./desktop-ipc-shared");
+const {
   createDesktopIpcActionFollower,
   seedConversationStateFromThreadRead,
 } = require("./desktop-ipc-action-follower");
+const { createDesktopIpcLiveOwner } = require("./desktop-ipc-live-owner");
+const { createThreadRuntimeSettingsStore } = require("./thread-runtime-settings-store");
 const { version: bridgePackageVersion = "" } = require("../package.json");
 const {
   MINIMUM_SUPPORTED_IOS_APP_VERSION,
@@ -65,8 +75,10 @@ const {
 } = require("./ios-app-compatibility");
 const { createShortPairingCode, SHORT_PAIRING_CODE_LENGTH } = require("./qr");
 const {
-  parseSessionJsonlMetadata,
+  JSONL_OLDER_HANDOFF_CURSOR,
   parseSessionJsonlTurns,
+  readRecentSessionJsonlTurns,
+  readSessionJsonlMetadataFromFile,
   readThreadTurnsListPageFromSessionJsonl,
 } = require("./session-jsonl-history");
 const { buildApplyPatchFileChangeItem } = require("./apply-patch-changes");
@@ -76,7 +88,11 @@ const RELAY_WATCHDOG_PING_INTERVAL_MS = 10_000;
 const RELAY_HISTORY_IMAGE_REFERENCE_URL = "remodex://history-image-elided";
 const RELAY_THREAD_PAYLOAD_SOFT_LIMIT_BYTES = 4 * 1024 * 1024;
 const RELAY_HISTORY_TEXT_TAIL_LIMIT_CHARS = 24_000;
-const RELAY_HISTORY_RECENT_TURN_TARGET = 40;
+// Recent-turn window used only when a thread/read payload already exceeds the
+// relay soft budget: heavy threads first paint with this many newest turns and
+// older history arrives via thread/turns/list pagination. Normal threads are
+// never trimmed.
+const RELAY_HISTORY_RECENT_TURN_TARGET = 16;
 const RELAY_TURNS_LIST_TARGET_BUDGET_MS = 5_500;
 const RELAY_TURNS_LIST_BUDGET_RESERVE_MS = 1_000;
 const RELAY_TURNS_LIST_MAX_INITIAL_LIMIT = 5;
@@ -88,6 +104,17 @@ const RELAY_JSONL_ARTIFACT_CACHE_MAX_ENTRIES = 128;
 // newer rollout with a different cwd; cache entries are validated against file identity.
 const RELAY_JSONL_THREAD_CWD_CACHE_TTL_MS = 5 * 60_000;
 const RELAY_JSONL_THREAD_EMPTY_CWD_CACHE_TTL_MS = 30_000;
+const RELAY_JSONL_FAST_FIRST_PAGE_WAIT_MS = 1_500;
+// The phone may be backgrounded between the provisional JSONL page and its
+// canonical reconciliation. Keep the handoff long enough that a normal
+// foreground/reconnect does not turn a coherent first page into a dead cursor.
+const RELAY_JSONL_CANONICAL_HANDOFF_TTL_MS = 10 * 60_000;
+const RELAY_JSONL_CANONICAL_HANDOFF_MAX_ENTRIES = 32;
+const JSONL_CANONICAL_HANDOFF_CURSOR_PREFIX = "remodex-jsonl-handoff-v1:";
+const RELAY_JSONL_FULL_ARTIFACT_FALLBACK_MAX_BYTES = Math.max(
+  0,
+  bufferConstants.MAX_STRING_LENGTH - (8 * 1024 * 1024)
+);
 const BRIDGE_PACKAGE_UPDATE_COMMAND = "npm install -g remodex@latest";
 const BRIDGE_PACKAGE_UPDATE_TIMEOUT_MS = 180_000;
 const BRIDGE_RESTART_AFTER_UPDATE_DELAY_MS = 750;
@@ -110,6 +137,12 @@ const RELAY_TURNS_LIST_PAGINATION_RESULT_KEYS = [
   "previousCursor",
   "previous_cursor",
 ];
+const RELAY_TURNS_LIST_PREVIOUS_PAGINATION_RESULT_KEYS = new Set([
+  "prevCursor",
+  "prev_cursor",
+  "previousCursor",
+  "previous_cursor",
+]);
 const jsonlArtifactItemsCacheByThread = new Map();
 const jsonlThreadCwdCacheByThread = new Map();
 const FORWARDED_REQUEST_METHODS_MAX_SIZE = 500;
@@ -125,6 +158,540 @@ function evictOldestEntries(map, maxSize) {
     const key = iterator.next().value;
     map.delete(key);
   }
+}
+
+function createThreadTurnsListFastPageCoordinator({
+  waitMs = RELAY_JSONL_FAST_FIRST_PAGE_WAIT_MS,
+  handoffTTLms = RELAY_JSONL_CANONICAL_HANDOFF_TTL_MS,
+  maxHandoffs = RELAY_JSONL_CANONICAL_HANDOFF_MAX_ENTRIES,
+  payloadSoftLimitBytes = RELAY_THREAD_PAYLOAD_SOFT_LIMIT_BYTES,
+  sanitizeForRelay = sanitizeThreadHistoryImagesForRelay,
+  now = Date.now,
+  setTimeoutImpl = setTimeout,
+  clearTimeoutImpl = clearTimeout,
+  createToken = () => randomBytes(12).toString("hex"),
+} = {}) {
+  const handoffsByToken = new Map();
+  const latestHandoffTokenByThread = new Map();
+  const canonicalFirstPageByKey = new Map();
+
+  function pruneHandoffs() {
+    const cutoff = now() - handoffTTLms;
+    for (const [token, entry] of handoffsByToken) {
+      if (entry.createdAt >= cutoff) {
+        continue;
+      }
+      handoffsByToken.delete(token);
+      if (latestHandoffTokenByThread.get(entry.threadId) === token) {
+        latestHandoffTokenByThread.delete(entry.threadId);
+      }
+    }
+    for (const [cacheKey, entry] of canonicalFirstPageByKey) {
+      if (entry.createdAt < cutoff) {
+        canonicalFirstPageByKey.delete(cacheKey);
+      }
+    }
+    while (handoffsByToken.size > maxHandoffs) {
+      const oldestToken = handoffsByToken.keys().next().value;
+      const oldest = handoffsByToken.get(oldestToken);
+      handoffsByToken.delete(oldestToken);
+      if (oldest && latestHandoffTokenByThread.get(oldest.threadId) === oldestToken) {
+        latestHandoffTokenByThread.delete(oldest.threadId);
+      }
+    }
+  }
+
+  function rememberHandoff(threadId, canonicalOutcomePromise, jsonlFallback) {
+    pruneHandoffs();
+    const token = createToken();
+    const entry = {
+      token,
+      threadId,
+      canonicalOutcomePromise,
+      hadNonEmptyJsonl: Boolean(jsonlFallback?.response),
+      anchorTurnId: firstTurnsListTurnId(jsonlFallback?.response),
+      createdAt: now(),
+    };
+    handoffsByToken.set(token, entry);
+    latestHandoffTokenByThread.set(threadId, token);
+    pruneHandoffs();
+    return token;
+  }
+
+  function consumeHandoff(entry) {
+    if (!entry?.token) {
+      return;
+    }
+    handoffsByToken.delete(entry.token);
+    if (latestHandoffTokenByThread.get(entry.threadId) === entry.token) {
+      latestHandoffTokenByThread.delete(entry.threadId);
+    }
+  }
+
+  function canonicalFirstPageOutcome(cacheKey, canonicalRequest, fetchCanonical) {
+    pruneHandoffs();
+    const existing = canonicalFirstPageByKey.get(cacheKey);
+    if (existing) {
+      return existing.canonicalOutcomePromise;
+    }
+    const canonicalOutcomePromise = settleThreadTurnsListCanonicalOutcome(
+      fetchCanonical(canonicalRequest)
+    );
+    canonicalFirstPageByKey.set(cacheKey, {
+      canonicalOutcomePromise,
+      createdAt: now(),
+    });
+    canonicalOutcomePromise.then(() => {
+      forgetCanonicalFirstPage(cacheKey, canonicalOutcomePromise);
+    });
+    return canonicalOutcomePromise;
+  }
+
+  function forgetCanonicalFirstPage(cacheKey, canonicalOutcomePromise) {
+    const existing = canonicalFirstPageByKey.get(cacheKey);
+    if (existing?.canonicalOutcomePromise === canonicalOutcomePromise) {
+      canonicalFirstPageByKey.delete(cacheKey);
+    }
+  }
+
+  function readHandoffEntry(request) {
+    pruneHandoffs();
+    const threadId = threadIdFromRequestParams(request?.params);
+    const cursor = request?.params?.cursor;
+    const token = threadTurnsListHandoffDescriptor(cursor)?.token
+      || latestHandoffTokenByThread.get(threadId)
+      || "";
+    const entry = token ? handoffsByToken.get(token) : null;
+    return entry?.threadId === threadId ? entry : null;
+  }
+
+  async function awaitCanonicalOutcome(canonicalOutcomePromise) {
+    const outcome = await canonicalOutcomePromise;
+    if (!outcome.ok) {
+      throw outcome.error;
+    }
+    return outcome.response;
+  }
+
+  async function extendCanonicalResponseThroughAnchor(
+    response,
+    canonicalRequest,
+    anchorTurnId,
+    fetchCanonical,
+    maxPages = 12
+  ) {
+    if (threadTurnsListResponseContainsAnchor(response, anchorTurnId)) {
+      return response;
+    }
+    const firstResult = response?.result;
+    const turnsKey = findTurnsListResultKey(firstResult);
+    if (!turnsKey) {
+      return null;
+    }
+
+    let lastResult = firstResult;
+    let combinedTurns = [...firstResult[turnsKey]];
+    let cursor = readTurnsListNextCursor(firstResult);
+    const seenCursors = new Set();
+    for (let pageIndex = 0; pageIndex < maxPages && hasRelayCursor(cursor); pageIndex += 1) {
+      const cursorKey = JSON.stringify(cursor);
+      if (seenCursors.has(cursorKey)) {
+        break;
+      }
+      seenCursors.add(cursorKey);
+      const nextRequest = {
+        ...canonicalRequest,
+        params: buildAdaptiveTurnsListPageParams(
+          canonicalRequest.params,
+          RELAY_TURNS_LIST_SAFE_RETRY_LIMIT,
+          cursor
+        ),
+      };
+      const nextResponse = await awaitCanonicalOutcome(
+        settleThreadTurnsListCanonicalOutcome(fetchCanonical(nextRequest))
+      );
+      const nextResult = nextResponse?.result;
+      const nextTurnsKey = findTurnsListResultKey(nextResult);
+      if (!nextTurnsKey) {
+        break;
+      }
+      for (const turn of nextResult[nextTurnsKey]) {
+        const turnId = turnListTurnIdentifier(turn);
+        if (!turnId || !combinedTurns.some((existing) => turnListTurnIdentifier(existing) === turnId)) {
+          combinedTurns.push(turn);
+        }
+      }
+      lastResult = nextResult;
+      const combinedResponse = buildSafeTurnsListResponse(
+        canonicalRequest.id,
+        firstResult,
+        lastResult,
+        turnsKey,
+        combinedTurns
+      );
+      if (threadTurnsListResponseContainsAnchor(combinedResponse, anchorTurnId)) {
+        // The cursor belongs after every turn through the anchor. Keep that
+        // complete boundary intact, compacting items if needed; never slice
+        // turns and accidentally make the omitted range unreachable.
+        return buildCompactedCompleteTurnsListResponse({
+          requestId: canonicalRequest.id,
+          firstResult,
+          lastResult,
+          turnsKey,
+          turns: combinedTurns,
+          sanitizeForRelay,
+          sanitizeContext: buildThreadTurnsListRelaySanitizeContext(canonicalRequest),
+          payloadSoftLimitBytes,
+        });
+      }
+      const nextCursor = readTurnsListNextCursor(nextResult);
+      if (nextResult[nextTurnsKey].length === 0 || !hasRelayCursor(nextCursor)) {
+        break;
+      }
+      cursor = nextCursor;
+    }
+    return null;
+  }
+
+  async function resolveCanonicalRequest(request, fetchCanonical, existingEntry = null, {
+    alignToHandoffAnchor = false,
+    validateHandoffAnchor = false,
+    handoffAnchorTurnId = "",
+  } = {}) {
+    const canonicalRequest = canonicalThreadTurnsListRequest(request);
+    let entry = existingEntry;
+    let response = null;
+    const anchorTurnId = entry?.anchorTurnId || handoffAnchorTurnId;
+    const canMatchCanonicalAnchor = anchorTurnId
+      && !isSyntheticJsonlHistoryTurnId(anchorTurnId);
+    if (entry) {
+      const observedOutcomePromise = entry.canonicalOutcomePromise;
+      const firstOutcome = await observedOutcomePromise;
+      const firstResponseIsUsable = firstOutcome.ok
+        && !isEmptyTurnsListResponse(firstOutcome.response);
+      if (firstResponseIsUsable) {
+        response = firstOutcome.response;
+      } else {
+        if (entry.canonicalOutcomePromise === observedOutcomePromise) {
+          entry.canonicalOutcomePromise = settleThreadTurnsListCanonicalOutcome(
+            fetchCanonical(canonicalRequest)
+          );
+          entry.createdAt = now();
+        }
+      }
+    }
+
+    response = response || await awaitCanonicalOutcome(
+      entry?.canonicalOutcomePromise
+        || settleThreadTurnsListCanonicalOutcome(fetchCanonical(canonicalRequest))
+    );
+    if (entry?.hadNonEmptyJsonl && isEmptyTurnsListResponse(response)) {
+      throw new Error("Canonical thread history was empty after a non-empty JSONL first page.");
+    }
+    if (validateHandoffAnchor
+        && canMatchCanonicalAnchor
+        && !threadTurnsListResponseContainsAnchor(response, anchorTurnId)) {
+      response = await extendCanonicalResponseThroughAnchor(
+        response,
+        canonicalRequest,
+        anchorTurnId,
+        fetchCanonical
+      );
+      if (!response) {
+        throw new Error("Canonical history does not contain the JSONL handoff anchor yet.");
+      }
+    }
+    const rebound = rebindThreadTurnsListResponseId(response, request.id);
+    if (!alignToHandoffAnchor || !canMatchCanonicalAnchor) {
+      return rebound;
+    }
+    const aligned = alignThreadTurnsListResponseToAnchor(rebound, anchorTurnId);
+    if (!aligned) {
+      throw new Error("Canonical history no longer contains the JSONL handoff anchor.");
+    }
+    return aligned;
+  }
+
+  async function resolve(request, { fetchCanonical, readJsonl }) {
+    const params = request?.params || {};
+    const cursor = params.cursor;
+    const handoffDescriptor = threadTurnsListHandoffDescriptor(cursor);
+    const isHandoffRequest = cursor === JSONL_OLDER_HANDOFF_CURSOR
+      || Boolean(handoffDescriptor);
+    const requiresCanonical = params.remodexRequireCanonical === true;
+    const hasOrdinaryCursor = hasRelayCursor(cursor) && !isHandoffRequest;
+
+    if (hasOrdinaryCursor) {
+      return {
+        source: "canonical",
+        response: await resolveCanonicalRequest(request, fetchCanonical),
+        usesJsonl: false,
+      };
+    }
+
+    if (isHandoffRequest || requiresCanonical) {
+      const handoffEntry = readHandoffEntry(request);
+      const response = await resolveCanonicalRequest(request, fetchCanonical, handoffEntry, {
+        alignToHandoffAnchor: isHandoffRequest,
+        validateHandoffAnchor: true,
+        handoffAnchorTurnId: handoffDescriptor?.anchorTurnId || "",
+      });
+      consumeHandoff(handoffEntry);
+      return {
+        source: "canonical",
+        response,
+        usesJsonl: false,
+      };
+    }
+
+    const canonicalRequest = canonicalThreadTurnsListRequest(request);
+    const threadId = threadIdFromRequestParams(params);
+    const canonicalFirstPageCacheKey = canonicalThreadTurnsListRequestShapeKey(canonicalRequest);
+    const canonicalOutcomePromise = canonicalFirstPageOutcome(
+      canonicalFirstPageCacheKey,
+      canonicalRequest,
+      fetchCanonical
+    );
+    let jsonlFallback = null;
+    try {
+      jsonlFallback = await readJsonl(request);
+    } catch {
+      jsonlFallback = null;
+    }
+    // A rollout tail is a useful emergency baseline only when it contains a
+    // whole turn package. Never let a bare tail (for example a file-change or
+    // final assistant fragment) win the race with canonical history: iOS would
+    // render it as a complete conversation and then merge the real opener in
+    // later, which is exactly how orphan cards and duplicate rows appeared.
+    if (jsonlFallback?.response && !isCoherentJsonlFirstPageResponse(jsonlFallback.response)) {
+      jsonlFallback = null;
+    }
+    if (!jsonlFallback?.response) {
+      const response = await awaitCanonicalOutcome(canonicalOutcomePromise);
+      forgetCanonicalFirstPage(canonicalFirstPageCacheKey, canonicalOutcomePromise);
+      return {
+        source: "canonical",
+        response: rebindThreadTurnsListResponseId(response, request.id),
+        usesJsonl: false,
+      };
+    }
+
+    let timeoutId = null;
+    const deadline = new Promise((resolveDeadline) => {
+      timeoutId = setTimeoutImpl(() => resolveDeadline({ deadline: true }), waitMs);
+    });
+    const first = await Promise.race([canonicalOutcomePromise, deadline]);
+    if (timeoutId != null) {
+      clearTimeoutImpl(timeoutId);
+    }
+
+    if (first?.ok && !isEmptyTurnsListResponse(first.response)) {
+      if (shouldPreferJsonlFirstPage(first.response, jsonlFallback.response)) {
+        const token = rememberHandoff(threadId, canonicalOutcomePromise, jsonlFallback);
+        return {
+          source: "jsonl",
+          response: buildJsonlCanonicalHandoffResponse(
+            jsonlFallback.response,
+            request.id,
+            token,
+            firstTurnsListTurnId(jsonlFallback.response)
+          ),
+          usesJsonl: true,
+        };
+      }
+      forgetCanonicalFirstPage(canonicalFirstPageCacheKey, canonicalOutcomePromise);
+      return {
+        source: "canonical",
+        response: rebindThreadTurnsListResponseId(first.response, request.id),
+        usesJsonl: false,
+        jsonlFallback,
+      };
+    }
+
+    const token = rememberHandoff(threadId, canonicalOutcomePromise, jsonlFallback);
+    return {
+      source: "jsonl",
+      response: buildJsonlCanonicalHandoffResponse(
+        jsonlFallback.response,
+        request.id,
+        token,
+        firstTurnsListTurnId(jsonlFallback.response)
+      ),
+      usesJsonl: true,
+    };
+  }
+
+  return { resolve };
+}
+
+function settleThreadTurnsListCanonicalOutcome(promise) {
+  return Promise.resolve(promise).then(
+    (response) => ({ ok: true, response }),
+    (error) => ({ ok: false, error })
+  );
+}
+
+function threadTurnsListHandoffDescriptor(cursor) {
+  if (typeof cursor !== "string" || !cursor.startsWith(JSONL_CANONICAL_HANDOFF_CURSOR_PREFIX)) {
+    return null;
+  }
+  const raw = cursor.slice(JSONL_CANONICAL_HANDOFF_CURSOR_PREFIX.length);
+  const separatorIndex = raw.lastIndexOf(":");
+  if (separatorIndex < 0) {
+    return raw ? { anchorTurnId: "", token: raw } : null;
+  }
+  const token = raw.slice(separatorIndex + 1);
+  if (!token) {
+    return null;
+  }
+  let anchorTurnId = "";
+  try {
+    anchorTurnId = decodeURIComponent(raw.slice(0, separatorIndex));
+  } catch {
+    return null;
+  }
+  return { anchorTurnId, token };
+}
+
+function canonicalThreadTurnsListRequest(request) {
+  const params = { ...(request?.params || {}) };
+  delete params.remodexRequireCanonical;
+  delete params.remodexTurnStateOnly;
+  if (params.cursor === JSONL_OLDER_HANDOFF_CURSOR || threadTurnsListHandoffDescriptor(params.cursor)) {
+    delete params.cursor;
+  }
+  return { ...request, params };
+}
+
+function canonicalThreadTurnsListRequestShapeKey(canonicalRequest) {
+  const params = canonicalRequest?.params || {};
+  return JSON.stringify(sortJsonValueForCacheKey({
+    threadId: threadIdFromRequestParams(params),
+    params,
+  }));
+}
+
+function sortJsonValueForCacheKey(value) {
+  if (Array.isArray(value)) {
+    return value.map(sortJsonValueForCacheKey);
+  }
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+  return Object.fromEntries(
+    Object.keys(value)
+      .sort()
+      .map((key) => [key, sortJsonValueForCacheKey(value[key])])
+  );
+}
+
+function rebindThreadTurnsListResponseId(response, requestId) {
+  return response && typeof response === "object"
+    ? { ...response, id: requestId }
+    : response;
+}
+
+function buildJsonlCanonicalHandoffResponse(response, requestId, token, anchorTurnId = "") {
+  const result = response?.result;
+  if (!result || typeof result !== "object" || Array.isArray(result)) {
+    return response;
+  }
+  return {
+    ...response,
+    id: requestId,
+    result: {
+      ...result,
+      nextCursor: `${JSONL_CANONICAL_HANDOFF_CURSOR_PREFIX}${encodeURIComponent(anchorTurnId)}:${token}`,
+      remodexJsonlFallback: true,
+      remodexCanonicalHandoff: true,
+    },
+  };
+}
+
+function shouldPreferJsonlFirstPage(canonicalResponse, jsonlResponse) {
+  const canonicalResult = canonicalResponse?.result;
+  const jsonlResult = jsonlResponse?.result;
+  const canonicalTurnsKey = findTurnsListResultKey(canonicalResult);
+  const jsonlTurnsKey = findTurnsListResultKey(jsonlResult);
+  if (!canonicalTurnsKey || !jsonlTurnsKey) {
+    return false;
+  }
+  const jsonlTurn = jsonlResult[jsonlTurnsKey]?.[0];
+  const jsonlTurnId = turnListTurnIdentifier(jsonlTurn);
+  return Boolean(jsonlTurnId)
+    && !canonicalResult[canonicalTurnsKey].some((turn) => turnListTurnIdentifier(turn) === jsonlTurnId)
+    && shouldMergeLatestJsonlTurn(jsonlTurn);
+}
+
+function firstTurnsListTurnId(response) {
+  const result = response?.result;
+  const turnsKey = findTurnsListResultKey(result);
+  return turnsKey ? turnListTurnIdentifier(result[turnsKey]?.[0]) : "";
+}
+
+function isCoherentJsonlFirstPageResponse(response) {
+  const result = response?.result;
+  const turnsKey = findTurnsListResultKey(result);
+  const turns = turnsKey ? result[turnsKey] : null;
+  if (!Array.isArray(turns) || turns.length === 0) {
+    return false;
+  }
+  // A running turn must contain its materialized user opener. Otherwise an
+  // orphan file card or assistant tail can win the fast-page race and later
+  // be mistaken for a complete conversation. Explicit terminal turns are
+  // allowed without a user item because older compacted/system turns can be
+  // legitimately item-only.
+  const newestTurn = turns[0];
+  const items = Array.isArray(newestTurn?.items) ? newestTurn.items : null;
+  if (!items) {
+    return false;
+  }
+  if (items.length === 0) {
+    return false;
+  }
+  const status = String(newestTurn?.status || "").replace(/[_-]/g, "").toLowerCase();
+  const isExplicitTerminal = new Set(["completed", "failed", "aborted", "cancelled", "canceled", "interrupted"])
+    .has(status);
+  if (isExplicitTerminal) {
+    return true;
+  }
+  return items.some((item) => {
+    const role = String(item?.role || "").toLowerCase();
+    const type = String(item?.type || "").replace(/[_-]/g, "").toLowerCase();
+    return role === "user" || type === "usermessage";
+  });
+}
+
+function threadTurnsListResponseContainsAnchor(response, anchorTurnId) {
+  const result = response?.result;
+  const turnsKey = findTurnsListResultKey(result);
+  return Boolean(turnsKey) && result[turnsKey].some((turn) => (
+    turnListTurnIdentifier(turn) === anchorTurnId
+  ));
+}
+
+function alignThreadTurnsListResponseToAnchor(response, anchorTurnId) {
+  const result = response?.result;
+  const turnsKey = findTurnsListResultKey(result);
+  if (!turnsKey) {
+    return null;
+  }
+  const anchorIndex = result[turnsKey].findIndex((turn) => (
+    turnListTurnIdentifier(turn) === anchorTurnId
+  ));
+  if (anchorIndex < 0) {
+    return null;
+  }
+  if (anchorIndex === 0) {
+    return response;
+  }
+  return {
+    ...response,
+    result: {
+      ...result,
+      [turnsKey]: result[turnsKey].slice(anchorIndex),
+    },
+  };
 }
 
 function startBridge({
@@ -165,6 +732,9 @@ function startBridge({
   const notificationSecret = randomBytes(24).toString("hex");
   const desktopRefresher = new CodexDesktopRefresher({
     enabled: config.refreshEnabled,
+    // With IPC live sync streaming content, deep-link refreshes are only needed
+    // to navigate Desktop onto the phone-driven thread, not to reload content.
+    navigationOnly: config.desktopIpcLiveSyncEnabled,
     debounceMs: config.refreshDebounceMs,
     refreshCommand: config.refreshCommand,
     bundleId: config.codexBundleId,
@@ -199,8 +769,11 @@ function startBridge({
   const bridgeManagedCodexRequestWaiters = new Map();
   const forwardedRequestMethodsById = new Map();
   const relaySanitizedResponseMethodsById = new Map();
+  const desktopIpcLiveOwnerObservedInboundKeys = new Set();
   const jsonlTurnsListRolloutCacheByThread = new Map();
   const jsonlTurnsListRolloutMissCacheByThread = new Map();
+  const threadTurnsListFastPageCoordinator = createThreadTurnsListFastPageCoordinator();
+  const threadRuntimeSettingsStore = createThreadRuntimeSettingsStore();
   const trackedForwardedRequestMethods = new Set([
     "account/login/start",
     "account/login/cancel",
@@ -252,6 +825,14 @@ function startBridge({
   const rolloutLiveMirror = !config.codexEndpoint
     ? createRolloutLiveMirrorController({
       sendApplicationResponse,
+      // One live source per thread. The follower keeps fresh/idle Desktop state
+      // authoritative, but yields an active cache that stopped broadcasting;
+      // a later Desktop snapshot is announced as a new source epoch so the
+      // phone performs canonical repair instead of mixing both mirrors.
+      shouldSuppressThread: (threadId) => shouldSuppressRolloutMirrorForThread(
+        threadId,
+        { desktopIpcActionFollower, desktopIpcLiveOwner }
+      ),
     })
     : null;
   const desktopIpcActionFollower = !config.codexEndpoint
@@ -260,7 +841,29 @@ function startBridge({
       readConversationState: async (threadId) => seedConversationStateFromThreadRead(
         await sendCodexRequest("thread/read", { threadId })
       ),
+      forwardToLocalCodex: (rawMessage) => {
+        observeDesktopIpcLiveOwnerInbound(rawMessage);
+        forwardInboundRequestToCodex(rawMessage);
+      },
+      // Threads streamed by the bridge's own app-server must never be held,
+      // served from Desktop echoes, or routed over the IPC bus.
+      isLocallyOwnedThread: (threadId) => Boolean(desktopIpcLiveOwner?.isThreadOwned(threadId)),
+      normalizeTurnStartParams: normalizeTurnStartParamsForCodex,
+      runtimeSettingsStore: threadRuntimeSettingsStore,
       socketPath: config.desktopIpcSocketPath || undefined,
+      snapshotDebounceMs: config.desktopIpcSnapshotDebounceMs,
+    })
+    : null;
+  const desktopIpcLiveOwner = !config.codexEndpoint
+    ? createDesktopIpcLiveOwner({
+      enabled: config.desktopIpcLiveSyncEnabled !== false,
+      sendApplicationResponse,
+      sendCodexRequest,
+      sendRawCodexMessage: (rawMessage) => codex.send(rawMessage),
+      normalizeTurnStartParams: normalizeTurnStartParamsForCodex,
+      runtimeSettingsStore: threadRuntimeSettingsStore,
+      socketPath: config.desktopIpcSocketPath || undefined,
+      snapshotDebounceMs: config.desktopIpcSnapshotDebounceMs,
     })
     : null;
   let contextUsageWatcher = null;
@@ -352,6 +955,7 @@ function startBridge({
     stopContextUsageWatcher();
     rolloutLiveMirror?.stopAll();
     desktopIpcActionFollower?.stopAll();
+    desktopIpcLiveOwner?.stopAll();
   }
 
   function stopBridge() {
@@ -538,16 +1142,20 @@ function startBridge({
   connectRelay();
 
   codex.onMessage((message) => {
-    if (handleBridgeManagedCodexResponse(message)) {
+    // Streaming deltas make this the hottest path in the bridge: parse the
+    // envelope once and share the read-only object with every observer.
+    const parsedMessage = parseBridgeMessage(message);
+    if (handleBridgeManagedCodexResponse(message, parsedMessage)) {
       return;
     }
-    updatePendingAuthLoginFromCodexMessage(message);
-    trackCodexHandshakeState(message);
-    desktopRefresher.handleOutbound(message);
-    pushNotificationTracker.handleOutbound(message);
-    rememberThreadFromMessage("codex", message);
+    updatePendingAuthLoginFromCodexMessage(message, parsedMessage);
+    trackCodexHandshakeState(message, parsedMessage);
+    desktopRefresher.handleOutbound(message, parsedMessage);
+    desktopIpcLiveOwner?.observeOutbound(message, parsedMessage);
+    pushNotificationTracker.handleOutbound(message, parsedMessage);
+    rememberThreadFromMessage("codex", message, parsedMessage);
     secureTransport.queueOutboundApplicationMessage(
-      sanitizeRelayBoundCodexMessage(message),
+      sanitizeRelayBoundCodexMessage(message, parsedMessage),
       sendRelayWireMessage
     );
   });
@@ -584,16 +1192,17 @@ function startBridge({
 
   // Routes decrypted app payloads through the same bridge handlers as before.
   function handleApplicationMessage(rawMessage) {
-    if (handleBridgeManagedHandshakeMessage(rawMessage, sendApplicationResponse)) {
+    const parsedMessage = parseBridgeMessage(rawMessage);
+    if (handleBridgeManagedHandshakeMessage(rawMessage, sendApplicationResponse, parsedMessage)) {
       return;
     }
-    if (handleBridgeManagedAccountRequest(rawMessage, sendApplicationResponse)) {
+    if (handleBridgeManagedAccountRequest(rawMessage, sendApplicationResponse, parsedMessage)) {
       return;
     }
-    if (voiceHandler.handleVoiceRequest(rawMessage, sendApplicationResponse)) {
+    if (voiceHandler.handleVoiceRequest(rawMessage, sendApplicationResponse, parsedMessage)) {
       return;
     }
-    if (handleThreadContextRequest(rawMessage, sendApplicationResponse)) {
+    if (handleThreadContextRequest(rawMessage, sendApplicationResponse, parsedMessage)) {
       return;
     }
     if (handleWorkspaceRequest(rawMessage, sendApplicationResponse)) {
@@ -623,18 +1232,71 @@ function startBridge({
     })) {
       return;
     }
-    desktopRefresher.handleInbound(rawMessage);
-    rolloutLiveMirror?.observeInbound(rawMessage);
-    if (desktopIpcActionFollower?.observeInbound(rawMessage)) {
+    desktopRefresher.handleInbound(rawMessage, parsedMessage);
+    rolloutLiveMirror?.observeInbound(rawMessage, parsedMessage);
+    // Track the request method BEFORE follower interception: responses the
+    // follower serves from projected Desktop state must hit the same relay
+    // sanitize/trim budget as app-server responses, or heavy threads ship as
+    // one oversized frame and kill the phone's websocket (EMSGSIZE).
+    rememberForwardedRequestMethod(rawMessage);
+    if (desktopIpcActionFollower?.observeInbound(rawMessage, parsedMessage)) {
       return;
     }
+    observeDesktopIpcLiveOwnerInbound(rawMessage, parsedMessage);
     if (handleBridgeManagedThreadTurnsListRequest(rawMessage, sendApplicationResponse)) {
       return;
     }
-    const codexRequest = disableUnsupportedReasoningSummaryForTurnStart(rawMessage);
+    forwardInboundRequestToCodex(rawMessage);
+  }
+
+  function forwardInboundRequestToCodex(rawMessage) {
+    const codexRequest = normalizeTurnStartForCodex(rawMessage);
     rememberForwardedRequestMethod(rawMessage);
     rememberThreadFromMessage("phone", codexRequest);
     codex.send(codexRequest);
+  }
+
+  // Held Desktop-ownership probes can later fall back locally, so observe each
+  // phone request at most once in the live owner even if it passes both paths.
+  function observeDesktopIpcLiveOwnerInbound(rawMessage, parsedMessage = null) {
+    if (!desktopIpcLiveOwner) {
+      return;
+    }
+    const inboundKey = desktopIpcLiveOwnerInboundKey(rawMessage, parsedMessage);
+    if (inboundKey) {
+      if (desktopIpcLiveOwnerObservedInboundKeys.has(inboundKey)) {
+        return;
+      }
+      desktopIpcLiveOwnerObservedInboundKeys.add(inboundKey);
+      evictOldestEntries(desktopIpcLiveOwnerObservedInboundKeys, FORWARDED_REQUEST_METHODS_MAX_SIZE);
+    }
+    desktopIpcLiveOwner.observeInbound(rawMessage, parsedMessage);
+  }
+
+  function desktopIpcLiveOwnerInboundKey(rawMessage, parsedMessage = null) {
+    const parsed = parsedMessage ?? safeParseJSON(rawMessage);
+    const method = typeof parsed?.method === "string" ? parsed.method : "";
+    if (!method || parsed?.id == null) {
+      return "";
+    }
+    // extractThreadId only understands turn/thread start and completion params;
+    // archive, steer, interrupt, and compact requests need the generic fields so
+    // same-id requests for different threads never share a dedupe key.
+    const threadId = extractThreadId(method, parsed.params)
+      || readString(parsed?.params?.threadId)
+      || readString(parsed?.params?.thread_id)
+      || readString(parsed?.params?.conversationId)
+      || readString(parsed?.params?.conversation_id)
+      || "";
+    return `${method}:${threadId}:${String(parsed.id)}`;
+  }
+
+  function parseBridgeMessage(rawMessage) {
+    try {
+      return JSON.parse(rawMessage);
+    } catch {
+      return null;
+    }
   }
 
   // Encrypts bridge-generated responses instead of letting the relay see plaintext.
@@ -672,25 +1334,41 @@ function startBridge({
 
     rememberThreadFromMessage("phone", rawMessage);
     (async () => {
+      let didRespond = false;
+      const respondOnce = (payload) => {
+        if (didRespond) {
+          return;
+        }
+        didRespond = true;
+        sendResponse(payload);
+      };
       try {
-        const response = await fetchAdaptiveThreadTurnsListForRelay(request, {
-          fetchPage: (params) => sendCodexRequest("thread/turns/list", params),
+        const selection = await threadTurnsListFastPageCoordinator.resolve(request, {
+          fetchCanonical: (canonicalRequest) => fetchAdaptiveThreadTurnsListForRelay(canonicalRequest, {
+            fetchPage: (params) => sendCodexRequest("thread/turns/list", params),
+          }),
+          readJsonl: (jsonlRequest) => maybeBuildJsonlThreadTurnsListFallback(jsonlRequest, null),
         });
-        const jsonlFallback = maybeBuildJsonlThreadTurnsListFallback(request, response);
-        const responsePayload = jsonlFallback?.response ?? response;
-        const finalSanitizeContext = buildThreadTurnsListRelaySanitizeContext(request);
-        relaySanitizedResponseMethodsById.set(String(request.id), {
-          method: "thread/turns/list",
-          ...finalSanitizeContext,
-          createdAt: Date.now(),
+        let responsePayload = selection.response;
+        if (selection.source === "canonical" && selection.jsonlFallback?.response?.result) {
+          responsePayload = maybeMergeLatestJsonlTurnIntoTurnsListResponse(
+            request,
+            selection.response,
+            selection.jsonlFallback.response.result
+          ) || selection.response;
+        }
+        sendBridgeManagedThreadTurnsListResponse(request, responsePayload, respondOnce, {
+          skipJsonlArtifactAugmentation: selection.usesJsonl,
         });
-        sendResponse(sanitizeThreadHistoryImagesForRelay(
-          JSON.stringify(responsePayload),
-          "thread/turns/list",
-          finalSanitizeContext
-        ));
       } catch (error) {
-        sendResponse(createJsonRpcErrorResponse(
+        const jsonlFallback = maybeBuildJsonlThreadTurnsListFallback(request, null);
+        if (jsonlFallback?.response && isCoherentJsonlFirstPageResponse(jsonlFallback.response)) {
+          sendBridgeManagedThreadTurnsListResponse(request, jsonlFallback.response, respondOnce, {
+            skipJsonlArtifactAugmentation: true,
+          });
+          return;
+        }
+        respondOnce(createJsonRpcErrorResponse(
           request.id,
           error,
           "thread_turns_list_failed"
@@ -701,16 +1379,34 @@ function startBridge({
     return true;
   }
 
+  function sendBridgeManagedThreadTurnsListResponse(request, response, sendResponse, {
+    skipJsonlArtifactAugmentation = false,
+  } = {}) {
+    const finalSanitizeContext = buildThreadTurnsListRelaySanitizeContext(request, {
+      skipJsonlArtifactAugmentation,
+    });
+    relaySanitizedResponseMethodsById.set(String(request.id), {
+      method: "thread/turns/list",
+      ...finalSanitizeContext,
+      createdAt: Date.now(),
+    });
+    sendResponse(sanitizeThreadHistoryImagesForRelay(
+      JSON.stringify(response),
+      "thread/turns/list",
+      finalSanitizeContext
+    ));
+  }
+
   function maybeBuildJsonlThreadTurnsListFallback(request, response) {
     const params = request?.params || {};
     const threadId = normalizeNonEmptyString(params.threadId)
       || normalizeNonEmptyString(params.thread_id);
-    if (!threadId || hasRelayCursor(params.cursor)) {
+    if (!threadId || hasRelayCursor(params.cursor) || params.remodexRequireCanonical === true) {
       return null;
     }
 
     try {
-      const responseIsEmpty = isEmptyTurnsListResponse(response);
+      const responseIsEmpty = response == null || isEmptyTurnsListResponse(response);
       const rolloutPath = resolveJsonlTurnsListRolloutPathForFallback({
         threadId,
         responseIsEmpty,
@@ -721,10 +1417,20 @@ function startBridge({
         return null;
       }
 
+      // A first page is the local baseline for a newly opened thread. Honor a
+      // caller's larger request, but never manufacture the old one-turn tail:
+      // it has no room to preserve surrounding history while canonical data is
+      // still catching up.
+      const requestedLimit = Number.isInteger(params.limit) && params.limit > 0
+        ? params.limit
+        : RELAY_TURNS_LIST_MAX_INITIAL_LIMIT;
+      const firstPageLimit = params.cursor == null
+        ? Math.max(requestedLimit, RELAY_TURNS_LIST_MAX_INITIAL_LIMIT)
+        : requestedLimit;
       const result = readThreadTurnsListPageFromSessionJsonl(rolloutPath, {
         threadId,
-        limit: params.limit,
-        maxLimit: 1,
+        limit: firstPageLimit,
+        maxLimit: RELAY_TURNS_LIST_MAX_INITIAL_LIMIT,
         cursor: params.cursor,
       });
       const turnsKey = findTurnsListResultKey(result);
@@ -733,7 +1439,7 @@ function startBridge({
       }
 
       if (!responseIsEmpty) {
-        const mergedResponse = maybeMergeLatestJsonlTurnIntoTurnsListResponse(request, response, result, params);
+        const mergedResponse = maybeMergeLatestJsonlTurnIntoTurnsListResponse(request, response, result);
         return mergedResponse ? { response: mergedResponse, usesJsonl: true } : null;
       }
 
@@ -799,11 +1505,9 @@ function startBridge({
 
   // Handles the bridge-owned auth status wrappers without exposing tokens to the phone.
   // This dispatcher stays synchronous so non-account messages can continue down the normal routing chain.
-  function handleBridgeManagedAccountRequest(rawMessage, sendResponse) {
-    let parsed = null;
-    try {
-      parsed = JSON.parse(rawMessage);
-    } catch {
+  function handleBridgeManagedAccountRequest(rawMessage, sendResponse, parsedMessage = null) {
+    const parsed = parsedMessage || parseBridgeMessage(rawMessage);
+    if (!parsed) {
       return false;
     }
 
@@ -958,16 +1662,30 @@ function startBridge({
   }
 
   // Replaces huge inline desktop-history images with lightweight references before relay encryption.
-  function sanitizeRelayBoundCodexMessage(rawMessage) {
+  function sanitizeRelayBoundCodexMessage(rawMessage, parsedMessage = null) {
     pruneExpiredForwardedRequestMethods();
-    const normalizedMessage = normalizeRelayBoundJsonRpcMessage(rawMessage, {
+    let normalizedMessage = normalizeRelayBoundJsonRpcMessage(rawMessage, {
       pendingRequestMethodsById: relaySanitizedResponseMethodsById,
+      parsedMessage,
     });
     if (!normalizedMessage) {
       return null;
     }
 
-    const parsed = safeParseJSON(normalizedMessage);
+    // Streaming deltas hit this path dozens of times per second; when the
+    // envelope passed through normalization untouched, reuse the parse the
+    // caller already paid for instead of re-parsing the same bytes.
+    let parsed = normalizedMessage === rawMessage && parsedMessage
+      ? parsedMessage
+      : safeParseJSON(normalizedMessage);
+    const sanitizedLiveMessage = sanitizeLiveUserNotification(parsed);
+    if (!sanitizedLiveMessage) {
+      return null;
+    }
+    if (sanitizedLiveMessage !== parsed) {
+      parsed = sanitizedLiveMessage;
+      normalizedMessage = JSON.stringify(parsed);
+    }
     const responseId = parsed?.id;
     if (responseId == null) {
       return sanitizeLiveGeneratedImageMessageForRelay(normalizedMessage);
@@ -979,12 +1697,19 @@ function startBridge({
     }
     relaySanitizedResponseMethodsById.delete(String(responseId));
 
+    if (trackedRequest.method === "thread/list"
+      || trackedRequest.method === "thread/read"
+      || trackedRequest.method === "thread/resume") {
+      threadRuntimeSettingsStore.enrichResponse(trackedRequest.method, parsed);
+      normalizedMessage = JSON.stringify(parsed);
+    }
+
     return sanitizeThreadHistoryImagesForRelay(normalizedMessage, trackedRequest.method, trackedRequest);
   }
 
-  function updatePendingAuthLoginFromCodexMessage(rawMessage) {
+  function updatePendingAuthLoginFromCodexMessage(rawMessage, parsedMessage = null) {
     pruneExpiredForwardedRequestMethods();
-    const parsed = safeParseJSON(rawMessage);
+    const parsed = parsedMessage ?? safeParseJSON(rawMessage);
     const responseId = parsed?.id;
     if (responseId != null) {
       const trackedRequest = forwardedRequestMethodsById.get(String(responseId));
@@ -1068,8 +1793,8 @@ function startBridge({
     }
   }
 
-  function rememberThreadFromMessage(source, rawMessage) {
-    const context = extractBridgeMessageContext(rawMessage);
+  function rememberThreadFromMessage(source, rawMessage, parsedMessage = null) {
+    const context = extractBridgeMessageContext(rawMessage, parsedMessage);
     if (!context.threadId) {
       return;
     }
@@ -1146,11 +1871,9 @@ function startBridge({
   // The spawned/shared Codex app-server stays warm across phone reconnects.
   // When iPhone reconnects it sends initialize again, but forwarding that to the
   // already-initialized Codex transport only produces "Already initialized".
-  function handleBridgeManagedHandshakeMessage(rawMessage, sendResponse = sendApplicationResponse) {
-    let parsed = null;
-    try {
-      parsed = JSON.parse(rawMessage);
-    } catch {
+  function handleBridgeManagedHandshakeMessage(rawMessage, sendResponse = sendApplicationResponse, parsedMessage = null) {
+    const parsed = parsedMessage || parseBridgeMessage(rawMessage);
+    if (!parsed) {
       return false;
     }
 
@@ -1255,11 +1978,9 @@ function startBridge({
   }
 
   // Learns whether the underlying Codex transport has already completed its own MCP handshake.
-  function trackCodexHandshakeState(rawMessage) {
-    let parsed = null;
-    try {
-      parsed = JSON.parse(rawMessage);
-    } catch {
+  function trackCodexHandshakeState(rawMessage, parsedMessage = null) {
+    const parsed = parsedMessage ?? safeParseJSON(rawMessage);
+    if (!parsed) {
       return;
     }
 
@@ -1323,11 +2044,9 @@ function startBridge({
 
   // Intercepts responses for bridge-private requests so only user-visible app-server traffic
   // is forwarded back through secure transport.
-  function handleBridgeManagedCodexResponse(rawMessage) {
-    let parsed = null;
-    try {
-      parsed = JSON.parse(rawMessage);
-    } catch {
+  function handleBridgeManagedCodexResponse(rawMessage, parsedMessage = null) {
+    const parsed = parsedMessage ?? safeParseJSON(rawMessage);
+    if (!parsed) {
       return false;
     }
 
@@ -1474,6 +2193,9 @@ function startBridge({
         detached: true,
         stdio: "ignore",
         env: process.env,
+      });
+      child.on?.("error", (error) => {
+        console.warn(`[remodex] Failed to schedule the post-update bridge restart: ${error?.message || error}`);
       });
       child.unref?.();
     }, BRIDGE_RESTART_AFTER_UPDATE_DELAY_MS);
@@ -1692,17 +2414,86 @@ function disableUnsupportedReasoningSummaryForTurnStart(rawMessage) {
   });
 }
 
+function normalizeTurnStartParamsForCodex(params) {
+  const normalizedRawMessage = normalizeTurnStartForCodex(JSON.stringify({
+    method: "turn/start",
+    params,
+  }));
+  const parsed = parseBridgeJSON(normalizedRawMessage);
+  return parsed?.params && typeof parsed.params === "object" && !Array.isArray(parsed.params)
+    ? parsed.params
+    : params;
+}
+
+// A turn/start can carry the same runtime choice twice: in the legacy top-level
+// model/effort fields and in collaborationMode.settings. Codex treats the nested
+// collaboration settings as authoritative, so a stale Desktop value there can
+// silently override the model selected on the phone. Keep both representations
+// aligned before either direct app-server forwarding or Desktop-follower routing.
+function normalizeTurnStartForCodex(rawMessage) {
+  const parsed = parseBridgeJSON(rawMessage);
+  if (!parsed || parsed.method !== "turn/start") {
+    return rawMessage;
+  }
+
+  const params = parsed.params && typeof parsed.params === "object" && !Array.isArray(parsed.params)
+    ? parsed.params
+    : null;
+  if (!params) {
+    return rawMessage;
+  }
+
+  const model = normalizeNonEmptyString(params.model);
+  const effort = normalizeNonEmptyString(params.effort);
+  let changed = false;
+  let nextParams = params;
+
+  for (const collaborationKey of ["collaborationMode", "collaboration_mode"]) {
+    const collaborationMode = nextParams[collaborationKey];
+    const settings = collaborationMode?.settings;
+    if (!settings || typeof settings !== "object" || Array.isArray(settings)) {
+      continue;
+    }
+
+    const nextSettings = { ...settings };
+    let settingsChanged = false;
+    if (model && normalizeNonEmptyString(settings.model) !== model) {
+      nextSettings.model = model;
+      settingsChanged = true;
+    }
+    if (effort && normalizeNonEmptyString(settings.reasoning_effort) !== effort) {
+      nextSettings.reasoning_effort = effort;
+      settingsChanged = true;
+    }
+    if (!settingsChanged) {
+      continue;
+    }
+
+    nextParams = {
+      ...nextParams,
+      [collaborationKey]: {
+        ...collaborationMode,
+        settings: nextSettings,
+      },
+    };
+    changed = true;
+  }
+
+  const alignedRawMessage = changed
+    ? JSON.stringify({ ...parsed, params: nextParams })
+    : rawMessage;
+  return disableUnsupportedReasoningSummaryForTurnStart(alignedRawMessage);
+}
+
 function readTurnStartModel(params) {
   return normalizeNonEmptyString(params?.model).toLowerCase()
     || normalizeNonEmptyString(params?.collaborationMode?.settings?.model).toLowerCase()
     || normalizeNonEmptyString(params?.collaboration_mode?.settings?.model).toLowerCase();
 }
 
-function extractBridgeMessageContext(rawMessage) {
-  let parsed = null;
-  try {
-    parsed = JSON.parse(rawMessage);
-  } catch {
+function extractBridgeMessageContext(rawMessage, parsedMessage = null) {
+  const parsed = parsedMessage ?? parseBridgeJSON(rawMessage);
+  if (!parsed) {
     return { method: "", threadId: null, turnId: null };
   }
 
@@ -1864,6 +2655,7 @@ async function fetchAdaptiveThreadTurnsListForRelay(request, {
     const remaining = requestedLimit - combinedTurns.length;
     const pageLimit = selectAdaptiveTurnsListBatchLimit(combinedTurns.length, remaining);
     const pageParams = buildAdaptiveTurnsListPageParams(params, pageLimit, nextCursor);
+    const responseBeforePage = response;
     let page;
 
     try {
@@ -1909,7 +2701,31 @@ async function fetchAdaptiveThreadTurnsListForRelay(request, {
     response = buildSafeTurnsListResponse(request.id, firstResult, lastResult, turnsKey, combinedTurns);
 
     if (measureSanitizedTurnsListResponseBytes(response, sanitizeForRelay, sanitizeContext) >= payloadSoftLimitBytes) {
-      response = buildLargestSafeTurnsListResponse({
+      if (responseBeforePage) {
+        // The server cursor belongs after the entire oversized batch. Return
+        // the previous complete cursor boundary instead of slicing turns out
+        // of this batch and making them unreachable.
+        response = responseBeforePage;
+        break;
+      }
+      if (pageTurns.length > pageLimit) {
+        const completeResponse = buildCompactedCompleteTurnsListResponse({
+          requestId: request.id,
+          firstResult,
+          lastResult,
+          turnsKey,
+          turns: pageTurns,
+          sanitizeForRelay,
+          sanitizeContext,
+          payloadSoftLimitBytes,
+        });
+        if (!completeResponse) {
+          throw new Error("thread/turns/list returned an oversized batch without a safe cursor boundary.");
+        }
+        response = completeResponse;
+        break;
+      }
+      const boundedResponse = buildLargestSafeTurnsListResponse({
         requestId: request.id,
         firstResult,
         lastResult,
@@ -1919,7 +2735,11 @@ async function fetchAdaptiveThreadTurnsListForRelay(request, {
         sanitizeForRelay,
         sanitizeContext,
         payloadSoftLimitBytes,
-      }) ?? buildEmptyTurnsListResponse(request);
+      });
+      if (!boundedResponse) {
+        throw new Error("The newest chat turn is too large to relay safely.");
+      }
+      response = boundedResponse;
       break;
     }
 
@@ -1942,22 +2762,10 @@ async function fetchAdaptiveThreadTurnsListForRelay(request, {
     }
   }
 
-  return response ?? {
-    id: request.id,
-    result: {
-      data: [],
-    },
-  };
-}
-
-function buildEmptyTurnsListResponse(request) {
-  return {
-    id: request.id,
-    result: {
-      data: [],
-      nextCursor: null,
-    },
-  };
+  if (!response) {
+    throw new Error("thread/turns/list completed without a relayable page.");
+  }
+  return response;
 }
 
 function isEmptyTurnsListResponse(response) {
@@ -1986,7 +2794,7 @@ function resolveJsonlTurnsListRolloutPathForFallback({
     : findAndCachePath(threadId);
 }
 
-function maybeMergeLatestJsonlTurnIntoTurnsListResponse(request, response, jsonlResult, params = {}) {
+function maybeMergeLatestJsonlTurnIntoTurnsListResponse(request, response, jsonlResult) {
   const responseResult = response?.result;
   const responseTurnsKey = findTurnsListResultKey(responseResult);
   const jsonlTurnsKey = findTurnsListResultKey(jsonlResult);
@@ -2005,16 +2813,17 @@ function maybeMergeLatestJsonlTurnIntoTurnsListResponse(request, response, jsonl
     return null;
   }
 
-  const requestedLimit = Number.isInteger(params?.limit) && params.limit > 0
-    ? params.limit
-    : responseTurns.length + 1;
-  const mergedTurns = [jsonlTurn, ...responseTurns].slice(0, requestedLimit);
+  // Keep the canonical page intact. Slicing this back to the requested limit
+  // can retain the newer JSONL turn while dropping the canonical cursor anchor,
+  // making that canonical turn permanently unreachable.
+  const mergedTurns = [jsonlTurn, ...responseTurns];
   return {
     id: request.id,
     result: {
       ...responseResult,
       [responseTurnsKey]: mergedTurns,
       remodexJsonlMergedLatest: true,
+      remodexJsonlFallback: true,
     },
   };
 }
@@ -2041,6 +2850,10 @@ function turnListTurnIdentifier(turn) {
     || normalizeNonEmptyString(turn?.turn_id);
 }
 
+function isSyntheticJsonlHistoryTurnId(turnId) {
+  return normalizeNonEmptyString(turnId).startsWith("turn-line-");
+}
+
 async function fetchSafeThreadTurnsListFallback(request, {
   fetchPage,
   now,
@@ -2055,35 +2868,29 @@ async function fetchSafeThreadTurnsListFallback(request, {
   const safeLimit = Math.min(requestedLimit, RELAY_TURNS_LIST_SAFE_RETRY_LIMIT);
   const safeParams = buildAdaptiveTurnsListPageParams(params, safeLimit, params?.cursor);
 
-  try {
-    const page = await fetchMeasuredAdaptiveTurnsListPage(fetchPage, safeParams, now);
-    const pageResult = unwrapAppServerPayloadResult(page.result);
-    const turnsKey = findTurnsListResultKey(pageResult);
-    if (!turnsKey) {
-      return buildEmptyTurnsListResponse(request);
-    }
-
-    // If the normal pagination path returns a bad first page, retry once with a small page.
-    // The retry response is intentionally minimal so Swift does not decode stale server metadata.
-    const response = buildLargestSafeTurnsListResponse({
-      requestId: request.id,
-      firstResult: pageResult,
-      lastResult: pageResult,
-      turnsKey,
-      turns: pageResult[turnsKey],
-      maxTurns: safeLimit,
-      sanitizeForRelay,
-      sanitizeContext,
-      payloadSoftLimitBytes,
-    });
-    if (response) {
-      return response;
-    }
-  } catch {
-    // Fall through to a valid empty page: the phone can keep the thread open instead of crashing.
+  const page = await fetchMeasuredAdaptiveTurnsListPage(fetchPage, safeParams, now);
+  const pageResult = unwrapAppServerPayloadResult(page.result);
+  const turnsKey = findTurnsListResultKey(pageResult);
+  if (!turnsKey) {
+    throw new Error("thread/turns/list returned no turns array.");
   }
 
-  return buildEmptyTurnsListResponse(request);
+  // If the normal pagination path returns a bad first page, retry once with a small page.
+  // The retry response is intentionally minimal so Swift does not decode stale server metadata.
+  const response = buildCompactedCompleteTurnsListResponse({
+    requestId: request.id,
+    firstResult: pageResult,
+    lastResult: pageResult,
+    turnsKey,
+    turns: pageResult[turnsKey],
+    sanitizeForRelay,
+    sanitizeContext,
+    payloadSoftLimitBytes,
+  });
+  if (response) {
+    return response;
+  }
+  throw new Error("thread/turns/list returned a page that is too large to relay safely.");
 }
 
 async function fetchMeasuredAdaptiveTurnsListPage(fetchPage, params, now) {
@@ -2131,6 +2938,48 @@ function buildSafeTurnsListResponse(requestId, firstResult, lastResult, turnsKey
     id: requestId,
     result: buildAdaptiveTurnsListResult(firstResult, lastResult, turnsKey, turns),
   };
+}
+
+function buildCompactedCompleteTurnsListResponse({
+  requestId,
+  firstResult,
+  lastResult,
+  turnsKey,
+  turns,
+  sanitizeForRelay,
+  sanitizeContext = {},
+  payloadSoftLimitBytes,
+}) {
+  const response = buildSafeTurnsListResponse(
+    requestId,
+    firstResult,
+    lastResult,
+    turnsKey,
+    turns
+  );
+  if (measureSanitizedTurnsListResponseBytes(response, sanitizeForRelay, sanitizeContext) < payloadSoftLimitBytes) {
+    return response;
+  }
+
+  for (const maxChars of [
+    RELAY_HISTORY_TEXT_TAIL_LIMIT_CHARS,
+    Math.floor(RELAY_HISTORY_TEXT_TAIL_LIMIT_CHARS / 4),
+    1_000,
+    0,
+  ]) {
+    const compacted = buildSafeTurnsListResponse(
+      requestId,
+      firstResult,
+      lastResult,
+      turnsKey,
+      turns.map((turn) => compactTurnsListTurnForRelay(turn, maxChars))
+    );
+    compacted.result.remodexPageCompactedForRelay = true;
+    if (measureSanitizedTurnsListResponseBytes(compacted, sanitizeForRelay, sanitizeContext) < payloadSoftLimitBytes) {
+      return compacted;
+    }
+  }
+  return null;
 }
 
 // Trims oversized history pages progressively: normal page -> 5 turns -> ... -> 1 turn.
@@ -2234,10 +3083,35 @@ function compactEmergencySingleTurnForRelay(turn, maxChars, maxItems) {
   }
 
   const items = Array.isArray(turn.items) ? turn.items : [];
-  safeTurn.items = items.slice(-maxItems).map((item) => compactHistoryItemForRelay(item, maxChars));
+  safeTurn.items = selectEmergencyHistoryItemsForRelay(items, maxItems)
+    .map((item) => compactHistoryItemForRelay(item, maxChars));
   safeTurn.remodexEmergencySingleTurnForRelay = true;
   safeTurn.remodexPageCompactedForRelay = true;
   return safeTurn;
+}
+
+function selectEmergencyHistoryItemsForRelay(items, maxItems) {
+  if (!Array.isArray(items) || items.length <= maxItems) {
+    return Array.isArray(items) ? items : [];
+  }
+
+  const selectedIndices = new Set();
+  const firstUserIndex = items.findIndex((item) => isUserRoleItem(item));
+  if (firstUserIndex >= 0) {
+    selectedIndices.add(firstUserIndex);
+  }
+  for (let index = items.length - 1; index >= 0 && selectedIndices.size < maxItems; index -= 1) {
+    const type = normalizeHistoryItemToken(items[index]?.type);
+    if (type === "plan" || type === "filechange") {
+      selectedIndices.add(index);
+    }
+  }
+  for (let index = items.length - 1; index >= 0 && selectedIndices.size < maxItems; index -= 1) {
+    selectedIndices.add(index);
+  }
+  return [...selectedIndices]
+    .sort((left, right) => left - right)
+    .map((index) => items[index]);
 }
 
 function buildAdaptiveTurnsListResult(firstResult, lastResult, turnsKey, turns) {
@@ -2245,8 +3119,11 @@ function buildAdaptiveTurnsListResult(firstResult, lastResult, turnsKey, turns) 
   result[turnsKey] = turns;
 
   for (const key of RELAY_TURNS_LIST_PAGINATION_RESULT_KEYS) {
-    if (Object.prototype.hasOwnProperty.call(lastResult, key)) {
-      result[key] = lastResult[key];
+    const sourceResult = RELAY_TURNS_LIST_PREVIOUS_PAGINATION_RESULT_KEYS.has(key)
+      ? firstResult
+      : lastResult;
+    if (Object.prototype.hasOwnProperty.call(sourceResult, key)) {
+      result[key] = sourceResult[key];
     } else {
       delete result[key];
     }
@@ -2293,8 +3170,10 @@ function measureSanitizedTurnsListResponseBytes(response, sanitizeForRelay, requ
 // Keeps app-server responses in the JSON-RPC shape that the App Store iOS client decodes.
 function normalizeRelayBoundJsonRpcMessage(rawMessage, {
   pendingRequestMethodsById = null,
+  // Optional pre-parsed envelope shared by the caller; treated as read-only.
+  parsedMessage = null,
 } = {}) {
-  const parsed = parseBridgeJSON(rawMessage);
+  const parsed = parsedMessage ?? parseBridgeJSON(rawMessage);
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     return null;
   }
@@ -2432,7 +3311,11 @@ function sanitizeThreadHistoryImagesForRelay(rawMessage, requestMethod, requestC
 
   const { turns: sanitizedTurns, didSanitize } = sanitizeRelayHistoryTurns(workingTurns, threadId);
   const { thread: threadWithJsonlMetadata, didAugment: didAugmentThreadMetadata } = augmentRelayThreadWithJsonlMetadata(workingThread, threadId);
-  const { turns: augmentedTurns, didAugment } = augmentRelayHistoryTurnsWithJsonlArtifacts(sanitizedTurns, threadId);
+  const { turns: augmentedTurns, didAugment } = augmentRelayHistoryTurnsWithJsonlArtifacts(
+    sanitizedTurns,
+    threadId,
+    { includeHistoryItems: true }
+  );
 
   if (!didSanitize && !didAugment && !didAugmentThreadMetadata && !didPreTrimTurnWindow) {
     const trimmedPayload = trimThreadPayloadForRelay(parsed, thread);
@@ -2571,7 +3454,7 @@ function readAndCacheJsonlThreadCwd(cacheKey, rolloutPath, stat = null) {
 
   let cwd = "";
   try {
-    const metadata = parseSessionJsonlMetadata(fs.readFileSync(rolloutPath, "utf8"));
+    const metadata = readSessionJsonlMetadataFromFile(rolloutPath);
     const parsedCwd = normalizeNonEmptyString(metadata?.cwd);
     cwd = parsedCwd && path.isAbsolute(parsedCwd) ? parsedCwd : "";
   } catch {
@@ -2599,13 +3482,23 @@ function rememberJsonlThreadCwdCache(cacheKey, entry) {
   }
 }
 
-function augmentRelayHistoryTurnsWithJsonlArtifacts(turns, threadId = "") {
+function augmentRelayHistoryTurnsWithJsonlArtifacts(turns, threadId = "", {
+  includeHistoryItems = false,
+} = {}) {
   const normalizedThreadId = normalizeNonEmptyString(threadId);
   if (!normalizedThreadId || !Array.isArray(turns) || turns.length === 0) {
     return { turns, didAugment: false };
   }
 
-  const jsonlArtifactsByTurnId = readJsonlArtifactItemsByTurnId(normalizedThreadId);
+  const requestedTurnIds = new Set(turns.map((turn) => (
+    normalizeNonEmptyString(turn?.id)
+      || normalizeNonEmptyString(turn?.turnId)
+      || normalizeNonEmptyString(turn?.turn_id)
+  )).filter(Boolean));
+  const jsonlArtifactsByTurnId = readJsonlArtifactItemsByTurnId(
+    normalizedThreadId,
+    requestedTurnIds
+  );
   if (jsonlArtifactsByTurnId.size === 0) {
     return { turns, didAugment: false };
   }
@@ -2621,22 +3514,17 @@ function augmentRelayHistoryTurnsWithJsonlArtifacts(turns, threadId = "") {
     }
 
     const items = Array.isArray(turn.items) ? turn.items : [];
-    let nextItems = items;
-    if (artifacts.fileChangeItem && !hasEquivalentFileChangeItem(nextItems, artifacts.fileChangeItem)) {
-      nextItems = nextItems === items ? [...items] : nextItems;
-      nextItems.push(artifacts.fileChangeItem);
-    }
-    for (const imageViewItem of artifacts.imageViewItems || []) {
-      if (hasEquivalentImageViewItem(nextItems, imageViewItem)) {
-        continue;
+    const merged = mergeRelayHistoryItemsWithJsonlItems(
+      items,
+      artifacts.timelineItems,
+      normalizedThreadId,
+      {
+        includeJsonlItem: includeHistoryItems
+          ? () => true
+          : isJsonlHistoryArtifactItem,
       }
-      nextItems = nextItems === items ? [...items] : nextItems;
-      nextItems.push(imageViewItem);
-    }
-    if (artifacts.progressPlanItem && !hasEquivalentProgressPlanItem(nextItems, artifacts.progressPlanItem)) {
-      nextItems = nextItems === items ? [...items] : nextItems;
-      nextItems.push(artifacts.progressPlanItem);
-    }
+    );
+    const nextItems = merged.items;
 
     if (nextItems === items) {
       return turn;
@@ -2652,7 +3540,7 @@ function augmentRelayHistoryTurnsWithJsonlArtifacts(turns, threadId = "") {
   return { turns: didAugment ? augmentedTurns : turns, didAugment };
 }
 
-function readJsonlArtifactItemsByTurnId(threadId) {
+function readJsonlArtifactItemsByTurnId(threadId, requestedTurnIds = new Set()) {
   const emptyArtifactsByTurnId = new Map();
   const normalizedThreadId = normalizeNonEmptyString(threadId);
   if (!normalizedThreadId) {
@@ -2661,7 +3549,11 @@ function readJsonlArtifactItemsByTurnId(threadId) {
 
   const sessionsRoot = resolveSessionsRoot();
   const cacheKey = buildJsonlArtifactItemsCacheKey(sessionsRoot, normalizedThreadId);
-  const cachedArtifacts = readCachedJsonlArtifactItems(cacheKey, normalizedThreadId);
+  const cachedArtifacts = readCachedJsonlArtifactItems(
+    cacheKey,
+    normalizedThreadId,
+    requestedTurnIds
+  );
   if (cachedArtifacts) {
     return cachedArtifacts;
   }
@@ -2673,7 +3565,13 @@ function readJsonlArtifactItemsByTurnId(threadId) {
       return emptyArtifactsByTurnId;
     }
 
-    return readAndCacheJsonlArtifactItems(cacheKey, rolloutPath, normalizedThreadId);
+    return readAndCacheJsonlArtifactItems(
+      cacheKey,
+      rolloutPath,
+      normalizedThreadId,
+      null,
+      requestedTurnIds
+    );
   } catch (error) {
     jsonlArtifactItemsCacheByThread.delete(cacheKey);
     console.warn(`[remodex] history jsonl artifact augmentation failed for ${normalizedThreadId}: ${error.message}`);
@@ -2690,7 +3588,7 @@ function buildJsonlThreadCacheKey(sessionsRoot, threadId) {
   return `${sessionsRoot}\0${threadId}`;
 }
 
-function readCachedJsonlArtifactItems(cacheKey, threadId) {
+function readCachedJsonlArtifactItems(cacheKey, threadId, requestedTurnIds = new Set()) {
   const cached = jsonlArtifactItemsCacheByThread.get(cacheKey);
   if (!cached) {
     return null;
@@ -2704,7 +3602,13 @@ function readCachedJsonlArtifactItems(cacheKey, threadId) {
 
   if (stat.mtimeMs !== cached.mtimeMs || stat.size !== cached.size) {
     try {
-      return readAndCacheJsonlArtifactItems(cacheKey, cached.rolloutPath, threadId, stat);
+      return readAndCacheJsonlArtifactItems(
+        cacheKey,
+        cached.rolloutPath,
+        threadId,
+        stat,
+        requestedTurnIds
+      );
     } catch (error) {
       jsonlArtifactItemsCacheByThread.delete(cacheKey);
       console.warn(`[remodex] history jsonl artifact cache refresh failed for ${threadId}: ${error.message}`);
@@ -2713,6 +3617,11 @@ function readCachedJsonlArtifactItems(cacheKey, threadId) {
   }
 
   const now = Date.now();
+  const coversRequestedTurns = cached.coversEntireRollout
+    || [...requestedTurnIds].every((turnId) => cached.coveredTurnIds?.has(turnId));
+  if (!coversRequestedTurns) {
+    return null;
+  }
   if (now - cached.checkedAt <= RELAY_JSONL_ARTIFACT_CACHE_TTL_MS) {
     return cached.artifactsByTurnId;
   }
@@ -2721,11 +3630,37 @@ function readCachedJsonlArtifactItems(cacheKey, threadId) {
   return null;
 }
 
-function readAndCacheJsonlArtifactItems(cacheKey, rolloutPath, threadId, stat = null) {
+function readAndCacheJsonlArtifactItems(
+  cacheKey,
+  rolloutPath,
+  threadId,
+  stat = null,
+  requestedTurnIds = new Set()
+) {
   const rolloutStat = stat || fs.statSync(rolloutPath);
   const artifactsByTurnId = new Map();
+  let coveredTurnIds = new Set();
+  let coversEntireRollout = false;
   try {
-    const turns = parseSessionJsonlTurns(fs.readFileSync(rolloutPath, "utf8"), { threadId });
+    const recent = readRecentSessionJsonlTurns(rolloutPath, {
+      threadId,
+      limit: RELAY_TURNS_LIST_SAFE_RETRY_LIMIT,
+    });
+    let turns = recent?.turns || [];
+    coversEntireRollout = recent ? !recent.hasOlderTurns : false;
+    coveredTurnIds = new Set(turns.map((turn) => normalizeNonEmptyString(turn?.id)).filter(Boolean));
+    const missesRequestedTurn = [...requestedTurnIds].some((turnId) => !coveredTurnIds.has(turnId));
+
+    // Preserve the old exact artifact behavior for files V8 can safely decode,
+    // but only pay that cost when an older cursor page actually asks for a turn
+    // outside the fast tail. Multi-gigabyte files never enter this path.
+    if (!coversEntireRollout
+        && missesRequestedTurn
+        && rolloutStat.size <= RELAY_JSONL_FULL_ARTIFACT_FALLBACK_MAX_BYTES) {
+      turns = parseSessionJsonlTurns(fs.readFileSync(rolloutPath, "utf8"), { threadId });
+      coversEntireRollout = true;
+      coveredTurnIds = new Set(turns.map((turn) => normalizeNonEmptyString(turn?.id)).filter(Boolean));
+    }
     for (const turn of turns) {
       const turnId = normalizeNonEmptyString(turn?.id);
       const turnItems = Array.isArray(turn?.items) ? turn.items : [];
@@ -2733,47 +3668,9 @@ function readAndCacheJsonlArtifactItems(cacheKey, rolloutPath, threadId, stat = 
         continue;
       }
 
-      const fileChanges = turnItems.filter((item) => normalizeHistoryItemToken(item?.type) === "filechange");
-      const progressPlan = turnItems.find((item) => (
-        normalizeHistoryItemToken(item?.type) === "plan"
-          && item?.remodexJsonlProgressPlan === true
-      ));
-      const artifacts = {
-        fileChangeItem: null,
-        imageViewItems: [],
-        progressPlanItem: null,
-      };
-
-      const changes = [];
-      for (const item of fileChanges) {
-        if (Array.isArray(item.changes)) {
-          changes.push(...item.changes);
-        }
-      }
-      if (changes.length > 0) {
-        artifacts.fileChangeItem = {
-          id: `remodex-jsonl-file-change-${turnId}`,
-          type: "fileChange",
-          status: "completed",
-          changes,
-          remodexJsonlFileChangeAggregate: true,
-        };
-      }
-      if (progressPlan) {
-        artifacts.progressPlanItem = {
-          ...progressPlan,
-          id: normalizeNonEmptyString(progressPlan.id) || `remodex-jsonl-progress-plan-${turnId}`,
-        };
-      }
-      artifacts.imageViewItems = turnItems
-        .filter((item) => normalizeHistoryItemToken(item?.type) === "imageview")
-        .map((item, index) => ({
-          ...item,
-          id: normalizeNonEmptyString(item.id) || `remodex-jsonl-image-view-${turnId}-${index + 1}`,
-        }));
-
-      if (artifacts.fileChangeItem || artifacts.progressPlanItem || artifacts.imageViewItems.length > 0) {
-        artifactsByTurnId.set(turnId, artifacts);
+      const timelineItems = buildOrderedJsonlTimelineItems(turnItems, turnId);
+      if (timelineItems.length > 0) {
+        artifactsByTurnId.set(turnId, { timelineItems });
       }
     }
   } catch (error) {
@@ -2787,6 +3684,8 @@ function readAndCacheJsonlArtifactItems(cacheKey, rolloutPath, threadId, stat = 
     size: rolloutStat.size,
     checkedAt: Date.now(),
     artifactsByTurnId,
+    coveredTurnIds,
+    coversEntireRollout,
   });
   return artifactsByTurnId;
 }
@@ -2810,57 +3709,406 @@ function rememberJsonlArtifactItemsCache(cacheKey, entry) {
   }
 }
 
-function hasEquivalentFileChangeItem(items, incomingItem) {
-  const incomingId = normalizeNonEmptyString(incomingItem?.id);
-  const incomingPaths = fileChangePathSet(incomingItem);
-  return items.some((item) => {
-    if (normalizeHistoryItemToken(item?.type) !== "filechange") {
-      return false;
-    }
-    if (incomingId && normalizeNonEmptyString(item.id) === incomingId) {
-      return true;
-    }
-    if (item.remodexJsonlFileChangeAggregate === true) {
-      return true;
-    }
+// Keeps JSONL-only rows in rollout order while treating app-server rows as the
+// authoritative spine. Matching anchors let us place missing rows without ever
+// moving server-only findings, messages, or richer tool records to the tail.
+function mergeRelayHistoryItemsWithJsonlItems(existingItems, jsonlItems, threadId = "", {
+  includeJsonlItem = () => true,
+} = {}) {
+  if (!Array.isArray(existingItems) || !Array.isArray(jsonlItems) || jsonlItems.length === 0) {
+    return { items: existingItems, didMerge: false };
+  }
 
-    const existingPaths = fileChangePathSet(item);
-    if (incomingPaths.size === 0 || existingPaths.size === 0) {
-      return false;
+  const sanitizedJsonlItems = jsonlItems
+    .map((item) => sanitizeJsonlHistoryItemForRelayMerge(item, threadId))
+    .filter(Boolean);
+  if (sanitizedJsonlItems.length === 0) {
+    return { items: existingItems, didMerge: false };
+  }
+
+  if (existingItems.length === 0) {
+    const insertedItems = sanitizedJsonlItems.filter(includeJsonlItem);
+    return insertedItems.length > 0
+      ? { items: insertedItems, didMerge: true }
+      : { items: existingItems, didMerge: false };
+  }
+
+  const usedExistingIndices = new Set();
+  const resolvedExistingItems = existingItems.slice();
+  const insertionsBefore = new Map();
+  const insertionsAfter = new Map();
+  let pendingItems = [];
+  let previousMatchedIndex = null;
+  let matchedAnchorCount = 0;
+  let didReplaceMatchedItem = false;
+
+  // The rollout's turn+text alias is the only identity shared across the
+  // live-owner (item_N) and rollout (msg_...) views of one assistant reply.
+  // Carrying it onto the matched server row lets the phone join this item
+  // with its other-source representations instead of duplicating it.
+  const adoptJsonlSourceAlias = (index, jsonlItem) => {
+    const sourceKey = normalizeNonEmptyString(jsonlItem?.remodexSourceItemKey);
+    const existing = resolvedExistingItems[index];
+    if (!sourceKey || !existing || typeof existing !== "object"
+      || normalizeNonEmptyString(existing.remodexSourceItemKey)) {
+      return;
     }
-    for (const pathKey of incomingPaths) {
-      if (!existingPaths.has(pathKey)) {
-        return false;
+    resolvedExistingItems[index] = { ...existing, remodexSourceItemKey: sourceKey };
+    didReplaceMatchedItem = true;
+  };
+
+  const placePendingItems = () => {
+    if (pendingItems.length === 0) {
+      return;
+    }
+    if (previousMatchedIndex == null) {
+      insertionsBefore.set(0, pendingItems);
+    } else {
+      const existing = insertionsAfter.get(previousMatchedIndex) || [];
+      insertionsAfter.set(previousMatchedIndex, existing.concat(pendingItems));
+    }
+    pendingItems = [];
+  };
+
+  for (const jsonlItem of sanitizedJsonlItems) {
+    const unusedMatch = (candidate, index) => !usedExistingIndices.has(index);
+    const eligibleMatch = (candidate, index) => (
+      (previousMatchedIndex == null || index > previousMatchedIndex)
+      && unusedMatch(candidate, index)
+    );
+    let existingIndex = findRelayHistoryExactMatchIndex(existingItems, jsonlItem, eligibleMatch);
+    if (existingIndex === -1) {
+      // Exact identity remains authoritative even when server and rollout order
+      // disagree. Consume that occurrence before considering a later semantic
+      // lookalike, otherwise repeated rows can bind to the wrong server item.
+      const representedExactIndex = findRelayHistoryExactMatchIndex(
+        existingItems,
+        jsonlItem,
+        unusedMatch
+      );
+      if (representedExactIndex !== -1) {
+        usedExistingIndices.add(representedExactIndex);
+        if (isProgressPlanItem(jsonlItem)) {
+          resolvedExistingItems[representedExactIndex] = resolvedProgressPlanHistoryItem(
+            existingItems[representedExactIndex],
+            jsonlItem
+          );
+          didReplaceMatchedItem = true;
+        }
+        adoptJsonlSourceAlias(representedExactIndex, jsonlItem);
+        continue;
       }
+      existingIndex = findRelayHistorySemanticMatchIndex(existingItems, jsonlItem, eligibleMatch);
     }
+    if (existingIndex === -1) {
+      // The row can already exist before the monotonic placement frontier when
+      // server and rollout order disagree. Consume each represented occurrence
+      // once; an extra identical JSONL occurrence must remain visible instead
+      // of repeatedly matching the same server row and disappearing.
+      const representedIndex = findRelayHistorySemanticMatchIndex(
+        existingItems,
+        jsonlItem,
+        unusedMatch
+      );
+      if (representedIndex !== -1) {
+        usedExistingIndices.add(representedIndex);
+        if (isProgressPlanItem(jsonlItem)) {
+          resolvedExistingItems[representedIndex] = resolvedProgressPlanHistoryItem(
+            existingItems[representedIndex],
+            jsonlItem
+          );
+          didReplaceMatchedItem = true;
+        }
+        adoptJsonlSourceAlias(representedIndex, jsonlItem);
+        continue;
+      }
+      if (includeJsonlItem(jsonlItem)) {
+        pendingItems.push(jsonlItem);
+      }
+      continue;
+    }
+
+    placePendingItems();
+    usedExistingIndices.add(existingIndex);
+    if (isProgressPlanItem(jsonlItem)) {
+      resolvedExistingItems[existingIndex] = resolvedProgressPlanHistoryItem(
+        existingItems[existingIndex],
+        jsonlItem
+      );
+      didReplaceMatchedItem = true;
+    }
+    adoptJsonlSourceAlias(existingIndex, jsonlItem);
+    previousMatchedIndex = existingIndex;
+    matchedAnchorCount += 1;
+  }
+
+  if (matchedAnchorCount === 0) {
+    const unanchoredArtifacts = sanitizedJsonlItems.filter((item) => (
+      includeJsonlItem(item) && isJsonlHistoryArtifactItem(item)
+    ));
+    if (unanchoredArtifacts.length === 0) {
+      return { items: existingItems, didMerge: false };
+    }
+    const firstAssistantIndex = existingItems.findIndex(isRelayAssistantHistoryItem);
+    const insertionIndex = firstAssistantIndex === -1 ? existingItems.length : firstAssistantIndex;
+    return {
+      items: existingItems.slice(0, insertionIndex)
+        .concat(unanchoredArtifacts, existingItems.slice(insertionIndex)),
+      didMerge: true,
+    };
+  }
+  if (pendingItems.length > 0 && previousMatchedIndex != null) {
+    const existing = insertionsAfter.get(previousMatchedIndex) || [];
+    insertionsAfter.set(previousMatchedIndex, existing.concat(pendingItems));
+  }
+
+  if (insertionsBefore.size === 0 && insertionsAfter.size === 0 && !didReplaceMatchedItem) {
+    return { items: existingItems, didMerge: false };
+  }
+
+  const mergedItems = [];
+  for (const [index, item] of resolvedExistingItems.entries()) {
+    mergedItems.push(...(insertionsBefore.get(index) || []));
+    mergedItems.push(item);
+    mergedItems.push(...(insertionsAfter.get(index) || []));
+  }
+  return { items: mergedItems, didMerge: true };
+}
+
+function buildOrderedJsonlTimelineItems(turnItems, turnId) {
+  if (!Array.isArray(turnItems) || turnItems.length === 0) {
+    return [];
+  }
+
+  let latestProgressPlanIndex = -1;
+  for (const [index, item] of turnItems.entries()) {
+    if (isProgressPlanItem(item)) {
+      latestProgressPlanIndex = index;
+    }
+  }
+
+  let imageViewIndex = 0;
+  return turnItems.flatMap((item, index) => {
+    if (!shouldIncludeJsonlTimelineItem(item)) {
+      return [];
+    }
+    if (isProgressPlanItem(item) && index !== latestProgressPlanIndex) {
+      return [];
+    }
+
+    const itemType = normalizeHistoryItemToken(item?.type);
+    if (isProgressPlanItem(item)) {
+      return [{
+        ...item,
+        id: normalizeNonEmptyString(item?.id) || `remodex-jsonl-progress-plan-${turnId}`,
+        remodexProgressPlan: true,
+        remodexJsonlProgressPlan: true,
+      }];
+    }
+    if (itemType === "imageview") {
+      imageViewIndex += 1;
+      return [{
+        ...item,
+        id: normalizeNonEmptyString(item?.id)
+          || `remodex-jsonl-image-view-${turnId}-${imageViewIndex}`,
+      }];
+    }
+    return [item];
+  });
+}
+
+function shouldIncludeJsonlTimelineItem(item) {
+  const itemType = normalizeHistoryItemToken(item?.type);
+  return Boolean(itemType)
+    && itemType !== "toolcalloutput"
+    && itemType !== "functioncalloutput"
+    && itemType !== "customtoolcalloutput";
+}
+
+function isJsonlHistoryArtifactItem(item) {
+  const itemType = normalizeHistoryItemToken(item?.type);
+  return itemType === "filechange"
+    || itemType === "imageview"
+    || isProgressPlanItem(item);
+}
+
+function isProgressPlanItem(item) {
+  const itemType = normalizeHistoryItemToken(item?.type);
+  return (itemType === "plan" || itemType === "todolist")
+    && (item?.remodexJsonlProgressPlan === true || item?.remodexProgressPlan === true);
+}
+
+function resolvedProgressPlanHistoryItem(existingItem, jsonlItem) {
+  return {
+    ...existingItem,
+    text: jsonlItem.text,
+    explanation: jsonlItem.explanation,
+    plan: jsonlItem.plan,
+    remodexProgressPlan: true,
+    remodexJsonlProgressPlan: true,
+  };
+}
+
+function findRelayHistoryExactMatchIndex(items, incomingItem, predicate = () => true) {
+  return items.findIndex((candidate, index) => (
+    predicate(candidate, index) && relayHistoryItemsHaveExactIdentity(candidate, incomingItem)
+  ));
+}
+
+function findRelayHistorySemanticMatchIndex(items, incomingItem, predicate = () => true) {
+  return items.findIndex((candidate, index) => (
+    predicate(candidate, index) && areEquivalentRelayHistoryItems(candidate, incomingItem)
+  ));
+}
+
+function relayHistoryItemsHaveExactIdentity(first, second) {
+  const firstIdentity = relayHistoryItemIdentity(first);
+  const secondIdentity = relayHistoryItemIdentity(second);
+  if (firstIdentity && secondIdentity && firstIdentity === secondIdentity) {
     return true;
-  });
+  }
+  const firstCallId = relayHistoryItemCallId(first);
+  const secondCallId = relayHistoryItemCallId(second);
+  return Boolean(firstCallId && secondCallId && firstCallId === secondCallId);
 }
 
-function hasEquivalentProgressPlanItem(items, incomingItem) {
-  const incomingId = normalizeNonEmptyString(incomingItem?.id);
-  return items.some((item) => {
-    if (normalizeHistoryItemToken(item?.type) !== "plan") {
-      return false;
-    }
-    return item.remodexJsonlProgressPlan === true
-      || (incomingId && normalizeNonEmptyString(item.id) === incomingId);
-  });
+function isRelayAssistantHistoryItem(item) {
+  const role = normalizeNonEmptyString(item?.role).toLowerCase();
+  const itemType = normalizeHistoryItemToken(item?.type);
+  return role === "assistant"
+    || itemType === "assistantmessage"
+    || itemType === "agentmessage"
+    || (itemType === "message" && role !== "user");
 }
 
-function hasEquivalentImageViewItem(items, incomingItem) {
-  const incomingId = normalizeNonEmptyString(incomingItem?.id);
-  const incomingPath = normalizeImageViewPathKey(incomingItem);
-  return items.some((item) => {
-    if (normalizeHistoryItemToken(item?.type) !== "imageview") {
-      return false;
-    }
-    const itemId = normalizeNonEmptyString(item.id);
-    if (incomingId && itemId === incomingId) {
+function sanitizeJsonlHistoryItemForRelayMerge(item, threadId) {
+  const sanitizedTurn = sanitizeRelayHistoryTurn({ items: [item] }, threadId);
+  return sanitizedTurn?.items?.[0] || item;
+}
+
+function areEquivalentRelayHistoryItems(first, second) {
+  const firstIdentity = relayHistoryItemIdentity(first);
+  const secondIdentity = relayHistoryItemIdentity(second);
+  if (firstIdentity && secondIdentity && firstIdentity === secondIdentity) {
+    return true;
+  }
+
+  const firstCallId = relayHistoryItemCallId(first);
+  const secondCallId = relayHistoryItemCallId(second);
+  if (firstCallId && secondCallId && firstCallId === secondCallId) {
+    return true;
+  }
+
+  if (isProgressPlanItem(first) && isProgressPlanItem(second)) {
+    return true;
+  }
+
+  // JSONL line ids are source-local fallbacks, not provider identities. They
+  // may reconcile semantically with a real app-server id; occurrence tracking
+  // in the merge keeps intentional repeated rows distinct. Assistant messages
+  // are exempt from the two-stable-ids refusal: the live-owner state keys them
+  // by app-server event id (item_N) while the rollout records the provider id
+  // (msg_...), so the same reply legitimately carries two stable identities.
+  if (relayHistoryIdentityIsStable(firstIdentity)
+    && relayHistoryIdentityIsStable(secondIdentity)
+    && !(isRelayAssistantHistoryItem(first) && isRelayAssistantHistoryItem(second))) {
+    return false;
+  }
+  if (relayHistoryIdentityIsStable(firstCallId)
+    && relayHistoryIdentityIsStable(secondCallId)) {
+    return false;
+  }
+
+  const firstType = normalizeHistoryItemToken(first?.type);
+  const secondType = normalizeHistoryItemToken(second?.type);
+  if (firstType === "imageview" && secondType === "imageview") {
+    const firstPath = normalizeImageViewPathKey(first);
+    const secondPath = normalizeImageViewPathKey(second);
+    if (firstPath && firstPath === secondPath) {
       return true;
     }
-    return incomingPath && normalizeImageViewPathKey(item) === incomingPath;
-  });
+  }
+  if (firstType === "filechange" && secondType === "filechange") {
+    const firstPaths = fileChangePathSet(first);
+    const secondPaths = fileChangePathSet(second);
+    if (firstPaths.size > 0
+      && firstPaths.size === secondPaths.size
+      && Array.from(firstPaths).every((pathKey) => secondPaths.has(pathKey))) {
+      return true;
+    }
+  }
+
+  const firstText = relayHistoryItemText(first);
+  const secondText = relayHistoryItemText(second);
+  if (!firstText || !secondText || firstText !== secondText) {
+    return false;
+  }
+
+  return relayHistoryItemKindsCompatible(first, second);
+}
+
+function relayHistoryItemKindsCompatible(first, second) {
+  const firstType = normalizeHistoryItemToken(first?.type);
+  const secondType = normalizeHistoryItemToken(second?.type);
+  if (firstType && secondType && firstType === secondType) {
+    return true;
+  }
+
+  const firstRole = normalizeNonEmptyString(first?.role).toLowerCase();
+  const secondRole = normalizeNonEmptyString(second?.role).toLowerCase();
+  if (firstRole && secondRole && firstRole === secondRole) {
+    return true;
+  }
+
+  return isRelayMessageLikeHistoryType(firstType) && isRelayMessageLikeHistoryType(secondType);
+}
+
+function isRelayMessageLikeHistoryType(itemType) {
+  return itemType === "message"
+    || itemType === "assistantmessage"
+    || itemType === "agentmessage"
+    || itemType === "usermessage";
+}
+
+function relayHistoryItemIdentity(item) {
+  return normalizeNonEmptyString(item?.id)
+    || normalizeNonEmptyString(item?.itemId)
+    || normalizeNonEmptyString(item?.item_id);
+}
+
+function relayHistoryIdentityIsStable(identity) {
+  const normalizedIdentity = normalizeNonEmptyString(identity);
+  if (!normalizedIdentity) {
+    return false;
+  }
+  return !/^(?:user-message-line|response-item-line|apply-patch-line)-\d+$/.test(normalizedIdentity);
+}
+
+function relayHistoryItemCallId(item) {
+  return normalizeNonEmptyString(item?.call_id)
+    || normalizeNonEmptyString(item?.callId);
+}
+
+function relayHistoryItemText(item) {
+  if (!item || typeof item !== "object" || Array.isArray(item)) {
+    return "";
+  }
+
+  for (const key of ["text", "message", "summary", "output", "outputText", "output_text", "command"]) {
+    const value = normalizeNonEmptyString(item[key]);
+    if (value) {
+      return value;
+    }
+  }
+
+  if (Array.isArray(item.content)) {
+    return item.content
+      .map(relayHistoryItemText)
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  return "";
 }
 
 function normalizeImageViewPathKey(item) {
@@ -2932,7 +4180,16 @@ function sanitizeRelayHistoryTurn(turn, threadId = "") {
     }
 
     let itemDidChange = false;
-    let sanitizedItem = convertApplyPatchHistoryItem(item) || item;
+    let sanitizedItem = sanitizeUserRoleItem(item);
+    if (!sanitizedItem) {
+      turnDidChange = true;
+      return null;
+    }
+    if (sanitizedItem !== item) {
+      itemDidChange = true;
+    }
+
+    sanitizedItem = convertApplyPatchHistoryItem(sanitizedItem) || sanitizedItem;
     if (sanitizedItem !== item) {
       itemDidChange = true;
     }
@@ -2970,7 +4227,7 @@ function sanitizeRelayHistoryTurn(turn, threadId = "") {
     }
 
     return itemDidChange ? sanitizedItem : item;
-  });
+  }).filter(Boolean);
 
   return turnDidChange
     ? {
@@ -2978,6 +4235,67 @@ function sanitizeRelayHistoryTurn(turn, threadId = "") {
       items: sanitizedItems,
     }
     : turn;
+}
+
+// Compatibility predicate for callers that only need a drop/no-drop decision.
+// The full sanitizer below also rewrites mixed items without losing attachments.
+const LIVE_ITEM_LIFECYCLE_METHODS = new Set([
+  "item/started",
+  "item/updated",
+  "item/completed",
+]);
+
+function isContextualUserItemNotification(parsed) {
+  const method = typeof parsed?.method === "string" ? parsed.method : "";
+  if (!LIVE_ITEM_LIFECYCLE_METHODS.has(method)) {
+    return false;
+  }
+  const item = parsed?.params?.item;
+  if (!isUserRoleItem(item)) {
+    return false;
+  }
+  return isContextualUserText(readUserItemText(item));
+}
+
+// Sanitizes both raw app-server item events and fallback user_message events
+// before they can become mobile bubbles. Structured attachments stay intact.
+function sanitizeLiveUserNotification(parsed) {
+  if (!parsed || typeof parsed !== "object") {
+    return parsed;
+  }
+  const method = typeof parsed.method === "string" ? parsed.method : "";
+  if (LIVE_ITEM_LIFECYCLE_METHODS.has(method)) {
+    const item = parsed?.params?.item;
+    if (!isUserRoleItem(item)) {
+      return parsed;
+    }
+    const sanitizedItem = sanitizeUserRoleItem(item);
+    if (!sanitizedItem) {
+      return null;
+    }
+    return sanitizedItem === item ? parsed : {
+      ...parsed,
+      params: { ...parsed.params, item: sanitizedItem },
+    };
+  }
+
+  if (method !== "codex/event/user_message") {
+    return parsed;
+  }
+  const key = typeof parsed?.params?.message === "string"
+    ? "message"
+    : (typeof parsed?.params?.text === "string" ? "text" : "");
+  if (!key) {
+    return parsed;
+  }
+  const visible = visibleUserPromptText(parsed.params[key]);
+  if (!visible) {
+    return null;
+  }
+  return visible === parsed.params[key] ? parsed : {
+    ...parsed,
+    params: { ...parsed.params, [key]: visible },
+  };
 }
 
 function convertApplyPatchHistoryItem(item) {
@@ -3450,6 +4768,32 @@ function trimTurnsListPayloadForRelay(parsed, turnsKey, originalRawMessage = nul
     }
   }
 
+  // A bounded JSONL first page can still describe one exceptionally large
+  // turn with many small items. Keep that provisional response relay-safe while
+  // preserving its handoff flags/cursor; the canonical background page will
+  // replace it with the authoritative history.
+  if (result.remodexJsonlFallback === true) {
+    for (const maxItems of [64, 16, 4, 1]) {
+      for (const maxChars of [1_000, 0]) {
+        const emergencyTurns = turns.map((turn) => (
+          compactEmergencySingleTurnForRelay(turn, maxChars, maxItems)
+        ));
+        const emergencyPayload = JSON.stringify({
+          ...parsed,
+          result: {
+            ...result,
+            [turnsKey]: emergencyTurns,
+            remodexPageCompactedForRelay: true,
+            remodexEmergencyJsonlPageForRelay: true,
+          },
+        });
+        if (Buffer.byteLength(emergencyPayload, "utf8") <= RELAY_THREAD_PAYLOAD_SOFT_LIMIT_BYTES) {
+          return emergencyPayload;
+        }
+      }
+    }
+  }
+
   return fallbackCompactedPayload ?? (originalRawMessage ?? encoded);
 }
 
@@ -3505,6 +4849,9 @@ function buildRelayHistoryCompactionTurn(omittedTurnCount, keptTurnCount, idSour
 
   return {
     id: `remodex-history-compacted-${baseId}`,
+    // A status-less turn reads as interruptible/running to the phone's
+    // turn-state snapshot, flagging idle heavy threads as "thinking".
+    status: "completed",
     remodexSynthetic: true,
     remodexHistoryCompacted: true,
     remodexOmittedTurnCount: omittedTurnCount,
@@ -3667,17 +5014,40 @@ function persistBridgePreferences(
   });
 }
 
+function shouldSuppressRolloutMirrorForThread(
+  threadId,
+  { desktopIpcActionFollower = null, desktopIpcLiveOwner = null } = {},
+  { fallbackActivityAt = 0 } = {}
+) {
+  // Desktop ownership is an expiring live lease, not a permanent boolean. A
+  // stale IPC snapshot used to mute an actively growing rollout forever.
+  const followerIsFresh = typeof desktopIpcActionFollower?.hasFreshLiveThreadState === "function"
+    ? desktopIpcActionFollower.hasFreshLiveThreadState(threadId, { fallbackActivityAt })
+    : desktopIpcActionFollower?.hasLiveThreadState(threadId);
+  const ownerIsFresh = typeof desktopIpcLiveOwner?.isFreshThreadOwned === "function"
+    ? desktopIpcLiveOwner.isFreshThreadOwned(threadId)
+    : false;
+  return Boolean(followerIsFresh) || Boolean(ownerIsFresh);
+}
+
 module.exports = {
   buildThreadTurnsListRelaySanitizeContext,
   buildHeartbeatBridgeStatus,
+  canonicalThreadTurnsListRequest,
   createMacOSBridgeWakeAssertion,
+  createThreadTurnsListFastPageCoordinator,
   disableUnsupportedReasoningSummaryForTurnStart,
   fetchAdaptiveThreadTurnsListForRelay,
   hasRelayConnectionGoneStale,
+  isContextualUserItemNotification,
+  maybeMergeLatestJsonlTurnIntoTurnsListResponse,
+  normalizeTurnStartForCodex,
   normalizeRelayBoundJsonRpcMessage,
   persistBridgePreferences,
   resolveJsonlTurnsListRolloutPathForFallback,
   sanitizeLiveGeneratedImageMessageForRelay,
+  sanitizeLiveUserNotification,
   sanitizeThreadHistoryImagesForRelay,
+  shouldSuppressRolloutMirrorForThread,
   startBridge,
 };

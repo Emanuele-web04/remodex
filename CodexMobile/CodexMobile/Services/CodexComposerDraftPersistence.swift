@@ -83,28 +83,17 @@ nonisolated struct CodexComposerDraftPersistence {
     }
 
     private func encryptPersistedPayload(_ plaintext: Data) -> Data? {
-        let key = localHistoryKey()
+        let key = CodexLocalPersistenceKeyProvider.historyKey()
         let sealedBox = try? AES.GCM.seal(plaintext, using: key)
         return sealedBox?.combined
     }
 
     private func decryptPersistedPayload(_ encryptedData: Data) -> Data? {
-        let key = localHistoryKey()
+        let key = CodexLocalPersistenceKeyProvider.historyKey()
         guard let sealedBox = try? AES.GCM.SealedBox(combined: encryptedData) else {
             return nil
         }
         return try? AES.GCM.open(sealedBox, using: key)
-    }
-
-    private func localHistoryKey() -> SymmetricKey {
-        if let storedKey = SecureStore.readData(for: CodexSecureKeys.messageHistoryKey) {
-            return SymmetricKey(data: storedKey)
-        }
-
-        let newKey = SymmetricKey(size: .bits256)
-        let keyData = newKey.withUnsafeBytes { Data($0) }
-        SecureStore.writeData(keyData, for: CodexSecureKeys.messageHistoryKey)
-        return newKey
     }
 
     private func normalizedMacDeviceId(_ value: String?) -> String? {

@@ -4,6 +4,19 @@
 
 const fs = require("fs");
 const { buildApplyPatchFileChangeItem } = require("./apply-patch-changes");
+const { terminalEventClosesTrackedTurn } = require("./rollout-turn-semantics");
+const {
+  buildRemodexSourceItemKey,
+  isContextualUserText,
+  isUserRoleItem,
+  responseItemMessageText: sharedResponseItemMessageText,
+  visibleUserPromptText,
+} = require("./desktop-ipc-shared");
+
+const JSONL_OLDER_HANDOFF_CURSOR = "remodex-jsonl-fallback-older-unavailable";
+const DEFAULT_SESSION_JSONL_METADATA_HEAD_BYTES = 256 * 1024;
+const DEFAULT_SESSION_JSONL_INITIAL_TAIL_BYTES = 4 * 1024 * 1024;
+const DEFAULT_SESSION_JSONL_MAX_TAIL_BYTES = 64 * 1024 * 1024;
 
 function readThreadTurnsListPageFromSessionJsonl(filePath, {
   threadId = "",
@@ -11,13 +24,27 @@ function readThreadTurnsListPageFromSessionJsonl(filePath, {
   maxLimit = 5,
   cursor = null,
   fsModule = fs,
+  metadataHeadBytes = DEFAULT_SESSION_JSONL_METADATA_HEAD_BYTES,
+  initialTailBytes = DEFAULT_SESSION_JSONL_INITIAL_TAIL_BYTES,
+  maxTailBytes = DEFAULT_SESSION_JSONL_MAX_TAIL_BYTES,
 } = {}) {
   if (!filePath || cursor != null) {
     return null;
   }
 
-  const content = fsModule.readFileSync(filePath, "utf8");
-  const turns = parseSessionJsonlTurns(content, { threadId });
+  const recent = readRecentSessionJsonlTurns(filePath, {
+    threadId,
+    limit: Math.min(
+      Number.isInteger(limit) && limit > 0 ? limit : 5,
+      Number.isInteger(maxLimit) && maxLimit > 0 ? maxLimit : 5,
+      5
+    ),
+    fsModule,
+    metadataHeadBytes,
+    initialTailBytes,
+    maxTailBytes,
+  });
+  const turns = recent?.turns || [];
   if (turns.length === 0) {
     return null;
   }
@@ -28,9 +55,270 @@ function readThreadTurnsListPageFromSessionJsonl(filePath, {
   const pageTurns = turns.slice(-safeLimit).reverse();
   return {
     data: pageTurns,
-    nextCursor: turns.length > pageTurns.length ? "remodex-jsonl-fallback-older-unavailable" : null,
+    nextCursor: recent.hasOlderTurns || turns.length > pageTurns.length
+      ? JSONL_OLDER_HANDOFF_CURSOR
+      : null,
     remodexJsonlFallback: true,
   };
+}
+
+// Reads only a bounded snapshot of an append-only rollout. Truncated tails are
+// accepted only when the latest turn's own start and visible user prompt are in
+// the window, so a fast page can never invent ownership for cut-off items.
+function readRecentSessionJsonlTurns(filePath, {
+  threadId = "",
+  limit = 5,
+  fsModule = fs,
+  metadataHeadBytes = DEFAULT_SESSION_JSONL_METADATA_HEAD_BYTES,
+  initialTailBytes = DEFAULT_SESSION_JSONL_INITIAL_TAIL_BYTES,
+  maxTailBytes = DEFAULT_SESSION_JSONL_MAX_TAIL_BYTES,
+} = {}) {
+  if (!filePath) {
+    return null;
+  }
+
+  // Keep simple in-memory test doubles compatible without weakening the real
+  // filesystem path, which must never stringify a multi-gigabyte rollout.
+  if (!supportsBoundedSessionJsonlReads(fsModule)) {
+    const content = fsModule.readFileSync(filePath, "utf8");
+    const turns = parseSessionJsonlTurns(content, { threadId });
+    return turns.length > 0 ? { turns, hasOlderTurns: false, bytesRead: Buffer.byteLength(content, "utf8") } : null;
+  }
+
+  const stat = fsModule.statSync(filePath);
+  const snapshotSize = Math.max(0, Number(stat?.size) || 0);
+  if (snapshotSize === 0) {
+    return null;
+  }
+
+  const safeLimit = Math.max(1, Math.min(Number.isInteger(limit) ? limit : 5, 5));
+  const safeMetadataHeadBytes = Math.max(1, Math.min(metadataHeadBytes, snapshotSize));
+  const safeMaximumTailBytes = Math.max(1, Math.min(maxTailBytes, snapshotSize));
+  let tailBytes = Math.max(1, Math.min(initialTailBytes, safeMaximumTailBytes));
+  const fileHandle = fsModule.openSync(filePath, "r");
+
+  try {
+    const metadataBuffer = readSessionJsonlRange(
+      fileHandle,
+      0,
+      safeMetadataHeadBytes,
+      fsModule
+    );
+    const initialMetadata = parseSessionJsonlInitialMetadata(metadataBuffer.toString("utf8"));
+
+    while (true) {
+      const rawStart = Math.max(0, snapshotSize - tailBytes);
+      const tailBuffer = readSessionJsonlRange(
+        fileHandle,
+        rawStart,
+        snapshotSize - rawStart,
+        fsModule
+      );
+      const aligned = alignSessionJsonlTailBuffer(tailBuffer, rawStart);
+      if (aligned) {
+        const content = aligned.buffer.toString("utf8");
+        const sourceLineByteOffsets = sessionJsonlLineByteOffsets(
+          aligned.buffer,
+          aligned.sourceByteOffset
+        );
+        const turns = parseSessionJsonlTurns(content, {
+          threadId,
+          initialMetadata,
+          sourceByteOffset: aligned.sourceByteOffset,
+          sourceLineByteOffsets,
+        });
+        const observedStartedTurnIDs = observedTaskStartedTurnIDs(content, {
+          sourceByteOffset: aligned.sourceByteOffset,
+          sourceLineByteOffsets,
+        });
+        const safeTurns = rawStart === 0
+          ? turns
+          : turns.filter((turn) => (
+            observedStartedTurnIDs.has(normalizeString(turn?.id))
+              && turnHasVisibleUserItem(turn)
+          ));
+
+        if (safeTurns.length >= safeLimit || tailBytes >= safeMaximumTailBytes || rawStart === 0) {
+          if (safeTurns.length === 0) {
+            return null;
+          }
+          return {
+            turns: safeTurns,
+            hasOlderTurns: rawStart > 0 || turns.length > safeTurns.length,
+            bytesRead: metadataBuffer.length + tailBuffer.length,
+          };
+        }
+      }
+
+      if (tailBytes >= safeMaximumTailBytes || rawStart === 0) {
+        return null;
+      }
+      tailBytes = Math.min(safeMaximumTailBytes, tailBytes * 2);
+    }
+  } finally {
+    fsModule.closeSync(fileHandle);
+  }
+}
+
+function readSessionJsonlMetadataFromFile(filePath, {
+  fsModule = fs,
+  metadataHeadBytes = DEFAULT_SESSION_JSONL_METADATA_HEAD_BYTES,
+} = {}) {
+  if (!filePath) {
+    return { threadId: "", cwd: "" };
+  }
+  if (!supportsBoundedSessionJsonlReads(fsModule)) {
+    return parseSessionJsonlMetadata(fsModule.readFileSync(filePath, "utf8"));
+  }
+
+  const stat = fsModule.statSync(filePath);
+  const snapshotSize = Math.max(0, Number(stat?.size) || 0);
+  if (snapshotSize === 0) {
+    return { threadId: "", cwd: "" };
+  }
+  const fileHandle = fsModule.openSync(filePath, "r");
+  try {
+    const head = readSessionJsonlRange(
+      fileHandle,
+      0,
+      Math.min(snapshotSize, Math.max(1, metadataHeadBytes)),
+      fsModule
+    );
+    const metadata = parseSessionJsonlInitialMetadata(head.toString("utf8"));
+    return { threadId: metadata.threadId, cwd: metadata.cwd };
+  } finally {
+    fsModule.closeSync(fileHandle);
+  }
+}
+
+function supportsBoundedSessionJsonlReads(fsModule) {
+  return typeof fsModule?.statSync === "function"
+    && typeof fsModule?.openSync === "function"
+    && typeof fsModule?.readSync === "function"
+    && typeof fsModule?.closeSync === "function";
+}
+
+function readSessionJsonlRange(fileHandle, start, length, fsModule) {
+  const safeLength = Math.max(0, length);
+  const buffer = Buffer.allocUnsafe(safeLength);
+  const bytesRead = safeLength > 0
+    ? fsModule.readSync(fileHandle, buffer, 0, safeLength, start)
+    : 0;
+  return buffer.subarray(0, bytesRead);
+}
+
+function alignSessionJsonlTailBuffer(buffer, rawStart) {
+  if (rawStart === 0) {
+    return { buffer, sourceByteOffset: 0 };
+  }
+  const firstLineFeed = buffer.indexOf(0x0a);
+  if (firstLineFeed === -1 || firstLineFeed + 1 >= buffer.length) {
+    return null;
+  }
+  return {
+    buffer: buffer.subarray(firstLineFeed + 1),
+    sourceByteOffset: rawStart + firstLineFeed + 1,
+  };
+}
+
+function sessionJsonlLineByteOffsets(buffer, sourceByteOffset) {
+  const offsets = [sourceByteOffset];
+  for (let index = 0; index < buffer.length; index += 1) {
+    if (buffer[index] === 0x0a && index + 1 < buffer.length) {
+      offsets.push(sourceByteOffset + index + 1);
+    }
+  }
+  return offsets;
+}
+
+function observedTaskStartedTurnIDs(content, {
+  sourceByteOffset = 0,
+  sourceLineByteOffsets = null,
+} = {}) {
+  const turnIDs = new Set();
+  const raw = String(content || "");
+  let lineIndex = -1;
+  let lineStart = 0;
+  let fallbackSourceByteOffset = sourceByteOffset;
+  while (lineStart < raw.length) {
+    lineIndex += 1;
+    let lineEnd = raw.indexOf("\n", lineStart);
+    if (lineEnd === -1) {
+      lineEnd = raw.length;
+    }
+    const currentLineStart = lineStart;
+    const lineEndWithSeparator = lineEnd < raw.length ? lineEnd + 1 : lineEnd;
+    const sourceLineNumber = sourceLineByteOffsets?.[lineIndex]
+      ?? fallbackSourceByteOffset;
+    fallbackSourceByteOffset += Buffer.byteLength(
+      raw.substring(currentLineStart, lineEndWithSeparator),
+      "utf8"
+    );
+    const line = raw.substring(lineStart, lineEnd).trim();
+    lineStart = lineEnd + 1;
+    if (!line) {
+      continue;
+    }
+    try {
+      const entry = JSON.parse(line);
+      const payload = objectValue(entry?.payload);
+      if (entry?.type !== "event_msg" || normalizeString(payload?.type) !== "task_started") {
+        continue;
+      }
+      const turnID = normalizeString(payload?.turn_id)
+        || normalizeString(payload?.turnId)
+        || `turn-line-${sourceLineNumber}`;
+      if (turnID) {
+        turnIDs.add(turnID);
+      }
+    } catch {
+      // A live rollout may end with a partial line; ignore it until the next read.
+    }
+  }
+  return turnIDs;
+}
+
+function turnHasVisibleUserItem(turn) {
+  return Array.isArray(turn?.items) && turn.items.some((item) => isUserRoleItem(item));
+}
+
+function parseSessionJsonlInitialMetadata(content) {
+  let threadId = "";
+  let cwd = "";
+  let timeZone = "";
+  const raw = String(content || "");
+  let lineStart = 0;
+  while (lineStart < raw.length) {
+    let lineEnd = raw.indexOf("\n", lineStart);
+    if (lineEnd === -1) {
+      lineEnd = raw.length;
+    }
+    const line = raw.substring(lineStart, lineEnd).trim();
+    lineStart = lineEnd + 1;
+    if (!line) {
+      continue;
+    }
+    try {
+      const entry = JSON.parse(line);
+      if (entry?.type !== "session_meta") {
+        continue;
+      }
+      const payload = objectValue(entry.payload);
+      threadId = normalizeString(payload?.id)
+        || normalizeString(payload?.thread_id)
+        || normalizeString(payload?.threadId);
+      cwd = normalizeString(payload?.cwd)
+        || normalizeString(payload?.current_working_directory)
+        || normalizeString(payload?.working_directory);
+      timeZone = normalizeString(payload?.timezone)
+        || normalizeString(payload?.timeZone)
+        || normalizeString(payload?.time_zone);
+      break;
+    } catch {
+      // Metadata is expected at the head; an incomplete oversized line is not trusted.
+    }
+  }
+  return { threadId, cwd, timeZone };
 }
 
 // Extracts thread-level context that app-server history can omit for desktop-origin runs.
@@ -78,26 +366,42 @@ function parseSessionJsonlMetadata(content) {
   return { threadId, cwd };
 }
 
-function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
+function parseSessionJsonlTurns(content, {
+  threadId = "",
+  initialMetadata = null,
+  sourceByteOffset = 0,
+  sourceLineByteOffsets = null,
+} = {}) {
   const turns = [];
   const turnsById = new Map();
   let activeTurnId = "";
-  let sessionThreadId = normalizeString(threadId);
-  let sessionCwd = "";
-  let sessionTimeZone = "";
+  let pendingSyntheticTerminal = null;
+  let sessionThreadId = normalizeString(threadId) || normalizeString(initialMetadata?.threadId);
+  let sessionCwd = normalizeString(initialMetadata?.cwd);
+  let sessionTimeZone = normalizeString(initialMetadata?.timeZone);
   const skippedCallIds = new Set();
   const toolCallsByCallId = new Map();
   const pendingUserMessages = [];
+  const assistantAliasOccurrencesByBaseKey = new Map();
 
   const raw = String(content || "");
   let index = -1;
   let lineStart = 0;
+  let fallbackSourceByteOffset = sourceByteOffset;
   while (lineStart < raw.length) {
     index += 1;
     let lineEnd = raw.indexOf("\n", lineStart);
     if (lineEnd === -1) {
       lineEnd = raw.length;
     }
+    const currentLineStart = lineStart;
+    const lineEndWithSeparator = lineEnd < raw.length ? lineEnd + 1 : lineEnd;
+    const sourceLineNumber = sourceLineByteOffsets?.[index]
+      ?? fallbackSourceByteOffset;
+    fallbackSourceByteOffset += Buffer.byteLength(
+      raw.substring(currentLineStart, lineEndWithSeparator),
+      "utf8"
+    );
     const line = raw.substring(lineStart, lineEnd).trim();
     lineStart = lineEnd + 1;
     if (!line) {
@@ -144,28 +448,51 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
       const payload = objectValue(entry.payload);
       const eventType = normalizeString(payload?.type);
       if (eventType === "task_started") {
+        if (pendingSyntheticTerminal) {
+          closeSyntheticHistoryTurn(turnsById, pendingSyntheticTerminal);
+          pendingSyntheticTerminal = null;
+          activeTurnId = "";
+        }
         activeTurnId = normalizeString(payload?.turn_id)
           || normalizeString(payload?.turnId)
           || activeTurnId
-          || `turn-line-${index + 1}`;
+          || `turn-line-${sourceLineNumber}`;
         const turn = ensureTurn(turns, turnsById, activeTurnId, sessionThreadId, entry.timestamp);
         applyHistoryTimeZone(turn, sessionTimeZone);
         flushPendingUserMessagesToTurn(turn, pendingUserMessages);
         continue;
       }
 
-      if (eventType === "task_complete") {
-        const turn = ensureTurn(
-          turns,
-          turnsById,
-          normalizeString(payload?.turn_id) || normalizeString(payload?.turnId) || activeTurnId || `turn-line-${index + 1}`,
-          sessionThreadId,
-          entry.timestamp
-        );
-        applyHistoryTimeZone(turn, sessionTimeZone);
-        turn.status = "completed";
-        activeTurnId = "";
+      if (eventType === "task_complete" || eventType === "turn_aborted" || eventType === "error") {
+        const explicitTurnId = normalizeString(payload?.turn_id) || normalizeString(payload?.turnId);
+        const terminalTurnId = explicitTurnId || activeTurnId;
+        if (terminalTurnId) {
+          const turn = ensureTurn(turns, turnsById, terminalTurnId, sessionThreadId, entry.timestamp);
+          applyHistoryTimeZone(turn, sessionTimeZone);
+          // Aborted/failed runs never write task_complete; without a terminal
+          // status here the history page would report them as still running.
+          turn.status = eventType === "task_complete"
+            ? "completed"
+            : (eventType === "error" ? "failed" : "aborted");
+        }
+        // Desktop interleaves parallel turns in one rollout. A sibling turn's
+        // terminal event must not orphan the still-running turn's context:
+        // keeping activeTurnId prevents later turn-less items from spawning
+        // synthetic "turn-line-N" running turns that pin the thread as active.
+        if (terminalEventClosesTrackedTurn(explicitTurnId, activeTurnId)) {
+          activeTurnId = "";
+          pendingSyntheticTerminal = null;
+        } else if (isSyntheticHistoryTurnId(activeTurnId) && explicitTurnId) {
+          pendingSyntheticTerminal = {
+            turnId: activeTurnId,
+            status: terminalStatusForEventType(eventType),
+          };
+        }
         continue;
+      }
+
+      if (eventType) {
+        pendingSyntheticTerminal = null;
       }
 
       if (eventType === "item_completed") {
@@ -177,11 +504,15 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
         const turn = ensureTurn(
           turns,
           turnsById,
-          normalizeString(payload?.turn_id) || normalizeString(payload?.turnId) || activeTurnId || `turn-line-${index + 1}`,
+          normalizeString(payload?.turn_id)
+            || normalizeString(payload?.turnId)
+            || responseItemTurnId(completedItem)
+            || activeTurnId
+            || `turn-line-${sourceLineNumber}`,
           sessionThreadId,
           entry.timestamp
         );
-        const item = normalizeResponseItemForHistory(completedItem, index + 1, {
+        const item = normalizeResponseItemForHistory(completedItem, sourceLineNumber, {
           cwd: sessionCwd,
           toolCallsByCallId,
         });
@@ -194,7 +525,10 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
 
       if (eventType === "user_message") {
         const explicitTurnId = normalizeString(payload?.turn_id) || normalizeString(payload?.turnId);
-        const item = createUserMessageHistoryItem(payload, index + 1, entry.timestamp);
+        const item = createUserMessageHistoryItem(payload, sourceLineNumber, entry.timestamp);
+        if (!item.text) {
+          continue;
+        }
         applyHistoryTimeZone(item, sessionTimeZone);
         if (!explicitTurnId && !activeTurnId) {
           pushPendingUserMessage(pendingUserMessages, item);
@@ -204,7 +538,7 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
         const turn = ensureTurn(
           turns,
           turnsById,
-          explicitTurnId || activeTurnId || `turn-line-${index + 1}`,
+          explicitTurnId || activeTurnId || `turn-line-${sourceLineNumber}`,
           sessionThreadId,
           entry.timestamp
         );
@@ -219,6 +553,7 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
     }
 
     if (entry?.type === "response_item") {
+      pendingSyntheticTerminal = null;
       const payload = objectValue(entry.payload);
       if (!payload) {
         continue;
@@ -230,12 +565,12 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
       const turn = ensureTurn(
         turns,
         turnsById,
-        normalizeString(payload.turn_id) || normalizeString(payload.turnId) || activeTurnId || `turn-line-${index + 1}`,
+        responseItemTurnId(payload) || activeTurnId || `turn-line-${sourceLineNumber}`,
         sessionThreadId,
         entry.timestamp
       );
       applyHistoryTimeZone(turn, sessionTimeZone);
-      const item = normalizeResponseItemForHistory(payload, index + 1, {
+      const item = normalizeResponseItemForHistory(payload, sourceLineNumber, {
         cwd: sessionCwd,
         toolCallsByCallId,
       });
@@ -251,12 +586,38 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
           item.timestamp = itemTimestamp;
         }
         applyHistoryTimeZone(item, sessionTimeZone);
+        applyHistoryAssistantSourceAlias(item, turn.id, assistantAliasOccurrencesByBaseKey);
         addHistoryItemToTurn(turn, item);
       }
     }
   }
 
+  if (pendingSyntheticTerminal) {
+    closeSyntheticHistoryTurn(turnsById, pendingSyntheticTerminal);
+  }
+
   return turns.filter((turn) => turn.items.length > 0);
+}
+
+function closeSyntheticHistoryTurn(turnsById, terminal) {
+  const turn = turnsById.get(terminal.turnId);
+  if (turn) {
+    turn.status = terminal.status || "completed";
+  }
+}
+
+function terminalStatusForEventType(eventType) {
+  if (eventType === "turn_aborted") {
+    return "aborted";
+  }
+  if (eventType === "error") {
+    return "failed";
+  }
+  return "completed";
+}
+
+function isSyntheticHistoryTurnId(turnId) {
+  return /^turn-line-\d+$/.test(normalizeString(turnId));
 }
 
 function createUserMessageHistoryItem(payload, lineNumber, timestamp) {
@@ -265,7 +626,11 @@ function createUserMessageHistoryItem(payload, lineNumber, timestamp) {
     id: normalizeString(payload?.id) || `user-message-line-${lineNumber}`,
     type: "user_message",
     role: "user",
-    text: normalizeString(payload?.message) || normalizeString(payload?.text),
+    // Event-shaped user messages can carry injected context or IDE prompt
+    // wrappers too; keep only the visible request like every other path.
+    text: visibleUserPromptText(
+      normalizeString(payload?.message) || normalizeString(payload?.text)
+    ),
     createdAt: createdAt || undefined,
     timestamp: createdAt || undefined,
   };
@@ -378,7 +743,7 @@ function historyItemTimestamp(item, fallbackTimestamp = "") {
 }
 
 function isUserHistoryItem(item) {
-  return normalizeHistoryToken(item?.type) === "usermessage"
+  return isUserRoleItem(item)
     || normalizeString(item?.role).toLowerCase() === "user";
 }
 
@@ -497,6 +862,20 @@ function normalizeResponseItemForHistory(payload, lineNumber, { cwd = "", toolCa
     item.role = "assistant";
   }
 
+  return item;
+}
+
+function applyHistoryAssistantSourceAlias(item, turnId, occurrencesByBaseKey = new Map()) {
+  if (normalizeHistoryToken(item?.type) !== "message"
+    || normalizeString(item?.role).toLowerCase() !== "assistant") {
+    return item;
+  }
+  const sourceKey = buildRemodexSourceItemKey(turnId, responseItemMessageText(item));
+  const occurrence = (occurrencesByBaseKey.get(sourceKey) || 0) + 1;
+  occurrencesByBaseKey.set(sourceKey, occurrence);
+  if (sourceKey && occurrence === 1) {
+    item.remodexSourceItemKey = sourceKey;
+  }
   return item;
 }
 
@@ -693,6 +1072,7 @@ function normalizeProgressPlanItemForHistory(payload) {
     text: explanation || "Planning...",
     explanation: explanation || undefined,
     plan,
+    remodexProgressPlan: true,
     remodexJsonlProgressPlan: true,
   };
 }
@@ -953,6 +1333,13 @@ function shouldSkipResponseItemForHistory(payload, skippedCallIds) {
     return true;
   }
 
+  // Injected context (AGENTS.md instructions, environment_context wrappers) is
+  // persisted as user-role response items; Codex UIs hide it at render time and
+  // mobile history must do the same.
+  if (role === "user" && isContextualUserText(responseItemMessageText(payload))) {
+    return true;
+  }
+
   return false;
 }
 
@@ -974,19 +1361,19 @@ function isSubagentNotificationMessage(payload) {
   return text.startsWith("<subagent_notification>");
 }
 
-function responseItemMessageText(payload) {
-  const directText = normalizeString(payload.text) || normalizeString(payload.message);
-  if (directText) {
-    return directText;
-  }
+// Modern Codex rollouts keep response-item ownership in metadata passthrough.
+// A rollout can interleave parallel turns, so the process-wide active turn is
+// only a last resort; using it first moves tools, plans, and prose across turns.
+function responseItemTurnId(payload) {
+  const metadata = objectValue(payload?.internal_chat_message_metadata_passthrough);
+  return normalizeString(payload?.turn_id)
+    || normalizeString(payload?.turnId)
+    || normalizeString(metadata?.turn_id)
+    || normalizeString(metadata?.turnId);
+}
 
-  const content = Array.isArray(payload.content) ? payload.content : [];
-  return content
-    .map((item) => objectValue(item))
-    .filter(Boolean)
-    .map((item) => responseItemContentText(item))
-    .filter(Boolean)
-    .join("\n");
+function responseItemMessageText(payload) {
+  return sharedResponseItemMessageText(payload);
 }
 
 function responseItemContentText(item) {
@@ -1090,7 +1477,10 @@ function normalizeString(value) {
 }
 
 module.exports = {
+  JSONL_OLDER_HANDOFF_CURSOR,
   parseSessionJsonlMetadata,
   parseSessionJsonlTurns,
+  readRecentSessionJsonlTurns,
+  readSessionJsonlMetadataFromFile,
   readThreadTurnsListPageFromSessionJsonl,
 };

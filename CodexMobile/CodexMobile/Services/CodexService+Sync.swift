@@ -221,9 +221,11 @@ extension CodexService {
         var merged: [String: CodexThread] = [:]
         merged.reserveCapacity(max(threads.count, serverThreads.count))
         var snapshotOnlyPinnedIDs: Set<String> = []
+        var stillUnconfirmedSnapshotIDs: Set<String> = []
 
         // Merge active server threads.
         for serverThread in serverThreads {
+            applyRemoteRuntimeSettings(from: serverThread)
             if persistedDeletedIDs.contains(serverThread.id) {
                 continue
             }
@@ -248,6 +250,20 @@ extension CodexService {
         for localThread in threads where merged[localThread.id] == nil {
             if persistedDeletedIDs.contains(localThread.id) {
                 continue
+            }
+            if restoredThreadSnapshotIDs.contains(localThread.id),
+               !isThreadPinned(localThread.id),
+               !persistedArchivedIDs.contains(localThread.id) {
+                guard activeThreadId == localThread.id else {
+                    // The cache is only a first-paint placeholder. Once the
+                    // same capped server window arrives, absent cached rows
+                    // are stale rather than durable local-only threads.
+                    continue
+                }
+                // Keep a row the user opened, but leave it unconfirmed. A
+                // successful history read confirms it; otherwise the next
+                // list refresh prunes it after the user leaves the thread.
+                stillUnconfirmedSnapshotIDs.insert(localThread.id)
             }
             merged[localThread.id] = localThread
             if isThreadPinned(localThread.id), !serverThreadIDs.contains(localThread.id) {
@@ -284,6 +300,7 @@ extension CodexService {
             // Full reconciliation — always refresh all threads even if busy-roots already hit some.
             refreshAllThreadTimelineStates()
         }
+        restoredThreadSnapshotIDs = stillUnconfirmedSnapshotIDs
 
         if activeThreadId == nil {
             activeThreadId = firstLiveThreadID()
@@ -372,6 +389,23 @@ extension CodexService {
 
         debugSyncLog("thread unarchived by user: \(threadId) (cascaded \(max(0, subtreeThreadIDs.count - 1)) children)")
         sendThreadArchiveRPC(threadId: threadId, unarchive: true)
+    }
+
+    // Applies archive state pushed by a paired Desktop IPC owner without echoing an RPC back.
+    func applyRemoteThreadArchiveState(threadId: String, isArchived: Bool) {
+        ensureThreadExistsForRemoteArchiveState(threadId: threadId, isArchived: isArchived)
+        let subtreeThreadIDs = collectSubtreeThreadIDs(for: threadId)
+        for subtreeThreadID in subtreeThreadIDs {
+            ensureThreadExistsForRemoteArchiveState(threadId: subtreeThreadID, isArchived: isArchived)
+            setThreadArchivedLocally(
+                subtreeThreadID,
+                isArchived: isArchived,
+                preserveRunningState: shouldPreserveRuntimeDuringRemoteArchive(for: subtreeThreadID)
+            )
+        }
+
+        threads = sortThreads(threads)
+        debugSyncLog("thread archive state mirrored from desktop: \(threadId) archived=\(isArchived) (cascaded \(max(0, subtreeThreadIDs.count - 1)) children)")
     }
 
     func deleteThread(_ threadId: String) {
@@ -509,25 +543,52 @@ extension CodexService {
         return descendants
     }
 
+    private func ensureThreadExistsForRemoteArchiveState(threadId: String, isArchived: Bool) {
+        if threadIndex(for: threadId) == nil {
+            threads.append(CodexThread(
+                id: threadId,
+                title: CodexThread.defaultDisplayTitle,
+                syncState: isArchived ? .archivedLocal : .live
+            ))
+        }
+    }
+
+    private func shouldPreserveRuntimeDuringRemoteArchive(for threadId: String) -> Bool {
+        if runningThreadIDs.contains(threadId)
+            || protectedRunningFallbackThreadIDs.contains(threadId)
+            || desktopMirroredRunningThreadIDs.contains(threadId)
+            || activeTurnIdByThread[threadId] != nil {
+            return true
+        }
+        if let activeTurnId = activeTurnId, threadIdByTurnID[activeTurnId] == threadId {
+            return true
+        }
+        return false
+    }
+
     // Applies archive state consistently across parent/child subtrees without duplicating row-state cleanup.
-    private func setThreadArchivedLocally(_ threadId: String, isArchived: Bool) {
-        clearRunningState(for: threadId)
-        removeThreadTimelineState(for: threadId)
-        clearOutcomeBadge(for: threadId)
+    private func setThreadArchivedLocally(_ threadId: String, isArchived: Bool, preserveRunningState: Bool = false) {
+        if !preserveRunningState {
+            clearRunningState(for: threadId)
+            removeThreadTimelineState(for: threadId)
+            clearOutcomeBadge(for: threadId)
+        }
 
         if let index = threadIndex(for: threadId) {
             threads[index].syncState = isArchived ? .archivedLocal : .live
         }
 
-        hydratedThreadIDs.remove(threadId)
-        resumedThreadIDs.remove(threadId)
+        if !preserveRunningState {
+            hydratedThreadIDs.remove(threadId)
+            resumedThreadIDs.remove(threadId)
 
-        if let turnId = activeTurnID(for: threadId) {
-            setActiveTurnID(nil, for: threadId)
-            threadIdByTurnID.removeValue(forKey: turnId)
-            if activeTurnId == turnId { activeTurnId = nil }
+            if let turnId = activeTurnID(for: threadId) {
+                setActiveTurnID(nil, for: threadId)
+                threadIdByTurnID.removeValue(forKey: turnId)
+                if activeTurnId == turnId { activeTurnId = nil }
+            }
+            threadIdByTurnID = threadIdByTurnID.filter { $0.value != threadId }
         }
-        threadIdByTurnID = threadIdByTurnID.filter { $0.value != threadId }
 
         if isArchived {
             addLocallyArchivedThreadID(threadId)

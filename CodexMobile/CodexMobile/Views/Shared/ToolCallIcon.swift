@@ -47,6 +47,11 @@ enum ToolCallIcon {
         // Humanized verb-first lines map their leading verb directly so the icon
         // does not depend on substrings of the (often path-shaped) remainder.
         if let verbIcon = verbIcons[firstWord] {
+            // Terminal-interaction lines ("Writing to terminal", "Reading terminal
+            // output") keep the terminal glyph over the generic write/read icons.
+            if isTerminalInteractionTarget(words.dropFirst()) {
+                return "terminal"
+            }
             return verbIcon
         }
 
@@ -78,10 +83,20 @@ enum ToolCallIcon {
 
     private static let fallbackSystemName = "hammer"
 
+    // Matches only humanized phrasings whose object is the terminal itself
+    // ("to terminal", "terminal output"), not paths that merely contain the word.
+    private static func isTerminalInteractionTarget<Words: Sequence>(_ remainder: Words) -> Bool
+    where Words.Element == String {
+        let words = remainder.map { $0.lowercased() }
+        guard let first = words.first else { return false }
+        if first == "terminal" { return true }
+        return first == "to" && words.dropFirst().first == "terminal"
+    }
+
     // Leading humanized verbs emitted by extractToolCallActivityLines, mapped to the
     // same families synara uses (file reads/inspection → search, writes/edits → pencil).
     private static let verbIcons: [String: String] = [
-        "read": "magnifyingglass",
+        "read": "magnifyingglass", "reading": "magnifyingglass",
         "open": "magnifyingglass", "opened": "magnifyingglass", "opening": "magnifyingglass",
         "explore": "magnifyingglass", "exploring": "magnifyingglass", "explored": "magnifyingglass",
         "list": "magnifyingglass", "listing": "magnifyingglass", "listed": "magnifyingglass",
@@ -125,10 +140,10 @@ enum ToolCallIcon {
         ("find", "magnifyingglass"),
         ("view", "magnifyingglass"),
         ("list", "magnifyingglass"),
-        // Source control. GitHub-specific rows use the real octocat mark (template-
-        // tinted so the row stays a single color); bare git keeps the branch glyph.
+        // Source control. Match Synara's compact work rows by using the GitHub
+        // mark for git/gh/GitHub activity instead of the generic branch glyph.
         ("github", "remodex.github"),
-        ("git", "remodex.branch"),
+        ("git", "remodex.github"),
         // Agents / sub-tasks
         ("subagent", "remodex.agent"),
         ("agent", "remodex.agent"),

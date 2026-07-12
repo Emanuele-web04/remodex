@@ -21,6 +21,7 @@ enum TurnCacheManager {
         MarkdownParseCacheReset.reset()
         MarkdownRenderableTextCache.reset()
         UserBubbleRenderModelCache.reset()
+        UserBubbleCollapsedMarkdownPreview.reset()
         MessageRowRenderModelCache.reset()
         CommandExecutionStatusCache.reset()
         ToolActivityRenderCache.reset()
@@ -62,12 +63,18 @@ struct FileChangeRenderState {
     let detailBodyText: String
 }
 
-// Precomputed display fields for a `.toolActivity` row: the cleaned, multi-line
-// summary text and its leading icon. Built once per text revision instead of on
-// every `toolActivitySystemView` body evaluation while activity streams.
+// Precomputed display fields for a `.toolActivity` row: one line per tool call,
+// each with its own leading icon so merged activity rows render like the regular
+// humanized command rows. Built once per text revision instead of on every
+// `toolActivitySystemView` body evaluation while activity streams.
 struct ToolActivityRenderModel {
-    let displayText: String
-    let iconSystemName: String
+    struct Line: Identifiable, Equatable {
+        let id: Int
+        let text: String
+        let iconSystemName: String
+    }
+
+    let lines: [Line]
 }
 
 struct MessageRowRenderModel {
@@ -284,16 +291,22 @@ enum ToolActivityRenderCache {
     static func reset() { cache.removeAll() }
 
     private static func build(text: String) -> ToolActivityRenderModel {
-        let joined = text
+        // Merged activity rows carry one tool call per line; classify each line's
+        // icon independently so every call keeps its own glyph, matching the
+        // humanized command rows.
+        let lines = text
             .split(separator: "\n", omittingEmptySubsequences: false)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
-            .joined(separator: "\n")
-        // Classify the icon off the first line only so trailing detail lines never
-        // shift the leading glyph mid-stream.
-        let iconSource = joined.split(separator: "\n", maxSplits: 1).first.map(String.init) ?? joined
-        let icon = ToolCallIcon.systemName(forToolActivitySummary: iconSource)
-        return ToolActivityRenderModel(displayText: joined, iconSystemName: icon)
+            .enumerated()
+            .map { index, line in
+                ToolActivityRenderModel.Line(
+                    id: index,
+                    text: line,
+                    iconSystemName: ToolCallIcon.systemName(forToolActivitySummary: line)
+                )
+            }
+        return ToolActivityRenderModel(lines: lines)
     }
 }
 
@@ -378,7 +391,7 @@ enum DiffBlockDetectionCache {
 
     static func isDiffBlock(code: String, profile: MarkdownRenderProfile) -> Bool {
         switch profile {
-        case .assistantProse, .fileChangeSystem:
+        case .assistantProse, .userProse, .fileChangeSystem:
             break
         }
 

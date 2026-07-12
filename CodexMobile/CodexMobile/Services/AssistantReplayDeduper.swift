@@ -21,6 +21,7 @@ enum AssistantReplayDeduper {
                    in: result,
                    threadId: message.threadId,
                    turnId: message.turnId,
+                   itemId: message.itemId,
                    text: message.text
                ) {
                 continue
@@ -36,6 +37,7 @@ enum AssistantReplayDeduper {
         in messages: [CodexMessage],
         threadId: String,
         turnId: String?,
+        itemId: String? = nil,
         text: String,
         excludingMessageID: String? = nil
     ) -> Bool {
@@ -43,6 +45,7 @@ enum AssistantReplayDeduper {
             in: messages,
             threadId: threadId,
             turnId: turnId,
+            itemId: itemId,
             text: text,
             excludingMessageID: excludingMessageID
         ) != nil {
@@ -63,21 +66,42 @@ enum AssistantReplayDeduper {
         in messages: [CodexMessage],
         threadId: String,
         turnId: String?,
+        itemId: String? = nil,
         text: String,
         excludingMessageID: String? = nil,
         minimumCharacterCount: Int = 80
     ) -> Int? {
-        guard isReplayTextLongEnough(text, minimumCharacterCount: minimumCharacterCount) else {
-            return nil
-        }
+        // A source handoff can replay a short assistant status with a synthetic mirror id and a
+        // canonical provider id. Those are the same row, not two legitimate short replies. Keep
+        // the normal long-text threshold for two stable provider rows so intentional repeated
+        // brief messages remain possible.
         let candidateIndices = responseBlockAssistantIndices(
             in: messages,
             threadId: threadId,
             turnId: turnId,
             excludingMessageID: excludingMessageID
         )
+        let hasMirrorProvenance = itemId.map {
+            CodexSyntheticIdentifiers.isMirrorMintedItemID($0)
+        } ?? false
+        let hasMirroredCandidate = candidateIndices.contains { index in
+            messages[index].itemId.map(CodexSyntheticIdentifiers.isMirrorMintedItemID) ?? false
+        }
+        let effectiveMinimumCharacterCount = (hasMirrorProvenance || hasMirroredCandidate)
+            ? 24
+            : minimumCharacterCount
+        guard isReplayTextLongEnough(text, minimumCharacterCount: effectiveMinimumCharacterCount) else {
+            return nil
+        }
         return candidateIndices.reversed().first { index in
-            exactReplayTextsMatch(messages[index].text, text)
+            let candidateHasMirrorProvenance = messages[index].itemId.map {
+                CodexSyntheticIdentifiers.isMirrorMintedItemID($0)
+            } ?? false
+            let canUseShortMirrorThreshold = hasMirrorProvenance || candidateHasMirrorProvenance
+            return (canUseShortMirrorThreshold
+                    || isReplayTextLongEnough(messages[index].text, minimumCharacterCount: minimumCharacterCount))
+                && assistantIdentityAllowsExactReplay(messages[index].itemId, itemId)
+                && exactReplayTextsMatch(messages[index].text, text)
         }
     }
 
@@ -138,6 +162,22 @@ enum AssistantReplayDeduper {
             return previous == incoming
         }
         return normalizedReplayText(previous) == normalizedReplayText(incoming)
+    }
+
+    private nonisolated static func assistantIdentityAllowsExactReplay(
+        _ existingItemId: String?,
+        _ incomingItemId: String?
+    ) -> Bool {
+        guard let existingItemId = normalizedIdentifier(existingItemId),
+              let incomingItemId = normalizedIdentifier(incomingItemId),
+              existingItemId != incomingItemId else {
+            return true
+        }
+        // Two distinct synthetic rows can be legitimate repeated short statuses. An exact replay
+        // needs a real identity transition: mirror -> provider or provider -> mirror. Two stable
+        // provider ids and two mirror ids stay separate unless a caller has a stronger alias.
+        return CodexSyntheticIdentifiers.isMirrorMintedItemID(existingItemId)
+            != CodexSyntheticIdentifiers.isMirrorMintedItemID(incomingItemId)
     }
 
     private nonisolated static func isReplayTextLongEnough(

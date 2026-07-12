@@ -56,15 +56,15 @@ struct TurnComposerAccessoryState {
     }
 
     var showsMentionedFiles: Bool {
-        !showsVoiceRecordingCapsule && !hasQueuedDrafts && !composerMentionedFiles.isEmpty
+        !showsVoiceRecordingCapsule && !composerMentionedFiles.isEmpty
     }
 
     var showsMentionedSkills: Bool {
-        !showsVoiceRecordingCapsule && !hasQueuedDrafts && !composerMentionedSkills.isEmpty
+        !showsVoiceRecordingCapsule && !composerMentionedSkills.isEmpty
     }
 
     var showsMentionedPlugins: Bool {
-        !showsVoiceRecordingCapsule && !hasQueuedDrafts && !composerMentionedPlugins.isEmpty
+        !showsVoiceRecordingCapsule && !composerMentionedPlugins.isEmpty
     }
 
     var reviewTarget: TurnComposerReviewTarget? {
@@ -72,15 +72,15 @@ struct TurnComposerAccessoryState {
     }
 
     var showsSubagentsSelection: Bool {
-        !showsVoiceRecordingCapsule && !hasQueuedDrafts && isSubagentsSelectionArmed
+        !showsVoiceRecordingCapsule && isSubagentsSelectionArmed
     }
 
     var showsPlanModeSelection: Bool {
-        !showsVoiceRecordingCapsule && !hasQueuedDrafts && isPlanModeArmed
+        !showsVoiceRecordingCapsule && isPlanModeArmed
     }
 
     var showsReviewSelection: Bool {
-        !showsVoiceRecordingCapsule && !hasQueuedDrafts && reviewTarget != nil
+        !showsVoiceRecordingCapsule && reviewTarget != nil
     }
 
     var showsVoiceRecordingCapsule: Bool {

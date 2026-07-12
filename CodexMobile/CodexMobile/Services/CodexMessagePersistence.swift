@@ -105,29 +105,18 @@ nonisolated struct CodexMessagePersistence {
 
     // Uses a Keychain-backed AES key so chat history remains private if the app data is copied out.
     private func encryptPersistedPayload(_ plaintext: Data) -> Data? {
-        let key = messageHistoryKey()
+        let key = CodexLocalPersistenceKeyProvider.historyKey()
         let sealedBox = try? AES.GCM.seal(plaintext, using: key)
         return sealedBox?.combined
     }
 
     // Opens the encrypted chat cache while still allowing plaintext fallbacks from older app versions.
     private func decryptPersistedPayload(_ encryptedData: Data) -> Data? {
-        let key = messageHistoryKey()
+        let key = CodexLocalPersistenceKeyProvider.historyKey()
         guard let sealedBox = try? AES.GCM.SealedBox(combined: encryptedData) else {
             return nil
         }
         return try? AES.GCM.open(sealedBox, using: key)
-    }
-
-    private func messageHistoryKey() -> SymmetricKey {
-        if let storedKey = SecureStore.readData(for: CodexSecureKeys.messageHistoryKey) {
-            return SymmetricKey(data: storedKey)
-        }
-
-        let newKey = SymmetricKey(size: .bits256)
-        let keyData = newKey.withUnsafeBytes { Data($0) }
-        SecureStore.writeData(keyData, for: CodexSecureKeys.messageHistoryKey)
-        return newKey
     }
 
     // Keep pending structured prompts on disk so reconnects and relaunches can still surface

@@ -24,6 +24,12 @@ const NEW_THREAD_DEEP_LINK = "codex://threads/new";
 class CodexDesktopRefresher {
   constructor({
     enabled = true,
+    // When desktop IPC live sync streams conversation content, the refresher's
+    // only remaining job is navigation: bring Codex to the phone-driven thread
+    // when a phone message starts. Mid-run and completion refreshes are content
+    // reload workarounds from the pre-IPC era and would repeatedly deep-link
+    // and steal focus, so navigation-only mode drops them.
+    navigationOnly = false,
     debounceMs = DEFAULT_DEBOUNCE_MS,
     refreshCommand = "",
     bundleId = DEFAULT_BUNDLE_ID,
@@ -40,6 +46,7 @@ class CodexDesktopRefresher {
     customRefreshFailureThreshold = DEFAULT_CUSTOM_REFRESH_FAILURE_THRESHOLD,
   } = {}) {
     this.enabled = enabled;
+    this.navigationOnly = navigationOnly;
     this.debounceMs = debounceMs;
     this.refreshCommand = refreshCommand;
     this.bundleId = bundleId;
@@ -82,8 +89,8 @@ class CodexDesktopRefresher {
     this.unavailableLogged = false;
   }
 
-  handleInbound(rawMessage) {
-    const parsed = safeParseJSON(rawMessage);
+  handleInbound(rawMessage, parsedMessage = null) {
+    const parsed = parsedMessage ?? safeParseJSON(rawMessage);
     if (!parsed) {
       return;
     }
@@ -117,8 +124,8 @@ class CodexDesktopRefresher {
     }
   }
 
-  handleOutbound(rawMessage) {
-    const parsed = safeParseJSON(rawMessage);
+  handleOutbound(rawMessage, parsedMessage = null) {
+    const parsed = parsedMessage ?? safeParseJSON(rawMessage);
     if (!parsed) {
       return;
     }
@@ -126,6 +133,9 @@ class CodexDesktopRefresher {
     const method = parsed.method;
     if (method === "turn/completed") {
       this.clearFallbackTimer();
+      if (this.navigationOnly) {
+        return;
+      }
       const turnId = extractTurnId(parsed);
       if (turnId && turnId === this.lastTurnIdRefreshed) {
         this.log(`refresh skipped (debounced): completion already refreshed for ${turnId}`);
@@ -317,6 +327,10 @@ class CodexDesktopRefresher {
       this.bundleId,
       this.appPath,
       targetUrl || "",
+      // Navigation-only mode must never launch Codex from closed: content
+      // already syncs over IPC live sync, so a deep link while the app is
+      // down would only cold-start it to show a thread nobody asked to see.
+      this.navigationOnly ? "0" : "1",
     ]);
   }
 
@@ -372,7 +386,7 @@ class CodexDesktopRefresher {
 
   // Keeps one lightweight rollout watcher alive for the current Remodex-controlled thread.
   ensureWatcher(threadId) {
-    if (!this.canRefresh() || !threadId) {
+    if (this.navigationOnly || !this.canRefresh() || !threadId) {
       return;
     }
 
@@ -553,12 +567,19 @@ function readBridgeConfig({
     env
   );
   const explicitRefreshEnabled = readOptionalBooleanEnv(["REMODEX_REFRESH_ENABLED"], env);
+  const explicitDesktopIpcLiveSyncEnabled = readOptionalBooleanEnv(["REMODEX_DESKTOP_IPC_LIVE_SYNC"], env);
   const explicitKeepMacAwakeEnabled = readOptionalBooleanEnv(["REMODEX_KEEP_MAC_AWAKE"], env);
   const persistedKeepMacAwakeEnabled = typeof daemonConfig.keepMacAwakeEnabled === "boolean"
     ? daemonConfig.keepMacAwakeEnabled
     : null;
-  // Desktop refresh is opt-in for now because Codex.app still lacks true live updates.
-  const defaultRefreshEnabled = false;
+  // The deep-link refresh workaround stays opt-in; local IPC live sync is the primary desktop path.
+  // Once opted in, the persisted choice must survive restarts: `remodex restart`
+  // rewrites daemon-config.json from this computed config, so ignoring the
+  // persisted flag silently disabled the refresher on every restart.
+  const persistedRefreshEnabled = typeof daemonConfig.refreshEnabled === "boolean"
+    ? daemonConfig.refreshEnabled
+    : null;
+  const defaultRefreshEnabled = persistedRefreshEnabled == null ? false : persistedRefreshEnabled;
   return {
     relayUrl,
     pushServiceUrl: readFirstDefinedEnv(
@@ -582,6 +603,13 @@ function readBridgeConfig({
       : explicitKeepMacAwakeEnabled,
     codexEndpoint,
     desktopIpcSocketPath: readFirstDefinedEnv(["REMODEX_DESKTOP_IPC_SOCKET"], "", env),
+    desktopIpcLiveSyncEnabled: explicitDesktopIpcLiveSyncEnabled == null
+      ? true
+      : explicitDesktopIpcLiveSyncEnabled,
+    desktopIpcSnapshotDebounceMs: parseIntegerEnv(
+      readFirstDefinedEnv(["REMODEX_DESKTOP_IPC_SNAPSHOT_DEBOUNCE_MS"], "75", env),
+      75
+    ),
     refreshCommand,
     codexBundleId: readFirstDefinedEnv(["REMODEX_CODEX_BUNDLE_ID"], DEFAULT_BUNDLE_ID, env),
     codexAppPath: DEFAULT_APP_PATH,

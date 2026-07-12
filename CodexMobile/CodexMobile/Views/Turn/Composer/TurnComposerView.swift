@@ -2,7 +2,7 @@
 // Purpose: Renders the turn composer input, queued-draft actions, attachments, and send/stop controls.
 // Layer: View Component (orchestrator)
 // Exports: TurnComposerView, TurnComposerInputChangeHandler
-// Depends on: SwiftUI, AdaptiveGlassModifier, ComposerAttachmentsPreview, FileAutocompletePanel, SkillAutocompletePanel, SlashCommandAutocompletePanel, ComposerBottomBar, QueuedDraftsPanel, TurnMentionChips, TurnComposerInputTextView, TurnComposerSecondaryBar
+// Depends on: SwiftUI, AdaptiveGlassModifier, ComposerAttachmentsPreview, FileAutocompletePanel, SkillAutocompletePanel, SlashCommandAutocompletePanel, ComposerBottomBar, QueuedDraftsSheet, TurnMentionChips, TurnComposerInputTextView, TurnComposerSecondaryBar
 
 import SwiftUI
 import UIKit
@@ -60,30 +60,15 @@ struct TurnComposerView: View {
     let rateLimitsErrorMessage: String?
     let shouldAutoRefreshUsageStatus: Bool
 
-    let showsGitBranchSelector: Bool
-    let isGitBranchSelectorEnabled: Bool
-    let availableGitBranchTargets: [String]
-    let gitBranchesCheckedOutElsewhere: Set<String>
-    let gitWorktreePathsByBranch: [String: String]
-    let selectedGitBaseBranch: String
-    let currentGitBranch: String
-    let gitDefaultBranch: String
-    let isLoadingGitBranchTargets: Bool
-    let isSwitchingGitBranch: Bool
-    let isCreatingGitWorktree: Bool
-    let onSelectGitBranch: (String) -> Void
-    let onCreateGitBranch: (String) -> Void
-    let onSelectGitBaseBranch: (String) -> Void
-    let onRefreshGitBranches: () -> Void
+    let gitState: TurnComposerGitState
+    let gitActions: TurnComposerGitActions
     let onRefreshUsageStatus: () async -> Void
 
     let onSelectAccessMode: (CodexAccessMode) -> Void
-    let canHandOffToWorktree: Bool
     let onTapAddImage: () -> Void
     let onTapTakePhoto: () -> Void
     let onTapVoice: () -> Void
     let onCancelVoiceRecording: () -> Void
-    let onTapCreateWorktree: () -> Void
     let onSetPlanModeArmed: (Bool) -> Void
     let onRemoveAttachment: (String) -> Void
     let onStopTurn: (String?) -> Void
@@ -109,65 +94,121 @@ struct TurnComposerView: View {
     // Call sites can hide the project git/runtime row above the input for
     // constrained surfaces; access and usage always live in the bottom bar.
     var showsSecondaryBar: Bool = true
+    // Every composer surface (in-thread and New Chat draft) collapses to a
+    // capsule at rest; call sites may opt out for constrained hosts.
+    var allowsCollapsedComposer: Bool = true
+
+    // One text line of the composer font; keeps the resting capsule height
+    // stable regardless of async UITextView measurements while still scaling
+    // with Dynamic Type so large accessibility sizes don't clip the placeholder.
+    @ScaledMetric(relativeTo: .body) private var collapsedInputHeight: CGFloat = 22
+
+    // Square hit target for the resting capsule's "+", mic, and send/stop
+    // controls. The extra 2pt keeps the closed capsule comfortable to tap.
+    private let collapsedControlTapTarget: CGFloat = 34
+    private let expandedPlainTextMaxVisibleLines: CGFloat = 6
+    private let expandedAccessoryTextMaxVisibleLines: CGFloat = 4
 
     @State private var composerInputHeight: CGFloat = 32
     @State private var inputChangeTask: Task<Void, Never>?
+    @State private var isShowingQueuedDraftsSheet = false
+
+    @Environment(\.pinnedPlanAccessory) private var pinnedPlanAccessory
+
+    // Whether the carousel row (chevron, file changes, plan, queued) has
+    // anything to show; mirrors the pills rendered by TurnComposerSecondaryBar.
+    private var hasSecondaryBarContent: Bool {
+        hasWorkingDirectory
+            || activeFileChangeStatus != nil
+            || pinnedPlanAccessory != nil
+            || !accessoryState.queuedDrafts.isEmpty
+    }
 
     private var showsSendButton: Bool {
         !isThreadRunning || accessoryState.hasSendableContent(input: input)
     }
 
+    // Collapse to a single glass capsule whenever the keyboard is closed. Only
+    // pending composer content (typed text, attachments/mentions) or an active
+    // voice recording keeps the expanded layout; a running turn stays collapsed
+    // and surfaces Stop inside the capsule instead. Queued drafts live in the
+    // carousel capsule above, so they never expand the composer.
+    private var showsCollapsedComposer: Bool {
+        allowsCollapsedComposer
+            && !isInputFocused.wrappedValue
+            && input.isEmpty
+            && !accessoryState.hasTopAccessoryContent
+            && !accessoryState.showsVoiceRecordingCapsule
+    }
+
     // ─── ENTRY POINT ─────────────────────────────────────────────
     var body: some View {
         AdaptiveGlassContainer(spacing: 6) {
-            VStack(spacing: 6) {
-                if accessoryState.showsVoiceRecordingCapsule {
-                    VoiceRecordingCapsule(
-                        audioLevels: accessoryState.voiceAudioLevels,
-                        duration: accessoryState.voiceRecordingDuration,
-                        onCancel: onCancelVoiceRecording
-                    )
-                    .transition(.opacity.combined(with: .move(edge: .bottom)))
-                }
+            composerStack
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 4)
+        // Keep a little breathing room below the glass so the composer doesn't
+        // sit flush against the keyboard (or the home indicator when at rest).
+        .padding(.bottom, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        // Morph between the collapsed capsule and the full composer as focus
+        // changes. The input text view stays mounted in both states so the
+        // keyboard rises and dismisses in the same motion as the morph instead
+        // of waiting for a view swap.
+        .animation(.snappy(duration: 0.26), value: showsCollapsedComposer)
+        .sheet(isPresented: $isShowingQueuedDraftsSheet) {
+            QueuedDraftsSheet(
+                drafts: accessoryState.queuedDrafts,
+                canSteerDrafts: accessoryState.canSteerQueuedDrafts,
+                canRestoreDrafts: accessoryState.canRestoreQueuedDrafts,
+                steeringDraftID: accessoryState.steeringDraftID,
+                onRestore: onRestoreQueuedDraft,
+                onSteer: onSteerQueuedDraft,
+                onRemove: onRemoveQueuedDraft
+            )
+        }
+        .onChange(of: accessoryState.hasQueuedDrafts) { _, hasDrafts in
+            if !hasDrafts {
+                isShowingQueuedDraftsSheet = false
+            }
+        }
+    }
 
-                if showsSecondaryBar && hasWorkingDirectory && !accessoryState.showsVoiceRecordingCapsule {
-                    TurnComposerSecondaryBar(
-                        isInputFocused: isInputFocused.wrappedValue,
-                        isEmptyThread: isEmptyThread,
-                        hasWorkingDirectory: hasWorkingDirectory,
-                        isWorktreeProject: isWorktreeProject,
-                        activeFileChangeStatus: activeFileChangeStatus,
-                        showsGitBranchSelector: showsGitBranchSelector,
-                        isGitBranchSelectorEnabled: isGitBranchSelectorEnabled,
-                        availableGitBranchTargets: availableGitBranchTargets,
-                        gitBranchesCheckedOutElsewhere: gitBranchesCheckedOutElsewhere,
-                        gitWorktreePathsByBranch: gitWorktreePathsByBranch,
-                        selectedGitBaseBranch: selectedGitBaseBranch,
-                        currentGitBranch: currentGitBranch,
-                        gitDefaultBranch: gitDefaultBranch,
-                        isLoadingGitBranchTargets: isLoadingGitBranchTargets,
-                        isSwitchingGitBranch: isSwitchingGitBranch,
-                        isCreatingGitWorktree: isCreatingGitWorktree,
-                        onSelectGitBranch: onSelectGitBranch,
-                        onCreateGitBranch: onCreateGitBranch,
-                        onSelectGitBaseBranch: onSelectGitBaseBranch,
-                        onRefreshGitBranches: onRefreshGitBranches,
-                        canHandOffToWorktree: canHandOffToWorktree,
-                        onTapCreateWorktree: onTapCreateWorktree
-                    )
-                }
-
-                TurnComposerQueuedDraftsSection(
-                    drafts: accessoryState.queuedDrafts,
-                    canSteerDrafts: accessoryState.canSteerQueuedDrafts,
-                    canRestoreDrafts: accessoryState.canRestoreQueuedDrafts,
-                    steeringDraftID: accessoryState.steeringDraftID,
-                    onRestoreQueuedDraft: onRestoreQueuedDraft,
-                    onSteerQueuedDraft: onSteerQueuedDraft,
-                    onRemoveQueuedDraft: onRemoveQueuedDraft
+    private var composerStack: some View {
+        VStack(spacing: 6) {
+            if accessoryState.showsVoiceRecordingCapsule {
+                VoiceRecordingCapsule(
+                    audioLevels: accessoryState.voiceAudioLevels,
+                    duration: accessoryState.voiceRecordingDuration,
+                    onCancel: onCancelVoiceRecording
                 )
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
+            }
 
-                VStack(spacing: 0) {
+            // Gated here (not inside the bar) so the VStack never keeps an
+            // empty child whose spacing could leave a stray gap above the
+            // input. The row stays visible while the composer rests as a
+            // collapsed capsule and hides only when the keyboard takes the
+            // space or a voice recording is in progress.
+            if showsSecondaryBar,
+               !accessoryState.showsVoiceRecordingCapsule,
+               !isInputFocused.wrappedValue,
+               hasSecondaryBarContent {
+                TurnComposerSecondaryBar(
+                    isEmptyThread: isEmptyThread,
+                    hasWorkingDirectory: hasWorkingDirectory,
+                    isWorktreeProject: isWorktreeProject,
+                    activeFileChangeStatus: activeFileChangeStatus,
+                    queuedDraftCount: accessoryState.queuedDrafts.count,
+                    onTapQueuedDrafts: { isShowingQueuedDraftsSheet = true },
+                    gitState: gitState,
+                    gitActions: gitActions
+                )
+            }
+
+            VStack(spacing: 0) {
+                if !showsCollapsedComposer {
                     TurnComposerAccessorySection(
                         state: accessoryState,
                         onRemoveAttachment: onRemoveAttachment,
@@ -178,12 +219,45 @@ struct TurnComposerView: View {
                         onRemoveComposerSubagentsSelection: onRemoveComposerSubagentsSelection,
                         onRemoveComposerPlanModeSelection: { onSetPlanModeArmed(false) }
                     )
+                }
 
-                    ZStack(alignment: .topLeading) {
+                // The text view is unconditional so UIKit keeps one first-responder
+                // surface across the collapse/expand morph: tapping the resting
+                // capsule begins editing immediately (keyboard and morph animate
+                // together), and losing focus dismisses the keyboard in the same
+                // motion as the collapse.
+                HStack(alignment: .center, spacing: 8) {
+                    if showsCollapsedComposer {
+                        ComposerAttachmentMenu(
+                            isPlanModeArmed: isPlanModeArmed,
+                            runtimeState: runtimeState,
+                            runtimeActions: runtimeActions,
+                            remainingAttachmentSlots: remainingAttachmentSlots,
+                            isInteractionLocked: isComposerInteractionLocked,
+                            onSetPlanModeArmed: onSetPlanModeArmed,
+                            onTapAddImage: onTapAddImage,
+                            onTapTakePhoto: onTapTakePhoto,
+                            tapTargetSide: collapsedControlTapTarget
+                        )
+                        .frame(width: collapsedControlTapTarget, height: collapsedControlTapTarget)
+                        .transition(.opacity)
+                    }
+
+                    ZStack(alignment: showsCollapsedComposer ? .leading : .topLeading) {
                         if input.isEmpty {
                             Text(placeholderText)
                                 .font(AppFont.body())
                                 .foregroundStyle(Color(.placeholderText))
+                                .lineLimit(1)
+                                .frame(
+                                    maxWidth: .infinity,
+                                    minHeight: showsCollapsedComposer ? collapsedInputHeight : 0,
+                                    alignment: showsCollapsedComposer ? .leading : .topLeading
+                                )
+                                .padding(
+                                    .top,
+                                    showsCollapsedComposer ? 0 : TurnComposerInputTextView.textContainerInset.top
+                                )
                                 .allowsHitTesting(false)
                         }
 
@@ -194,105 +268,164 @@ struct TurnComposerView: View {
                             dynamicHeight: $composerInputHeight,
                             runtimeState: runtimeState,
                             runtimeActions: runtimeActions,
+                            isCollapsed: showsCollapsedComposer,
+                            maxVisibleLines: expandedInputMaxVisibleLines,
                             onPasteImageData: { imageDataItems in
                                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
                                 onPasteImageData(imageDataItems)
                             }
                         )
-                        .frame(height: max(composerInputHeight, 34))
+                        // Collapsed: a fixed single-line box so the (empty) input
+                        // centers exactly like the old capsule and never resizes
+                        // from async height measurements. Expanded: measured height.
+                        .frame(height: showsCollapsedComposer ? collapsedInputHeight : max(composerInputHeight, 34))
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.leading, 14)
-                    .padding(.trailing, 16)
-                    .padding(.top, accessoryState.topInputPadding + 6)
-                    .padding(.bottom, 4)
+                    // Focus only from taps on the text area itself, so the inline
+                    // +/mic/Stop controls (and the gaps around them) never expand
+                    // the composer instead of performing their own action.
                     .contentShape(Rectangle())
                     .onTapGesture {
                         guard !isComposerInteractionLocked else { return }
                         isInputFocused.wrappedValue = true
                     }
-                    .onChange(of: input) { _, newValue in
-                        inputChangeTask?.cancel()
-                        // Coalesce fast typing into one autocomplete refresh per main-actor turn.
-                        inputChangeTask = Task { @MainActor in
-                            await Task.yield()
-                            guard !Task.isCancelled else { return }
-                            onInputChanged(newValue)
+
+                    if showsCollapsedComposer {
+                        ComposerVoiceButton(
+                            presentation: voiceButtonPresentation,
+                            onTap: onTapVoice,
+                            tapTargetSide: collapsedControlTapTarget
+                        )
+                        .frame(width: collapsedControlTapTarget, height: collapsedControlTapTarget)
+                        .transition(.opacity)
+
+                        // Keep Stop reachable while a turn runs even in the resting capsule.
+                        if isThreadRunning {
+                            ComposerStopControl(
+                                activeTurnID: activeTurnID,
+                                isSending: isSending,
+                                onStopTurn: onStopTurn
+                            )
+                            .transition(.opacity)
                         }
                     }
+                }
+                // Collapsed capsule: 6pt on every side so the 34pt inline controls
+                // sit at the same distance from the edges as the 6pt vertical rhythm.
+                .padding(.leading, showsCollapsedComposer ? 6 : 14)
+                .padding(.trailing, showsCollapsedComposer ? 6 : 16)
+                // Resting row: 6pt above and below the row content, with
+                // `composerSurfaceCornerRadius` derived as half the resulting
+                // height so the surface reads as a true capsule. The expanded
+                // card keeps its own rhythm.
+                .padding(.top, showsCollapsedComposer ? 6 : accessoryState.topInputPadding + 4)
+                .padding(.bottom, showsCollapsedComposer ? 6 : 4)
+                .onChange(of: input) { _, newValue in
+                    inputChangeTask?.cancel()
+                    // Coalesce fast typing into one autocomplete refresh per main-actor turn.
+                    inputChangeTask = Task { @MainActor in
+                        await Task.yield()
+                        guard !Task.isCancelled else { return }
+                        onInputChanged(newValue)
+                    }
+                }
 
-                    ComposerBottomBar(
-                        orderedModelOptions: orderedModelOptions,
-                        selectedModelID: selectedModelID,
-                        selectedModelTitle: selectedModelTitle,
-                        isLoadingModels: isLoadingModels,
-                        isRuntimeSelectionLoading: isRuntimeSelectionLoading,
-                        runtimeState: runtimeState,
-                        runtimeActions: runtimeActions,
-                        remainingAttachmentSlots: remainingAttachmentSlots,
-                        isComposerInteractionLocked: isComposerInteractionLocked,
-                        isSendDisabled: isSendDisabled,
-                        isSending: isSending,
-                        isPlanModeArmed: isPlanModeArmed,
-                        queuedCount: queuedCount,
-                        isQueuePaused: isQueuePaused,
-                        activeTurnID: activeTurnID,
-                        isThreadRunning: isThreadRunning,
-                        showsSendButton: showsSendButton,
-                        voiceButtonPresentation: voiceButtonPresentation,
-                        selectedAccessMode: selectedAccessMode,
-                        contextWindowUsage: contextWindowUsage,
-                        rateLimitBuckets: rateLimitBuckets,
-                        isLoadingRateLimits: isLoadingRateLimits,
-                        rateLimitsErrorMessage: rateLimitsErrorMessage,
-                        shouldAutoRefreshUsageStatus: shouldAutoRefreshUsageStatus,
-                        onRefreshUsageStatus: onRefreshUsageStatus,
-                        onSelectAccessMode: onSelectAccessMode,
-                        onTapAddImage: onTapAddImage,
-                        onTapTakePhoto: onTapTakePhoto,
-                        onTapVoice: onTapVoice,
-                        onSetPlanModeArmed: onSetPlanModeArmed,
-                        onResumeQueue: onResumeQueue,
-                        onStopTurn: onStopTurn,
-                        onSend: onSend
-                    )
+                if !showsCollapsedComposer {
+                    expandedBottomBar
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .adaptiveGlass(.regular, in: RoundedRectangle(cornerRadius: 26))
-                .clipShape(RoundedRectangle(cornerRadius: 26))
-                .overlay(alignment: .topLeading) {
-                    Color.clear
-                        .frame(maxWidth: .infinity, maxHeight: 0, alignment: .topLeading)
-                        .overlay(alignment: .bottomLeading) {
-                            // Keep autocomplete stretched to the composer width so large panels
-                            // align with the glass input instead of the typed token.
-                            TurnComposerAutocompletePanels(
-                                state: autocompleteState,
-                                onSelectFileAutocomplete: onSelectFileAutocomplete,
-                                onSelectSkillAutocomplete: onSelectSkillAutocomplete,
-                                onSelectPluginAutocomplete: onSelectPluginAutocomplete,
-                                onSelectSlashCommand: onSelectSlashCommand,
-                                onSelectCodeReviewTarget: onSelectCodeReviewTarget,
-                                onSelectForkDestination: onSelectForkDestination,
-                                onCloseSlashCommandPanel: onCloseSlashCommandPanel
-                            )
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        .offset(y: -8)
-                }
-                .zIndex(2)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .adaptiveGlass(.regular, in: RoundedRectangle(cornerRadius: composerSurfaceCornerRadius))
+            .clipShape(RoundedRectangle(cornerRadius: composerSurfaceCornerRadius))
+            // The resting capsule sits slightly narrower than the expanded composer.
+            .padding(.horizontal, showsCollapsedComposer ? 8 : 0)
+            .overlay(alignment: .topLeading) {
+                Color.clear
+                    .frame(maxWidth: .infinity, maxHeight: 0, alignment: .topLeading)
+                    .overlay(alignment: .bottomLeading) {
+                        // Keep autocomplete stretched to the composer width so large panels
+                        // align with the glass input instead of the typed token.
+                        TurnComposerAutocompletePanels(
+                            state: autocompleteState,
+                            onSelectFileAutocomplete: onSelectFileAutocomplete,
+                            onSelectSkillAutocomplete: onSelectSkillAutocomplete,
+                            onSelectPluginAutocomplete: onSelectPluginAutocomplete,
+                            onSelectSlashCommand: onSelectSlashCommand,
+                            onSelectCodeReviewTarget: onSelectCodeReviewTarget,
+                            onSelectForkDestination: onSelectForkDestination,
+                            onCloseSlashCommandPanel: onCloseSlashCommandPanel
+                        )
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .offset(y: -8)
+            }
+            .zIndex(2)
         }
-        .padding(.horizontal, 12)
-        .padding(.top, 4)
-        // Keep a little breathing room below the glass so the composer doesn't
-        // sit flush against the keyboard (or the home indicator when at rest).
-        .padding(.bottom, 8)
-        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var expandedBottomBar: some View {
+        ComposerBottomBar(
+            orderedModelOptions: orderedModelOptions,
+            selectedModelID: selectedModelID,
+            selectedModelTitle: selectedModelTitle,
+            isLoadingModels: isLoadingModels,
+            isRuntimeSelectionLoading: isRuntimeSelectionLoading,
+            runtimeState: runtimeState,
+            runtimeActions: runtimeActions,
+            remainingAttachmentSlots: remainingAttachmentSlots,
+            isComposerInteractionLocked: isComposerInteractionLocked,
+            isSendDisabled: isSendDisabled,
+            isSending: isSending,
+            isPlanModeArmed: isPlanModeArmed,
+            queuedCount: queuedCount,
+            isQueuePaused: isQueuePaused,
+            activeTurnID: activeTurnID,
+            isThreadRunning: isThreadRunning,
+            showsSendButton: showsSendButton,
+            voiceButtonPresentation: voiceButtonPresentation,
+            selectedAccessMode: selectedAccessMode,
+            contextWindowUsage: contextWindowUsage,
+            rateLimitBuckets: rateLimitBuckets,
+            isLoadingRateLimits: isLoadingRateLimits,
+            rateLimitsErrorMessage: rateLimitsErrorMessage,
+            shouldAutoRefreshUsageStatus: shouldAutoRefreshUsageStatus,
+            onRefreshUsageStatus: onRefreshUsageStatus,
+            onSelectAccessMode: onSelectAccessMode,
+            onTapAddImage: onTapAddImage,
+            onTapTakePhoto: onTapTakePhoto,
+            onTapVoice: onTapVoice,
+            onSetPlanModeArmed: onSetPlanModeArmed,
+            onResumeQueue: onResumeQueue,
+            onStopTurn: onStopTurn,
+            onSend: onSend
+        )
     }
 
     private var placeholderText: String {
-        isEmptyThread ? "Ask Remodex anything..." : "Ask for follow-up changes"
+        isEmptyThread ? "Ask Remodex" : "Follow up"
+    }
+
+    // The radius animates to the expanded card's 26 inside the same morph.
+    // Resting row content height: the inline control tap targets, or the scaled
+    // text line when Dynamic Type grows past them.
+    private var collapsedRowContentHeight: CGFloat {
+        max(collapsedInputHeight, collapsedControlTapTarget)
+    }
+
+    // Attachments and mention chips already consume vertical keyboard space, so
+    // switch the text field to internal scrolling sooner to keep the whole
+    // composer card above the keyboard in compact draft screens.
+    private var expandedInputMaxVisibleLines: CGFloat {
+        accessoryState.hasTopAccessoryContent
+            ? expandedAccessoryTextMaxVisibleLines
+            : expandedPlainTextMaxVisibleLines
+    }
+
+    // Collapsed: half the resting height (6pt padding + content + 6pt padding)
+    // so the surface reads as a true capsule at every Dynamic Type size.
+    // Expanded: the standard 26pt card radius.
+    private var composerSurfaceCornerRadius: CGFloat {
+        showsCollapsedComposer ? (collapsedRowContentHeight + 12) / 2 : 26
     }
 
 }
@@ -367,46 +500,6 @@ private struct TurnComposerAutocompletePanels: View {
         .fixedSize(horizontal: false, vertical: true)
         .layoutPriority(1)
         .zIndex(1)
-    }
-}
-
-private struct TurnComposerQueuedDraftsSection: View {
-    private static let cornerRadius: CGFloat = 22
-
-    let drafts: [QueuedTurnDraft]
-    let canSteerDrafts: Bool
-    let canRestoreDrafts: Bool
-    let steeringDraftID: String?
-    let onRestoreQueuedDraft: (String) -> Void
-    let onSteerQueuedDraft: (String) -> Void
-    let onRemoveQueuedDraft: (String) -> Void
-
-    var body: some View {
-        Group {
-            if !drafts.isEmpty {
-                QueuedDraftsPanel(
-                    drafts: drafts,
-                    canSteerDrafts: canSteerDrafts,
-                    canRestoreDrafts: canRestoreDrafts,
-                    steeringDraftID: steeringDraftID,
-                    onRestore: onRestoreQueuedDraft,
-                    onSteer: onSteerQueuedDraft,
-                    onRemove: onRemoveQueuedDraft
-                )
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .adaptiveGlass(
-                    .regular,
-                    in: RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
-                )
-                .clipShape(RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous))
-            }
-        }
-        // Keep queued follow-ups visually separate from the composer input.
-        .frame(
-            height: drafts.isEmpty
-                ? 0
-                : CGFloat(drafts.count) * 34 + CGFloat(max(drafts.count - 1, 0))
-        )
     }
 }
 
@@ -694,7 +787,7 @@ private struct ComposerPreviewContent: View {
             ),
             voiceButtonPresentation: TurnComposerVoiceButtonPresentation(
                 systemImageName: "mic",
-                foregroundColor: Color(.secondaryLabel),
+                foregroundColor: Color.primary,
                 backgroundColor: .clear,
                 accessibilityLabel: "Start voice transcription",
                 isDisabled: false,
@@ -707,29 +800,17 @@ private struct ComposerPreviewContent: View {
             isLoadingRateLimits: false,
             rateLimitsErrorMessage: nil,
             shouldAutoRefreshUsageStatus: false,
-            showsGitBranchSelector: false,
-            isGitBranchSelectorEnabled: false,
-            availableGitBranchTargets: [],
-            gitBranchesCheckedOutElsewhere: [],
-            gitWorktreePathsByBranch: [:],
-            selectedGitBaseBranch: "",
-            currentGitBranch: "main",
-            gitDefaultBranch: "main",
-            isLoadingGitBranchTargets: false,
-            isSwitchingGitBranch: false,
-            isCreatingGitWorktree: false,
-            onSelectGitBranch: { _ in },
-            onCreateGitBranch: { _ in },
-            onSelectGitBaseBranch: { _ in },
-            onRefreshGitBranches: {},
+            gitState: TurnComposerGitState(
+                currentGitBranch: "main",
+                gitDefaultBranch: "main"
+            ),
+            gitActions: TurnComposerGitActions(),
             onRefreshUsageStatus: {},
             onSelectAccessMode: { _ in },
-            canHandOffToWorktree: false,
             onTapAddImage: {},
             onTapTakePhoto: {},
             onTapVoice: {},
             onCancelVoiceRecording: {},
-            onTapCreateWorktree: {},
             onSetPlanModeArmed: { _ in },
             onRemoveAttachment: { _ in },
             onStopTurn: { _ in },

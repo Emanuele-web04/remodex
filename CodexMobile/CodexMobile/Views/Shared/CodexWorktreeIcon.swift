@@ -23,24 +23,27 @@ struct CodexWorktreeIcon: View {
     var weight: Font.Weight = .regular
 
     var body: some View {
-        // Native SF Symbol: keeps the worktree icon aligned with the system
-        // appearance the rest of the OS uses for branch/worktree affordances.
-        // Rotated 90° so the trunk reads horizontally (handoff direction).
+        // Synara uses Central's arrow-split-right for worktrees; keep Remodex
+        // on the same glyph through the shared icon resolver.
         RemodexIcon.image(
-            systemName: "arrow.triangle.branch",
+            systemName: "remodex.worktree",
             size: pointSize,
             weight: weight
         )
-        .rotationEffect(.degrees(90))
     }
 
-    static func menuImage(pointSize: CGFloat = 13, weight: UIImage.SymbolWeight = .regular) -> UIImage {
-        let configuration = UIImage.SymbolConfiguration(pointSize: pointSize, weight: weight)
-        guard let symbol = UIImage(systemName: "arrow.triangle.branch", withConfiguration: configuration)?
-            .withRenderingMode(.alwaysTemplate) else {
+    static func menuImage(pointSize: CGFloat = 13, weight _: UIImage.SymbolWeight = .regular) -> UIImage {
+        guard let base = RemodexIcon.uiImage(systemName: "remodex.worktree") else {
             return UIImage()
         }
-        return symbol.rotated(byDegrees: 90) ?? symbol
+        let size = CGSize(width: pointSize, height: pointSize)
+        let format = UIGraphicsImageRendererFormat.default()
+        format.opaque = false
+        let renderer = UIGraphicsImageRenderer(size: size, format: format)
+        let resized = renderer.image { _ in
+            base.draw(in: CGRect(origin: .zero, size: size))
+        }
+        return resized.withRenderingMode(.alwaysTemplate)
     }
 
     // Matches the UIKit menu glyph metric used by `RemodexIcon.menuUIImage`.
@@ -64,32 +67,5 @@ struct CodexWorktreeMenuLabelRow: View {
                 .frame(width: pointSize, height: pointSize)
             Text(title)
         }
-    }
-}
-
-private extension UIImage {
-    // Bitmap-level rotation so the rotated glyph is baked into the UIImage we
-    // hand off to UIKit menus (UIAction.image / Image(uiImage:)). Applying a
-    // SwiftUI `.rotationEffect` after the fact wouldn't survive the trip
-    // through UIKit menu rendering.
-    func rotated(byDegrees degrees: CGFloat) -> UIImage? {
-        let radians = degrees * .pi / 180
-        let rotatedSize = CGRect(origin: .zero, size: size)
-            .applying(CGAffineTransform(rotationAngle: radians))
-            .integral
-            .size
-        let renderer = UIGraphicsImageRenderer(size: rotatedSize)
-        let rendered = renderer.image { context in
-            let cgContext = context.cgContext
-            cgContext.translateBy(x: rotatedSize.width / 2, y: rotatedSize.height / 2)
-            cgContext.rotate(by: radians)
-            draw(in: CGRect(
-                x: -size.width / 2,
-                y: -size.height / 2,
-                width: size.width,
-                height: size.height
-            ))
-        }
-        return rendered.withRenderingMode(renderingMode)
     }
 }

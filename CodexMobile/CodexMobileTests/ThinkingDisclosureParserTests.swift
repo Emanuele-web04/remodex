@@ -48,6 +48,29 @@ final class ThinkingDisclosureParserTests: XCTestCase {
         )
     }
 
+    func testParseTreatsCommentOnlySummaryDetailAsEmpty() {
+        let parsed = ThinkingDisclosureParser.parse(
+            from: "**Planning targeted test execution**\n\n<!-- -->"
+        )
+
+        XCTAssertEqual(parsed.sections.count, 1)
+        XCTAssertEqual(parsed.sections[0].title, "Planning targeted test execution")
+        XCTAssertTrue(parsed.sections[0].detail.isEmpty)
+    }
+
+    func testParseRepairsConcatenatedSummaryCommentBoundaries() {
+        let parsed = ThinkingDisclosureParser.parse(
+            from: "**Testing notify command behavior**\n\n<!-- -->**Analyzing notify hook JSON output format**\n\n<!-- -->"
+        )
+
+        XCTAssertTrue(parsed.isSummaryOnly)
+        XCTAssertEqual(parsed.sections.map(\.title), [
+            "Testing notify command behavior",
+            "Analyzing notify hook JSON output format",
+        ])
+        XCTAssertEqual(parsed.sections.map(\.detail), ["", ""])
+    }
+
     func testParseCoalescesAdjacentDuplicateSummariesAndKeepsPreamble() {
         let parsed = ThinkingDisclosureParser.parse(
             from: """

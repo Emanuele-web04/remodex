@@ -49,7 +49,7 @@ struct StructuredUserInputCardView: View {
     private var headerRow: some View {
         HStack(alignment: .center, spacing: 8) {
             Text("Questions")
-                .font(AppFont.mono(.caption))
+                .font(AppFont.caption())
                 .foregroundStyle(.secondary)
 
             if questions.count > 1 {
@@ -196,7 +196,7 @@ struct StructuredUserInputCardView: View {
     private var progressHeader: some View {
         HStack(alignment: .center, spacing: 8) {
             Text("\(currentQuestionIndex + 1) of \(questions.count)")
-                .font(AppFont.mono(.caption2))
+                .font(AppFont.caption2())
                 .foregroundStyle(.secondary)
 
             stepRail

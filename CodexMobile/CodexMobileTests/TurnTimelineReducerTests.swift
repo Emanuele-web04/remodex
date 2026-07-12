@@ -307,7 +307,7 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(projection.messages.map(\.id), ["thinking-1", "tool-1"])
     }
 
-    func testTimelineRenderProjectionGroupsLongContiguousToolRuns() {
+    func testTimelineRenderProjectionCollapsesHistoricalToolBurstToLatestRow() {
         let now = Date()
         let toolMessages = (1...7).map { index in
             makeMessage(
@@ -331,14 +331,162 @@ final class TurnTimelineReducerTests: XCTestCase {
         }
 
         XCTAssertEqual(group.messages.map(\.id), toolMessages.map(\.id))
-        XCTAssertEqual(group.hiddenCount, 2)
-        XCTAssertEqual(group.pinnedMessages.map(\.id), ["tool-1", "tool-2", "tool-3", "tool-4", "tool-5"])
-        XCTAssertEqual(group.overflowMessages.map(\.id), ["tool-6", "tool-7"])
+        XCTAssertEqual(group.hiddenCount, 6)
+        XCTAssertEqual(group.overflowMessages.map(\.id), ["tool-1", "tool-2", "tool-3", "tool-4", "tool-5", "tool-6"])
+        XCTAssertEqual(group.latestMessage?.id, "tool-7")
     }
 
-    func testTimelineRenderProjectionKeepsShortToolRunsExpanded() {
+    func testTimelineRenderProjectionShowsOnlyLatestToolCallForActiveBurst() {
         let now = Date()
-        let toolMessages = (1...5).map { index in
+        let toolMessages = (1...7).map { index in
+            makeMessage(
+                id: "tool-\(index)",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Tool \(index)",
+                createdAt: now.addingTimeInterval(Double(index)),
+                turnID: "turn-1",
+                itemID: "item-\(index)",
+                isStreaming: index == 7
+            )
+        }
+
+        let items = TurnTimelineRenderProjection.project(
+            messages: toolMessages,
+            activeTurnID: "turn-1",
+            isThreadRunning: true
+        )
+
+        guard items.count == 1,
+              case .toolBurst(let group) = items[0] else {
+            return XCTFail("Expected one active tool burst")
+        }
+
+        XCTAssertEqual(group.hiddenCount, 6)
+        XCTAssertEqual(group.overflowMessages.map(\.id), ["tool-1", "tool-2", "tool-3", "tool-4", "tool-5", "tool-6"])
+        XCTAssertEqual(group.latestMessage?.id, "tool-7")
+    }
+
+    func testTimelineRenderProjectionPreservesToolOrderAcrossAssistantCommentary() {
+        let now = Date()
+        let firstBurst = (1...5).map { index in
+            makeMessage(
+                id: "tool-\(index)",
+                threadID: "thread",
+                role: .system,
+                kind: index.isMultiple(of: 2) ? .toolActivity : .commandExecution,
+                text: "Tool \(index)",
+                createdAt: now.addingTimeInterval(Double(index)),
+                turnID: "turn-1"
+            )
+        }
+        let commentary = makeMessage(
+            id: "commentary",
+            threadID: "thread",
+            role: .assistant,
+            text: "Between bursts",
+            createdAt: now.addingTimeInterval(6),
+            turnID: "turn-1"
+        )
+        let secondBurst = (6...10).map { index in
+            makeMessage(
+                id: "tool-\(index)",
+                threadID: "thread",
+                role: .system,
+                kind: index.isMultiple(of: 2) ? .toolActivity : .commandExecution,
+                text: "Tool \(index)",
+                createdAt: now.addingTimeInterval(Double(index + 1)),
+                turnID: "turn-1"
+            )
+        }
+        let messages = firstBurst + [commentary] + secondBurst
+
+        let items = TurnTimelineRenderProjection.project(messages: messages)
+
+        guard items.count == 3,
+              case .toolBurst(let projectedFirstBurst) = items[0],
+              case .message(let projectedCommentary) = items[1],
+              case .toolBurst(let projectedSecondBurst) = items[2] else {
+            return XCTFail("Expected two independent tool bursts around commentary")
+        }
+        XCTAssertEqual(projectedFirstBurst.messages.map(\.id), firstBurst.map(\.id))
+        XCTAssertEqual(projectedCommentary.id, commentary.id)
+        XCTAssertEqual(projectedSecondBurst.messages.map(\.id), secondBurst.map(\.id))
+    }
+
+    func testTimelineRenderProjectionDoesNotTreatHistoricalTailAsLiveWithoutActiveTurnID() {
+        let now = Date()
+        let toolMessages = (1...7).map { index in
+            makeMessage(
+                id: "historical-tool-\(index)",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Historical tool \(index)",
+                createdAt: now.addingTimeInterval(Double(index)),
+                turnID: "completed-turn",
+                itemID: "historical-item-\(index)"
+            )
+        }
+
+        let items = TurnTimelineRenderProjection.project(
+            messages: toolMessages,
+            activeTurnID: nil,
+            isThreadRunning: true
+        )
+
+        guard items.count == 1,
+              case .toolBurst(let group) = items[0] else {
+            return XCTFail("Expected one historical tool burst")
+        }
+
+        XCTAssertEqual(group.hiddenCount, 6)
+        XCTAssertEqual(group.latestMessage?.id, "historical-tool-7")
+    }
+
+    func testTimelineRenderProjectionUsesTurnlessFallbackInsideLatestUserBlock() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "user",
+                threadID: "thread",
+                role: .user,
+                text: "Run the checks",
+                createdAt: now,
+                turnID: nil
+            ),
+        ] + (1...5).map { index in
+            makeMessage(
+                id: "turnless-tool-\(index)",
+                threadID: "thread",
+                role: .system,
+                kind: .toolActivity,
+                text: "Tool \(index)",
+                createdAt: now.addingTimeInterval(Double(index)),
+                turnID: nil,
+                itemID: "turnless-item-\(index)"
+            )
+        }
+
+        let items = TurnTimelineRenderProjection.project(
+            messages: messages,
+            activeTurnID: nil,
+            isThreadRunning: true
+        )
+
+        guard items.count == 2,
+              case .toolBurst(let group) = items[1] else {
+            return XCTFail("Expected user plus one live turnless burst")
+        }
+
+        XCTAssertEqual(group.hiddenCount, 4)
+        XCTAssertEqual(group.latestMessage?.id, "turnless-tool-5")
+    }
+
+    func testTimelineRenderProjectionKeepsUpToFourToolRunsExpanded() {
+        let now = Date()
+        let toolMessages = (1...4).map { index in
             makeMessage(
                 id: "tool-\(index)",
                 threadID: "thread",
@@ -352,7 +500,7 @@ final class TurnTimelineReducerTests: XCTestCase {
         }
 
         let items = TurnTimelineRenderProjection.project(messages: toolMessages)
-        XCTAssertEqual(items.count, 5)
+        XCTAssertEqual(items.count, 4)
 
         let messageIDs = items.compactMap { item -> String? in
             if case .message(let message) = item {
@@ -523,6 +671,437 @@ final class TurnTimelineReducerTests: XCTestCase {
             ),
             Set(["final"])
         )
+    }
+
+    func testCompletedTurnMovesSummaryOnlyReasoningIntoPreviousMessages() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "user",
+                threadID: "thread",
+                role: .user,
+                text: "Run the focused tests",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "reasoning-summary",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "**Planning targeted test execution**\n\n<!-- -->",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "reasoning-item",
+                orderIndex: 2
+            ),
+            makeMessage(
+                id: "final",
+                threadID: "thread",
+                role: .assistant,
+                assistantPhase: "final_answer",
+                text: "The focused tests pass.",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "final-item",
+                orderIndex: 3
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(
+            messages: messages,
+            completedTurnIDs: ["turn-1"]
+        )
+
+        XCTAssertEqual(items.map(\.id), ["user", "previous-messages:final", "final"])
+        guard case .previousMessages(let group) = items[1] else {
+            return XCTFail("Expected summary reasoning inside previous messages")
+        }
+        XCTAssertEqual(group.messages.map(\.id), ["reasoning-summary"])
+    }
+
+    func testCompletedTurnKeepsSummaryReasoningOrderedWithCollapsedToolHistory() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "user",
+                threadID: "thread",
+                role: .user,
+                text: "Inspect the implementation",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "tool",
+                threadID: "thread",
+                role: .system,
+                kind: .toolActivity,
+                text: "Searched the implementation",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "tool-item",
+                orderIndex: 2
+            ),
+            makeMessage(
+                id: "reasoning-summary",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "**Checking the implementation**\n\n<!-- -->",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "reasoning-item",
+                orderIndex: 3
+            ),
+            makeMessage(
+                id: "final",
+                threadID: "thread",
+                role: .assistant,
+                assistantPhase: "final_answer",
+                text: "The implementation is correct.",
+                createdAt: now.addingTimeInterval(3),
+                turnID: "turn-1",
+                itemID: "final-item",
+                orderIndex: 4
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(
+            messages: messages,
+            completedTurnIDs: ["turn-1"]
+        )
+
+        XCTAssertEqual(items.map(\.id), [
+            "user",
+            "previous-messages:final",
+            "final",
+        ])
+        guard case .previousMessages(let group) = items[1] else {
+            return XCTFail("Expected tool and reasoning history to remain collapsed")
+        }
+        XCTAssertEqual(group.messages.map(\.id), ["tool", "reasoning-summary"])
+    }
+
+    func testColdReopenMovesSummaryOnlyReasoningWhenFinalAnswerInfersCompletion() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "user",
+                threadID: "thread",
+                role: .user,
+                text: "Inspect the history",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "reasoning-summary",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "**Reviewing canonical history**\n\n<!-- -->",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "reasoning-item",
+                orderIndex: 2
+            ),
+            makeMessage(
+                id: "final",
+                threadID: "thread",
+                role: .assistant,
+                assistantPhase: "final_answer",
+                text: "History is consistent.",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "final-item",
+                orderIndex: 3
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(
+            messages: messages,
+            completedTurnIDs: [],
+            activeTurnID: nil,
+            isThreadRunning: false
+        )
+
+        XCTAssertEqual(items.map(\.id), ["user", "previous-messages:final", "final"])
+        guard case .previousMessages(let group) = items[1] else {
+            return XCTFail("Expected inferred completed reasoning inside previous messages")
+        }
+        XCTAssertEqual(group.messages.map(\.id), ["reasoning-summary"])
+    }
+
+    func testActiveTurnKeepsSummaryOnlyReasoningVisible() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "user",
+                threadID: "thread",
+                role: .user,
+                text: "Inspect the live run",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "reasoning-summary",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "**Inspecting the live run**\n\n<!-- -->",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "reasoning-item",
+                isStreaming: true,
+                orderIndex: 2
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(
+            messages: messages,
+            completedTurnIDs: [],
+            activeTurnID: "turn-1",
+            isThreadRunning: true
+        )
+
+        XCTAssertEqual(items.map(\.id), ["user", "reasoning-summary"])
+    }
+
+    func testReasoningSummaryDedupeKeepsOnlyUnseenCumulativeTitlesInPlace() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "reasoning-first",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "**Testing notify command behavior**\n\n<!-- -->\n\n**Analyzing notify hook JSON output format**\n\n<!-- -->",
+                createdAt: now,
+                turnID: "turn-1",
+                itemID: "reasoning-a",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "command",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed notify test",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "command-a",
+                orderIndex: 2
+            ),
+            makeMessage(
+                id: "reasoning-duplicate",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "**Testing notify command behavior**\n\n<!-- -->\n\n**Analyzing notify hook JSON output format**\n\n<!-- -->",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "reasoning-b",
+                orderIndex: 3
+            ),
+            makeMessage(
+                id: "reasoning-cumulative",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "**Testing notify command behavior**\n\n<!-- -->\n\n**Analyzing notify hook JSON output format**\n\n<!-- -->\n\n**Planning parser fix**\n\n<!-- -->",
+                createdAt: now.addingTimeInterval(3),
+                turnID: "turn-1",
+                itemID: "reasoning-c",
+                orderIndex: 4
+            ),
+        ]
+
+        let deduped = TurnTimelineReducer.removeDuplicateReasoningSummaryMessages(in: messages)
+
+        XCTAssertEqual(deduped.map(\.id), ["reasoning-first", "command", "reasoning-cumulative"])
+        XCTAssertEqual(deduped.last?.text, "**Planning parser fix**\n\n<!-- -->")
+    }
+
+    func testCompletedTurnStillCollapsesReasoningThatHasRealDisclosureDetail() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "user",
+                threadID: "thread",
+                role: .user,
+                text: "Inspect the implementation",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "reasoning-detail",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "**Reviewing implementation**\n\nThe parser and projection both need checking.",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "reasoning-item",
+                orderIndex: 2
+            ),
+            makeMessage(
+                id: "final",
+                threadID: "thread",
+                role: .assistant,
+                text: "The implementation is correct.",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "final-item",
+                orderIndex: 3
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(
+            messages: messages,
+            completedTurnIDs: ["turn-1"]
+        )
+
+        guard items.count == 3,
+              case .previousMessages(let group) = items[1] else {
+            return XCTFail("Expected detailed reasoning inside the previous-messages disclosure")
+        }
+        XCTAssertEqual(group.messages.map(\.id), ["reasoning-detail"])
+    }
+
+    func testTimelineProjectionInfersOlderCompletedTurnFromFinalAnswerPhaseDuringColdReopen() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "old-user",
+                threadID: "thread",
+                role: .user,
+                text: "Fix mirroring",
+                createdAt: now,
+                turnID: "old-turn",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "old-commentary",
+                threadID: "thread",
+                role: .assistant,
+                assistantPhase: "commentary",
+                text: "The focused suite passes.",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "old-turn",
+                itemID: "old-commentary-item",
+                orderIndex: 2
+            ),
+            makeMessage(
+                id: "old-tool",
+                threadID: "thread",
+                role: .system,
+                kind: .toolActivity,
+                text: "Read files",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "old-turn",
+                itemID: "old-tool-item",
+                orderIndex: 3
+            ),
+            makeMessage(
+                id: "old-final",
+                threadID: "thread",
+                role: .assistant,
+                assistantPhase: "final_answer",
+                text: "Mirroring is fixed.",
+                createdAt: now.addingTimeInterval(3),
+                turnID: "old-turn",
+                itemID: "old-final-item",
+                orderIndex: 4
+            ),
+            makeMessage(
+                id: "active-user",
+                threadID: "thread",
+                role: .user,
+                text: "Check again",
+                createdAt: now.addingTimeInterval(4),
+                turnID: "active-turn",
+                orderIndex: 5
+            ),
+            makeMessage(
+                id: "active-commentary",
+                threadID: "thread",
+                role: .assistant,
+                assistantPhase: "commentary",
+                text: "Checking now.",
+                createdAt: now.addingTimeInterval(5),
+                turnID: "active-turn",
+                itemID: "active-commentary-item",
+                isStreaming: true,
+                orderIndex: 6
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(
+            messages: messages,
+            completedTurnIDs: [],
+            activeTurnID: nil,
+            isThreadRunning: true
+        )
+
+        let previousGroups = items.compactMap { item -> TurnTimelinePreviousMessagesGroup? in
+            guard case .previousMessages(let group) = item else { return nil }
+            return group
+        }
+        XCTAssertEqual(previousGroups.count, 1)
+        XCTAssertEqual(previousGroups[0].finalMessageID, "old-final")
+        XCTAssertEqual(previousGroups[0].messages.map(\.id), ["old-commentary", "old-tool"])
+        XCTAssertTrue(items.contains { item in
+            guard case .message(let message) = item else { return false }
+            return message.id == "active-commentary"
+        })
+    }
+
+    func testTimelineProjectionDoesNotInferCompletionForActiveFinalAnswer() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "commentary",
+                threadID: "thread",
+                role: .assistant,
+                assistantPhase: "commentary",
+                text: "Still finishing.",
+                createdAt: now,
+                turnID: "active-turn",
+                itemID: "commentary-item",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "final",
+                threadID: "thread",
+                role: .assistant,
+                assistantPhase: "final_answer",
+                text: "Final text arrived before task completion.",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "active-turn",
+                itemID: "final-item",
+                orderIndex: 2
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(
+            messages: messages,
+            completedTurnIDs: [],
+            activeTurnID: nil,
+            isThreadRunning: true
+        )
+
+        XCTAssertFalse(items.contains { item in
+            if case .previousMessages = item { return true }
+            return false
+        })
+        XCTAssertEqual(items.compactMap { item -> String? in
+            guard case .message(let message) = item else { return nil }
+            return message.id
+        }, ["commentary", "final"])
     }
 
     func testTimelineProjectionKeepsPreviousMessagesChronologicalForMultiAssistantTurns() {
@@ -1097,7 +1676,7 @@ final class TurnTimelineReducerTests: XCTestCase {
                 Totals: +0 -6
                 """,
                 createdAt: now.addingTimeInterval(1),
-                turnID: "turn-2",
+                turnID: "turn-1",
                 orderIndex: 2
             ),
         ]
@@ -1113,6 +1692,162 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(summary?.entries.first?.path, "CodexMobile/CodexMobile/Views/Turn/TurnTimelineView.swift")
         XCTAssertEqual(summary?.entries.first?.additions, 6)
         XCTAssertEqual(summary?.entries.first?.deletions, 6)
+    }
+
+    func testTimelineProjectionKeepsAdjacentFileChangeRowsSeparateAcrossTurns() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "file-change-previous-turn",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/Previous.swift
+                Kind: update
+                Totals: +2 -1
+                """,
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "file-change-new-turn",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/New.swift
+                Kind: update
+                Totals: +3 -0
+                """,
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-2",
+                orderIndex: 2
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(messages: messages)
+
+        XCTAssertEqual(items.map(\.id), ["file-change-previous-turn", "file-change-new-turn"])
+    }
+
+    func testTimelineProjectionKeepsFileChangesWithDifferentTurnIDsSeparateInsideUserBlock() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "user",
+                threadID: "thread",
+                role: .user,
+                text: "Build the feature",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "file-change-original-turn",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/App.swift
+                Kind: update
+                Totals: +2 -1
+                """,
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                orderIndex: 2
+            ),
+            makeMessage(
+                id: "file-change-replaced-turn",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/Composer.swift
+                Kind: update
+                Totals: +3 -0
+                """,
+                createdAt: now.addingTimeInterval(2),
+                turnID: "replacement-turn-id",
+                orderIndex: 3
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(messages: messages)
+
+        XCTAssertEqual(
+            items.map(\.id),
+            ["user", "file-change-original-turn", "file-change-replaced-turn"]
+        )
+    }
+
+    func testTimelineProjectionKeepsFileChangesSeparateAcrossUserBlocks() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "user-1",
+                threadID: "thread",
+                role: .user,
+                text: "First change",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "file-change-1",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/First.swift
+                Kind: update
+                Totals: +2 -1
+                """,
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                orderIndex: 2
+            ),
+            makeMessage(
+                id: "user-2",
+                threadID: "thread",
+                role: .user,
+                text: "Second change",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-2",
+                orderIndex: 3
+            ),
+            makeMessage(
+                id: "file-change-2",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/Second.swift
+                Kind: update
+                Totals: +3 -0
+                """,
+                createdAt: now.addingTimeInterval(3),
+                turnID: "turn-2",
+                orderIndex: 4
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(messages: messages)
+
+        XCTAssertEqual(items.map(\.id), ["user-1", "file-change-1", "user-2", "file-change-2"])
     }
 
     func testTimelineProjectionMergesAdjacentFinalFileChangeRowsIntoOneTable() {
@@ -1147,7 +1882,7 @@ final class TurnTimelineReducerTests: XCTestCase {
                 Totals: +3 -0
                 """,
                 createdAt: now.addingTimeInterval(1),
-                turnID: "turn-2",
+                turnID: "turn-1",
                 orderIndex: 2
             ),
         ]
@@ -2163,6 +2898,206 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(deduped.map(\.id), ["diff-2"])
     }
 
+    // A long-running turn keeps one live cumulative aggregate streaming while
+    // completed per-patch cards land; the aggregate must absorb subset cards
+    // instead of showing both the compact card and the growing live list.
+    func testRemoveDuplicateFileChangeMessagesStreamingAggregateAbsorbsCompletedSubsetCard() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "aggregate-live",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Path: Sources/App.swift
+                Kind: update
+                Totals: +10 -2
+
+                Path: Sources/Feature.swift
+                Kind: update
+                Totals: +4 -1
+                """,
+                createdAt: now,
+                turnID: "turn-1",
+                itemID: "turn-diff-aggregate",
+                isStreaming: true
+            ),
+            makeMessage(
+                id: "card-subset",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/App.swift
+                Kind: update
+                Totals: +3 -1
+                """,
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "patch-2",
+                isStreaming: false
+            ),
+        ]
+
+        let deduped = TurnTimelineReducer.removeDuplicateFileChangeMessages(in: messages)
+        XCTAssertEqual(deduped.map(\.id), ["aggregate-live"])
+    }
+
+    // Turn completion can flip the aggregate non-streaming without a final
+    // item snapshot; it must keep absorbing strictly covered per-patch cards
+    // or the duplication resurfaces exactly when the turn ends.
+    func testRemoveDuplicateFileChangeMessagesCompletedAggregateAbsorbsStrictSubsetCard() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "aggregate-final",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Path: Sources/App.swift
+                Kind: update
+                Totals: +10 -2
+
+                Path: Sources/Feature.swift
+                Kind: update
+                Totals: +4 -1
+                """,
+                createdAt: now,
+                turnID: "turn-1",
+                itemID: "turn-diff-aggregate",
+                isStreaming: false
+            ),
+            makeMessage(
+                id: "card-subset",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/App.swift
+                Kind: update
+                Totals: +3 -1
+                """,
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "patch-2",
+                isStreaming: false
+            ),
+        ]
+
+        let deduped = TurnTimelineReducer.removeDuplicateFileChangeMessages(in: messages)
+        XCTAssertEqual(deduped.map(\.id), ["aggregate-final"])
+    }
+
+    // When the row's item id proves it IS the cumulative aggregate (streaming
+    // placeholder / jsonl aggregate id), it also absorbs an EQUAL-path card:
+    // the pair is not ambiguous, the aggregate is the authoritative recap.
+    func testRemoveDuplicateFileChangeMessagesKnownAggregateAbsorbsEqualPathCard() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "aggregate-final",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Path: Sources/App.swift
+                Kind: update
+                Totals: +10 -2
+
+                Path: Sources/Feature.swift
+                Kind: update
+                Totals: +4 -1
+                """,
+                createdAt: now,
+                turnID: "turn-1",
+                itemID: CodexSyntheticIdentifiers.placeholderItemID(turnId: "turn-1", kind: .fileChange),
+                isStreaming: false
+            ),
+            makeMessage(
+                id: "card-equal",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/App.swift
+                Kind: update
+                Totals: +3 -1
+
+                Path: Sources/Feature.swift
+                Kind: update
+                Totals: +1 -0
+                """,
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "patch-2",
+                isStreaming: false
+            ),
+        ]
+
+        let deduped = TurnTimelineReducer.removeDuplicateFileChangeMessages(in: messages)
+        XCTAssertEqual(deduped.map(\.id), ["aggregate-final"])
+    }
+
+    // Without the aggregate id proof, an equal-path completed pair stays
+    // ambiguous (the aggregate often adopts a real item id): both rows must
+    // survive so the wrong one of an identical pair is never killed.
+    func testRemoveDuplicateFileChangeMessagesUnknownCompletedAggregateKeepsEqualPathCard() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "aggregate-adopted-id",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Path: Sources/App.swift
+                Kind: update
+                Totals: +10 -2
+
+                Path: Sources/Feature.swift
+                Kind: update
+                Totals: +4 -1
+                """,
+                createdAt: now,
+                turnID: "turn-1",
+                itemID: "item-real-42",
+                isStreaming: false
+            ),
+            makeMessage(
+                id: "card-equal",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/App.swift
+                Kind: update
+                Totals: +3 -1
+
+                Path: Sources/Feature.swift
+                Kind: update
+                Totals: +1 -0
+                """,
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "patch-2",
+                isStreaming: false
+            ),
+        ]
+
+        let deduped = TurnTimelineReducer.removeDuplicateFileChangeMessages(in: messages)
+        XCTAssertEqual(deduped.map(\.id), ["aggregate-adopted-id", "card-equal"])
+    }
+
     func testRemoveDuplicateFileChangeMessagesIgnoresStatusOnlyDifferences() {
         let now = Date()
         let messages = [
@@ -2444,7 +3379,7 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(deduped.map(\.id), ["diff-1", "diff-2"])
     }
 
-    func testAssistantAnchorPrefersActiveTurnThenStreamingFallback() {
+    func testAssistantResponseLookupPrefersActiveTurnThenStreamingFallback() {
         let now = Date()
         let messages = [
             makeMessage(
@@ -2468,17 +3403,17 @@ final class TurnTimelineReducerTests: XCTestCase {
             ),
         ]
 
-        let activeAnchor = TurnTimelineReducer.assistantResponseAnchorMessageID(
+        let activeResponseID = TurnTimelineReducer.assistantResponseMessageID(
             in: messages,
             activeTurnID: "turn-active"
         )
-        XCTAssertEqual(activeAnchor, "assistant-2")
+        XCTAssertEqual(activeResponseID, "assistant-2")
 
-        let fallbackAnchor = TurnTimelineReducer.assistantResponseAnchorMessageID(
+        let fallbackResponseID = TurnTimelineReducer.assistantResponseMessageID(
             in: messages,
             activeTurnID: nil
         )
-        XCTAssertEqual(fallbackAnchor, "assistant-2")
+        XCTAssertEqual(fallbackResponseID, "assistant-2")
     }
 
     func testRenderItemsCacheReusesProjectionForSameSignature() {
@@ -2610,6 +3545,48 @@ final class TurnTimelineReducerTests: XCTestCase {
             "thinking-2",
             "assistant-2",
         ])
+    }
+
+    func testEnforceIntraTurnOrderDoesNotPermuteOlderTurnAcrossNewerTurnBoundary() {
+        let messages = [
+            makeMessage(id: "user-1", threadID: "thread", role: .user, text: "one", turnID: "turn-1", orderIndex: 1),
+            makeMessage(id: "assistant-1", threadID: "thread", role: .assistant, text: "answer one", turnID: "turn-1", orderIndex: 2),
+            makeMessage(id: "user-2", threadID: "thread", role: .user, text: "two", turnID: "turn-2", orderIndex: 3),
+            makeMessage(id: "assistant-2", threadID: "thread", role: .assistant, text: "answer two", turnID: "turn-2", orderIndex: 4),
+            makeMessage(id: "late-reasoning-1", threadID: "thread", role: .system, kind: .thinking, text: "late", turnID: "turn-1", orderIndex: 5),
+        ]
+
+        let reordered = TurnTimelineReducer.enforceIntraTurnOrder(in: messages)
+
+        XCTAssertEqual(reordered.map(\.id), messages.map(\.id))
+    }
+
+    func testEnforceIntraTurnOrderUsesSequenceInsteadOfAssistantTimestamp() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "assistant-first",
+                threadID: "thread",
+                role: .assistant,
+                text: "first",
+                createdAt: now.addingTimeInterval(10),
+                turnID: "turn-1",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "assistant-second",
+                threadID: "thread",
+                role: .assistant,
+                text: "second",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: 2
+            ),
+        ]
+
+        let reordered = TurnTimelineReducer.enforceIntraTurnOrder(in: messages)
+
+        XCTAssertEqual(reordered.map(\.id), ["assistant-first", "assistant-second"])
     }
 
     func testEnforceIntraTurnOrderStillReordersSingleItemTurn() {
@@ -3549,6 +4526,218 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertNil(blockInfo[0]?.copyText)
     }
 
+    func testAssistantBlockInfoKeepsCopyAtEndOfTrailingToolCallBlock() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "assistant",
+                threadID: "thread",
+                role: .assistant,
+                text: "Completed response",
+                createdAt: now,
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "tool",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Run wait",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1"
+            ),
+        ]
+
+        let blockInfo = TurnTimelineView<EmptyView, EmptyView>.assistantBlockInfo(
+            for: messages,
+            activeTurnID: nil,
+            isThreadRunning: false,
+            latestTurnTerminalState: .completed,
+            stoppedTurnIDs: []
+        )
+
+        XCTAssertNil(blockInfo[0])
+        XCTAssertEqual(blockInfo[1]?.allowsCopy, true)
+        XCTAssertEqual(blockInfo[1]?.copyText, "Completed response")
+    }
+
+    func testToolBurstAccessoryResolverMovesCopyAndRunningStateToGroupFooter() {
+        let messages = (1...5).map { index in
+            makeMessage(
+                id: "tool-\(index)",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Tool \(index)",
+                turnID: "turn-1"
+            )
+        }
+        let group = TurnTimelineToolBurstGroup(messages: messages)
+        guard let hostID = group.latestMessage?.id else {
+            return XCTFail("Expected the tool burst to expose its latest message as footer host")
+        }
+        let state = AssistantBlockAccessoryState(
+            copyText: "Completed response",
+            showsRunningIndicator: true,
+            allowsCopy: true,
+            blockDiffText: "diff payload"
+        )
+
+        let footerState = TurnTimelineToolBurstAccessoryResolver.copyFooterState(
+            for: group,
+            statesByMessageID: [hostID: state],
+            suppressesRunningIndicator: false
+        )
+        let globallySuppressedState = TurnTimelineToolBurstAccessoryResolver.copyFooterState(
+            for: group,
+            statesByMessageID: [hostID: state],
+            suppressesRunningIndicator: true
+        )
+        let rowState = state.suppressingCopyAndRunningAccessory()
+
+        XCTAssertEqual(footerState?.copyText, "Completed response")
+        XCTAssertEqual(footerState?.showsRunningIndicator, true)
+        XCTAssertEqual(globallySuppressedState?.copyText, "Completed response")
+        XCTAssertEqual(globallySuppressedState?.showsRunningIndicator, false)
+        XCTAssertNil(rowState.copyText)
+        XCTAssertEqual(rowState.allowsCopy, false)
+        XCTAssertEqual(rowState.showsRunningIndicator, false)
+        XCTAssertEqual(rowState.blockDiffText, "diff payload")
+    }
+
+    func testAssistantBlockInfoDoesNotMoveCopyAcrossTurnBoundary() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "assistant-old-turn",
+                threadID: "thread",
+                role: .assistant,
+                text: "Completed response",
+                createdAt: now,
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "tool-new-turn",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Run wait",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-2"
+            ),
+        ]
+
+        let blockInfo = TurnTimelineView<EmptyView, EmptyView>.assistantBlockInfo(
+            for: messages,
+            activeTurnID: nil,
+            isThreadRunning: false,
+            latestTurnTerminalState: .completed,
+            stoppedTurnIDs: []
+        )
+
+        XCTAssertEqual(blockInfo[0]?.allowsCopy, true)
+        XCTAssertNil(blockInfo[1])
+    }
+
+    func testAssistantBlockInfoHidesCopyWhenMirroringSplitsTheActiveTurnIdentity() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "assistant-synthetic-turn",
+                threadID: "thread",
+                role: .assistant,
+                text: "Still working on the current request",
+                createdAt: now,
+                turnID: "synthetic-turn"
+            ),
+            makeMessage(
+                id: "tool-canonical-turn",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Read the next file",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "canonical-turn"
+            ),
+        ]
+
+        let blockInfo = TurnTimelineView<EmptyView, EmptyView>.assistantBlockInfo(
+            for: messages,
+            activeTurnID: "canonical-turn",
+            isThreadRunning: true,
+            latestTurnTerminalState: nil,
+            stoppedTurnIDs: []
+        )
+
+        XCTAssertNil(blockInfo[0])
+        XCTAssertNil(blockInfo[1])
+    }
+
+    func testAssistantBlockInfoDoesNotBridgeTurnsThroughTurnlessRow() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "assistant-old-turn",
+                threadID: "thread",
+                role: .assistant,
+                text: "Completed response",
+                createdAt: now,
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "turnless-tool",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Run wait",
+                createdAt: now.addingTimeInterval(1),
+                turnID: nil
+            ),
+            makeMessage(
+                id: "tool-new-turn",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Run status",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-2"
+            ),
+        ]
+
+        let blockInfo = TurnTimelineView<EmptyView, EmptyView>.assistantBlockInfo(
+            for: messages,
+            activeTurnID: nil,
+            isThreadRunning: false,
+            latestTurnTerminalState: .completed,
+            stoppedTurnIDs: []
+        )
+
+        XCTAssertEqual(blockInfo[0]?.allowsCopy, true)
+        XCTAssertNil(blockInfo[1])
+        XCTAssertNil(blockInfo[2])
+    }
+
+    func testAssistantBlockInfoDoesNotShowCopyForToolOnlyBlock() {
+        let message = makeMessage(
+            id: "tool-only",
+            threadID: "thread",
+            role: .system,
+            kind: .toolActivity,
+            text: "Search files",
+            turnID: "turn-1"
+        )
+
+        let blockInfo = TurnTimelineView<EmptyView, EmptyView>.assistantBlockInfo(
+            for: [message],
+            activeTurnID: nil,
+            isThreadRunning: false,
+            latestTurnTerminalState: .completed,
+            stoppedTurnIDs: []
+        )
+
+        XCTAssertNil(blockInfo[0])
+    }
+
     func testAssistantBlockInfoHidesCopyWhileStopControlIsVisible() {
         let now = Date()
         let messages = [
@@ -3714,6 +4903,54 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(initialStates["thinking-placeholder"]?.showsRunningIndicator, true)
         XCTAssertNil(rehousedStates["thinking-placeholder"])
         XCTAssertEqual(rehousedStates["assistant-1"]?.showsRunningIndicator, true)
+    }
+
+    func testHiddenAccessoryStateDoesNotCrossStableTurnBoundary() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "assistant-turn-1",
+                threadID: "thread",
+                role: .assistant,
+                text: "Finished first turn",
+                createdAt: now,
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "thinking-turn-2",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-2",
+                isStreaming: true
+            ),
+        ]
+        let blockInfo = TurnTimelineView<EmptyView, EmptyView>.assistantBlockInfo(
+            for: messages,
+            activeTurnID: "turn-2",
+            isThreadRunning: true,
+            latestTurnTerminalState: nil,
+            stoppedTurnIDs: []
+        )
+        let initialStates = [String: AssistantBlockAccessoryState](
+            uniqueKeysWithValues: zip(messages, blockInfo).compactMap { message, state in
+                guard let state else { return nil }
+                return (message.id, state)
+            }
+        )
+        let renderItems = TurnTimelineRenderProjection.project(messages: messages)
+
+        let rehousedStates = TurnTimelineView<EmptyView, EmptyView>.rehomeHiddenAccessoryStates(
+            initialStates,
+            messages: messages,
+            renderItems: renderItems
+        )
+
+        XCTAssertEqual(renderItems.map(\.id), ["assistant-turn-1"])
+        XCTAssertNotEqual(rehousedStates["assistant-turn-1"]?.showsRunningIndicator, true)
+        XCTAssertEqual(rehousedStates["thinking-turn-2"]?.showsRunningIndicator, true)
     }
 
     func testEmptyStreamingAssistantPlaceholderDoesNotRenderAfterUserSend() {
@@ -4393,42 +5630,6 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(blockInfo[2]?.blockDiffEntries?.first?.deletions, 1)
     }
 
-    func testScrollTrackerPausesAutomaticScrollingDuringUserDrag() {
-        XCTAssertTrue(
-            TurnScrollStateTracker.isAutomaticScrollingPaused(
-                isUserDragging: true,
-                cooldownUntil: nil,
-                now: Date()
-            )
-        )
-    }
-
-    func testScrollTrackerPausesAutomaticScrollingDuringCooldown() {
-        let now = Date()
-
-        XCTAssertTrue(
-            TurnScrollStateTracker.isAutomaticScrollingPaused(
-                isUserDragging: false,
-                cooldownUntil: now.addingTimeInterval(0.1),
-                now: now
-            )
-        )
-        XCTAssertFalse(
-            TurnScrollStateTracker.isAutomaticScrollingPaused(
-                isUserDragging: false,
-                cooldownUntil: now.addingTimeInterval(-0.1),
-                now: now
-            )
-        )
-    }
-
-    func testScrollTrackerBuildsCooldownDeadlineInFuture() {
-        let now = Date()
-        let deadline = TurnScrollStateTracker.cooldownDeadline(after: now)
-
-        XCTAssertGreaterThan(deadline.timeIntervalSince(now), 0)
-    }
-
     // Builds compact fixtures for reducer invariants.
     private func makeMessage(
         id: String,
@@ -4466,75 +5667,191 @@ final class TurnTimelineReducerTests: XCTestCase {
     }
 }
 
+@MainActor
 final class TurnScrollStateTrackerTests: XCTestCase {
-    func testUserDragImmediatelySwitchesFollowBottomToManual() {
-        XCTAssertEqual(
-            TurnScrollStateTracker.modeAfterUserDragBegan(currentMode: .followBottom),
-            .manual
+    func testOnlyALocalSendOpensAtLiveTail() {
+        XCTAssertTrue(
+            TurnScrollStateTracker.shouldOpenAtLiveTail(
+                isSendInFlight: true
+            )
+        )
+        XCTAssertFalse(
+            TurnScrollStateTracker.shouldOpenAtLiveTail(
+                isSendInFlight: false
+            )
         )
     }
 
-    func testUserDragKeepsAssistantAnchorModeUntilAnchorCompletes() {
-        XCTAssertEqual(
-            TurnScrollStateTracker.modeAfterUserDragBegan(currentMode: .anchorAssistantResponse),
-            .anchorAssistantResponse
+    func testLiveTurnEvidenceDetection() {
+        XCTAssertTrue(
+            TurnScrollStateTracker.hasLiveTurnEvidence(
+                isThreadRunning: true,
+                activeTurnID: nil,
+                hasStreamingTail: true
+            )
+        )
+        XCTAssertFalse(
+            TurnScrollStateTracker.hasLiveTurnEvidence(
+                isThreadRunning: false,
+                activeTurnID: "   ",
+                hasStreamingTail: false
+            )
         )
     }
 
-    func testUserDragEndingAtBottomRestoresFollowBottom() {
+    func testConversationOpenAlwaysGivesTheAppBottomOwnership() {
         XCTAssertEqual(
-            TurnScrollStateTracker.modeAfterUserDragEnded(
-                currentMode: .manual,
-                isScrolledToBottom: true
+            TurnScrollStateTracker.ownership(
+                after: .conversationOpened(isAwaitingAssistantResponse: false),
+                current: .user
             ),
             .followBottom
         )
     }
 
-    func testUserDragEndingAwayFromBottomKeepsManualMode() {
+    func testSendSelectsTheRequestedAppTarget() {
         XCTAssertEqual(
-            TurnScrollStateTracker.modeAfterUserDragEnded(
-                currentMode: .manual,
-                isScrolledToBottom: false
+            TurnScrollStateTracker.ownership(
+                after: .sendBegan(isAwaitingAssistantResponse: false),
+                current: .user
             ),
-            .manual
+            .followBottom
+        )
+        XCTAssertEqual(
+            TurnScrollStateTracker.ownership(
+                after: .sendBegan(isAwaitingAssistantResponse: true),
+                current: .user
+            ),
+            .awaitingAssistantResponse
         )
     }
 
-    func testCorrectsBottomForMeaningfulContentGrowthWhenPinned() {
+    func testResolvedAssistantResponseRestoresBottomFollow() {
+        let resolved = TurnScrollStateTracker.ownership(
+            after: .assistantResponseResolved,
+            current: .awaitingAssistantResponse
+        )
+
+        XCTAssertEqual(resolved, .followBottom)
         XCTAssertTrue(
-            TurnScrollStateTracker.shouldCorrectBottomAfterContentHeightChange(
-                previousHeight: 320,
-                newHeight: 356,
-                isPinnedToBottom: true
+            TurnScrollStateTracker.shouldPinDuringGeometryChange(
+                ownership: resolved,
+                isAutomaticScrollingPaused: false
             )
         )
     }
 
-    func testCorrectsBottomForMeaningfulContentShrinkWhenPinned() {
+    func testResolvingAssistantResponseDoesNotOverrideUserOwnership() {
+        XCTAssertEqual(
+            TurnScrollStateTracker.ownership(
+                after: .assistantResponseResolved,
+                current: .user
+            ),
+            .user
+        )
+    }
+
+    func testAppOwnedScrollingPreservesStreamingAnimations() {
+        XCTAssertTrue(TurnScrollOwnership.followBottom.allowsStreamingAnimations)
+        XCTAssertTrue(TurnScrollOwnership.awaitingAssistantResponse.allowsStreamingAnimations)
+        XCTAssertFalse(TurnScrollOwnership.user.allowsStreamingAnimations)
+    }
+
+    func testFollowBottomTracksScrollGeometry() {
         XCTAssertTrue(
-            TurnScrollStateTracker.shouldCorrectBottomAfterContentHeightChange(
-                previousHeight: 356,
-                newHeight: 320,
-                isPinnedToBottom: true
+            TurnTimelinePendingAssistantState.shouldTrackScrollGeometry(
+                isAwaitingAssistantResponse: false,
+                autoScrollMode: .followBottom,
+                isWaitingForAssistantResponse: false
             )
         )
     }
 
-    func testIgnoresTinyHeightDriftAndManualMode() {
-        XCTAssertFalse(
-            TurnScrollStateTracker.shouldCorrectBottomAfterContentHeightChange(
-                previousHeight: 320,
-                newHeight: 320.5,
-                isPinnedToBottom: true
-            )
+    func testUserInteractionOwnsTheViewportAndCancelsAnyAppTarget() {
+        XCTAssertEqual(
+            TurnScrollStateTracker.ownership(
+                after: .userInteractionBegan,
+                current: .awaitingAssistantResponse
+            ),
+            .user
+        )
+    }
+
+    func testUserInteractionEndingAtBottomRestoresAppOwnership() {
+        XCTAssertEqual(
+            TurnScrollStateTracker.ownership(
+                after: .userInteractionEnded(isAtBottom: true),
+                current: .user
+            ),
+            .followBottom
+        )
+    }
+
+    func testUserInteractionEndingAwayFromBottomKeepsUserOwnership() {
+        XCTAssertEqual(
+            TurnScrollStateTracker.ownership(
+                after: .userInteractionEnded(isAtBottom: false),
+                current: .user
+            ),
+            .user
+        )
+    }
+
+    func testTrackingWithoutInteractionDoesNotReplaceAssistantTarget() {
+        XCTAssertEqual(
+            TurnScrollStateTracker.ownership(
+                after: .userInteractionEnded(isAtBottom: false),
+                current: .awaitingAssistantResponse
+            ),
+            .awaitingAssistantResponse
+        )
+    }
+
+    func testUserDragEndUsesLatestObservedGeometryInsteadOfStaleCommittedBottom() {
+        let effectiveBottom = TurnScrollStateTracker.effectiveBottomState(
+            committedIsAtBottom: true,
+            latestObservedIsAtBottom: false
         )
 
+        XCTAssertFalse(effectiveBottom)
+        XCTAssertEqual(
+            TurnScrollStateTracker.ownership(
+                after: .userInteractionEnded(isAtBottom: effectiveBottom),
+                current: .user
+            ),
+            .user
+        )
+    }
+
+    func testBottomStateFallsBackToCommittedValueBeforeGeometryArrives() {
+        XCTAssertTrue(
+            TurnScrollStateTracker.effectiveBottomState(
+                committedIsAtBottom: true,
+                latestObservedIsAtBottom: nil
+            )
+        )
+    }
+
+    func testGeometryReconcilesOptimisticBottomStateWhenScrollLandsShort() {
+        XCTAssertTrue(
+            TurnScrollStateTracker.shouldReconcileBottomState(
+                observedIsAtBottom: false,
+                committedIsAtBottom: true,
+                isSuppressingNotBottom: false
+            )
+        )
         XCTAssertFalse(
-            TurnScrollStateTracker.shouldCorrectBottomAfterContentHeightChange(
-                previousHeight: 356,
-                newHeight: 320,
-                isPinnedToBottom: false
+            TurnScrollStateTracker.shouldReconcileBottomState(
+                observedIsAtBottom: false,
+                committedIsAtBottom: false,
+                isSuppressingNotBottom: false
+            )
+        )
+        XCTAssertFalse(
+            TurnScrollStateTracker.shouldReconcileBottomState(
+                observedIsAtBottom: false,
+                committedIsAtBottom: true,
+                isSuppressingNotBottom: true
             )
         )
     }
@@ -4542,83 +5859,227 @@ final class TurnScrollStateTrackerTests: XCTestCase {
     func testFollowBottomKeepsPinnedAcrossTransientGeometryDrift() {
         XCTAssertTrue(
             TurnScrollStateTracker.shouldPinDuringGeometryChange(
-                currentMode: .followBottom,
+                ownership: .followBottom,
                 isAutomaticScrollingPaused: false
             )
         )
     }
 
-    func testIgnoresTransientNotBottomOnlyWhileFollowSnapIsPending() {
+    func testGeometryCannotTransferAppOwnershipToTheUser() {
+        let ownership = TurnScrollStateTracker.ownership(
+            after: .conversationOpened(isAwaitingAssistantResponse: false),
+            current: .user
+        )
+        XCTAssertEqual(
+            ownership,
+            .followBottom
+        )
+    }
+
+    func testOffBottomGeometryCorrectsAppOwnershipButNeverUserOwnership() {
         XCTAssertTrue(
-            TurnScrollStateTracker.shouldIgnoreTransientNotBottomGeometry(
-                currentMode: .followBottom,
-                hasPendingFollowBottomScroll: true,
+            TurnScrollStateTracker.shouldCorrectObservedBottomDrift(
+                observedIsAtBottom: false,
+                ownership: .followBottom,
                 isAutomaticScrollingPaused: false
             )
         )
-
         XCTAssertFalse(
-            TurnScrollStateTracker.shouldIgnoreTransientNotBottomGeometry(
-                currentMode: .followBottom,
-                hasPendingFollowBottomScroll: false,
+            TurnScrollStateTracker.shouldCorrectObservedBottomDrift(
+                observedIsAtBottom: false,
+                ownership: .user,
                 isAutomaticScrollingPaused: false
             )
-        )
-
-        XCTAssertFalse(
-            TurnScrollStateTracker.shouldIgnoreTransientNotBottomGeometry(
-                currentMode: .followBottom,
-                hasPendingFollowBottomScroll: true,
-                isAutomaticScrollingPaused: true
-            )
-        )
-    }
-
-    func testAcceptedNotBottomGeometrySwitchesFollowBottomToManual() {
-        XCTAssertEqual(
-            TurnScrollStateTracker.modeAfterAcceptedNotBottomGeometry(currentMode: .followBottom),
-            .manual
-        )
-
-        XCTAssertEqual(
-            TurnScrollStateTracker.modeAfterAcceptedNotBottomGeometry(currentMode: .manual),
-            .manual
-        )
-
-        XCTAssertEqual(
-            TurnScrollStateTracker.modeAfterAcceptedNotBottomGeometry(currentMode: .anchorAssistantResponse),
-            .anchorAssistantResponse
         )
     }
 
     func testManualAndPausedModesDoNotPinDuringGeometryChange() {
         XCTAssertFalse(
             TurnScrollStateTracker.shouldPinDuringGeometryChange(
-                currentMode: .manual,
+                ownership: .manual,
                 isAutomaticScrollingPaused: false
             )
         )
 
         XCTAssertFalse(
             TurnScrollStateTracker.shouldPinDuringGeometryChange(
-                currentMode: .followBottom,
+                ownership: .followBottom,
                 isAutomaticScrollingPaused: true
             )
         )
     }
 
-    func testAssistantAnchorDoesNotBottomPinWhileWaitingForAssistantTarget() {
-        XCTAssertFalse(
+    func testPendingAssistantTargetKeepsBottomPinUntilResolved() {
+        XCTAssertTrue(
             TurnScrollStateTracker.shouldPinDuringGeometryChange(
-                currentMode: .anchorAssistantResponse,
+                ownership: .awaitingAssistantResponse,
                 isAutomaticScrollingPaused: false
             )
         )
 
         XCTAssertFalse(
             TurnScrollStateTracker.shouldPinDuringGeometryChange(
-                currentMode: .anchorAssistantResponse,
+                ownership: .awaitingAssistantResponse,
                 isAutomaticScrollingPaused: true
+            )
+        )
+    }
+
+    func testPendingAssistantTargetCorrectsBottomDriftWhileAppOwned() {
+        XCTAssertTrue(
+            TurnScrollStateTracker.shouldCorrectObservedBottomDrift(
+                observedIsAtBottom: false,
+                ownership: .awaitingAssistantResponse,
+                isAutomaticScrollingPaused: false
+            )
+        )
+    }
+
+    func testScrollToLatestButtonAppearsForReadableOffBottomTargets() {
+        XCTAssertTrue(
+            TurnScrollStateTracker.shouldShowScrollToLatestButton(
+                messageCount: 10,
+                isScrolledToBottom: false,
+                ownership: .user
+            )
+        )
+        XCTAssertFalse(
+            TurnScrollStateTracker.shouldShowScrollToLatestButton(
+                messageCount: 10,
+                isScrolledToBottom: false,
+                ownership: .followBottom
+            )
+        )
+        XCTAssertFalse(
+            TurnScrollStateTracker.shouldShowScrollToLatestButton(
+                messageCount: 10,
+                isScrolledToBottom: false,
+                ownership: .awaitingAssistantResponse
+            )
+        )
+    }
+}
+
+final class ScrollGeometryCoalescerTests: XCTestCase {
+    @MainActor
+    func testFollowBottomRetriesOneRequestQueuedDuringAnimation() async {
+        let coalescer = ScrollGeometryCoalescer()
+        coalescer.observe(ScrollBottomState(isAtBottom: false))
+        var actionCount = 0
+        var firstCompletion: (@MainActor () -> Void)?
+        var retryCompletion: (@MainActor () -> Void)?
+        let firstActionStarted = expectation(description: "First follow-bottom action started")
+        let retryActionStarted = expectation(description: "Queued follow-bottom retry started")
+
+        coalescer.scheduleFollowBottom(after: 0) { completion in
+            actionCount += 1
+            firstCompletion = completion
+            firstActionStarted.fulfill()
+        }
+        await fulfillment(of: [firstActionStarted], timeout: 1)
+        XCTAssertEqual(actionCount, 1)
+
+        coalescer.scheduleFollowBottom(after: 0) { completion in
+            actionCount += 1
+            retryCompletion = completion
+            retryActionStarted.fulfill()
+        }
+        XCTAssertEqual(actionCount, 1)
+
+        firstCompletion?()
+        await fulfillment(of: [retryActionStarted], timeout: 1)
+        XCTAssertEqual(actionCount, 2)
+        retryCompletion?()
+    }
+
+    @MainActor
+    func testFollowBottomDropsQueuedRetryAfterReachingBottom() async {
+        let coalescer = ScrollGeometryCoalescer()
+        coalescer.observe(ScrollBottomState(isAtBottom: false))
+        var firstCompletion: (@MainActor () -> Void)?
+        let firstActionStarted = expectation(description: "First follow-bottom action started")
+        let retryActionStarted = expectation(description: "Queued retry must not start")
+        retryActionStarted.isInverted = true
+
+        coalescer.scheduleFollowBottom(after: 0) { completion in
+            firstCompletion = completion
+            firstActionStarted.fulfill()
+        }
+        await fulfillment(of: [firstActionStarted], timeout: 1)
+        coalescer.scheduleFollowBottom(after: 0) { _ in
+            retryActionStarted.fulfill()
+        }
+
+        coalescer.observe(ScrollBottomState(isAtBottom: true))
+        firstCompletion?()
+        await fulfillment(of: [retryActionStarted], timeout: 0.1)
+    }
+
+    @MainActor
+    func testCancellingFollowBottomClearsQueuedRetry() async {
+        let coalescer = ScrollGeometryCoalescer()
+        coalescer.observe(ScrollBottomState(isAtBottom: false))
+        var firstCompletion: (@MainActor () -> Void)?
+        let firstActionStarted = expectation(description: "First follow-bottom action started")
+        let retryActionStarted = expectation(description: "Cancelled retry must not start")
+        retryActionStarted.isInverted = true
+
+        coalescer.scheduleFollowBottom(after: 0) { completion in
+            firstCompletion = completion
+            firstActionStarted.fulfill()
+        }
+        await fulfillment(of: [firstActionStarted], timeout: 1)
+        coalescer.scheduleFollowBottom(after: 0) { _ in
+            retryActionStarted.fulfill()
+        }
+
+        coalescer.cancelFollowBottom()
+        firstCompletion?()
+        await fulfillment(of: [retryActionStarted], timeout: 0.1)
+    }
+}
+
+final class PlanAccessorySnapshotTests: XCTestCase {
+    func testCurrentStepUsesActualInProgressIndex() {
+        let snapshot = makeSnapshot([
+            CodexPlanStep(step: "First", status: .completed),
+            CodexPlanStep(step: "Second", status: .pending),
+            CodexPlanStep(step: "Third", status: .inProgress),
+        ])
+
+        XCTAssertEqual(snapshot.currentStepNumber, 3)
+        XCTAssertEqual(snapshot.summary, "Third")
+    }
+
+    func testCurrentStepUsesFirstPendingIndexWithoutInProgressStep() {
+        let snapshot = makeSnapshot([
+            CodexPlanStep(step: "First", status: .completed),
+            CodexPlanStep(step: "Second", status: .pending),
+            CodexPlanStep(step: "Third", status: .completed),
+        ])
+
+        XCTAssertEqual(snapshot.currentStepNumber, 2)
+        XCTAssertEqual(snapshot.summary, "Second")
+    }
+
+    func testCompletedPlanUsesFinalStepNumber() {
+        let snapshot = makeSnapshot([
+            CodexPlanStep(step: "First", status: .completed),
+            CodexPlanStep(step: "Second", status: .completed),
+        ])
+
+        XCTAssertEqual(snapshot.currentStepNumber, 2)
+        XCTAssertEqual(snapshot.stepProgressText, "Step 2 / 2")
+    }
+
+    private func makeSnapshot(_ steps: [CodexPlanStep]) -> PlanAccessorySnapshot {
+        PlanAccessorySnapshot(
+            message: CodexMessage(
+                threadId: "plan-snapshot-test",
+                role: .system,
+                kind: .plan,
+                text: "",
+                planState: CodexPlanState(steps: steps)
             )
         )
     }

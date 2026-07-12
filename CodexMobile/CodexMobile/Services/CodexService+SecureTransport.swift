@@ -124,6 +124,19 @@ extension CodexService {
             throw CodexSecureTransportError.invalidHandshake("The secure device signature could not be verified.")
         }
 
+        let serverReplayEpoch = serverHello.bridgeReplayEpoch?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let serverReplayEpoch, !serverReplayEpoch.isEmpty,
+           serverReplayEpoch != lastAppliedBridgeReplayEpoch {
+            let hadPriorReplayState = lastAppliedBridgeReplayEpoch != nil
+                || lastAppliedBridgeOutboundSeq > 0
+            setBridgeOutboundReplayCursor(to: 0)
+            setBridgeReplayEpoch(to: serverReplayEpoch)
+            if hadPriorReplayState {
+                markReplayDiscontinuityForCanonicalRefresh()
+            }
+        }
+
         pendingHandshake = CodexPendingHandshake(
             mode: handshakeMode,
             transcriptBytes: transcriptBytes,
@@ -199,7 +212,8 @@ extension CodexService {
             SecureResumeState(
                 sessionId: sessionId,
                 keyEpoch: serverHello.keyEpoch,
-                lastAppliedBridgeOutboundSeq: lastAppliedBridgeOutboundSeq
+                lastAppliedBridgeOutboundSeq: lastAppliedBridgeOutboundSeq,
+                bridgeReplayEpoch: lastAppliedBridgeReplayEpoch
             )
         )
     }
@@ -265,12 +279,14 @@ extension CodexService {
         SecureStore.writeString(payload.macIdentityPublicKey, for: CodexSecureKeys.relayMacIdentityPublicKey)
         SecureStore.writeString(String(codexSecureProtocolVersion), for: CodexSecureKeys.relayProtocolVersion)
         SecureStore.writeString("0", for: CodexSecureKeys.relayLastAppliedBridgeOutboundSeq)
+        SecureStore.deleteValue(for: CodexSecureKeys.relayBridgeReplayEpoch)
         relaySessionId = payload.sessionId
         relayUrl = payload.relay
         relayMacDeviceId = payload.macDeviceId
         relayMacIdentityPublicKey = payload.macIdentityPublicKey
         relayProtocolVersion = codexSecureProtocolVersion
         lastAppliedBridgeOutboundSeq = 0
+        lastAppliedBridgeReplayEpoch = nil
         shouldForceQRBootstrapOnNextHandshake = true
         trustedReconnectFailureCount = 0
         secureConnectionState = trustedMacRegistry.records[payload.macDeviceId] == nil ? .handshaking : .trustedMac
@@ -370,7 +386,9 @@ extension CodexService {
         let shouldResetReplayCursor = previousSessionId == nil || previousSessionId != resolved.sessionId
         if shouldResetReplayCursor {
             SecureStore.writeString("0", for: CodexSecureKeys.relayLastAppliedBridgeOutboundSeq)
+            SecureStore.deleteValue(for: CodexSecureKeys.relayBridgeReplayEpoch)
             lastAppliedBridgeOutboundSeq = 0
+            lastAppliedBridgeReplayEpoch = nil
         }
         rememberResolvedTrustedSession(resolved, relayURL: relayURL)
     }
@@ -420,6 +438,43 @@ extension CodexService {
 }
 
 extension CodexService {
+    // Persists an explicit replay watermark, including the bridge-declared end
+    // of a discarded truncated backlog. This is internal because notification
+    // handling lives in a separate CodexService extension file.
+    func advanceBridgeOutboundReplayCursor(to bridgeOutboundSeq: Int) {
+        guard bridgeOutboundSeq > lastAppliedBridgeOutboundSeq else {
+            return
+        }
+        setBridgeOutboundReplayCursor(to: bridgeOutboundSeq)
+    }
+
+    // Sequence space is process-local on the bridge. An explicit reset marker
+    // may therefore move a stale phone cursor backwards before seq 1+ resumes.
+    func setBridgeOutboundReplayCursor(to bridgeOutboundSeq: Int) {
+        let normalizedSequence = max(0, bridgeOutboundSeq)
+        lastAppliedBridgeOutboundSeq = normalizedSequence
+        if var session = secureSession {
+            session.lastInboundBridgeOutboundSeq = normalizedSequence
+            secureSession = session
+        }
+        SecureStore.writeString(
+            String(normalizedSequence),
+            for: CodexSecureKeys.relayLastAppliedBridgeOutboundSeq
+        )
+    }
+
+    func setBridgeReplayEpoch(to replayEpoch: String?) {
+        let normalizedEpoch = replayEpoch?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let normalizedEpoch, !normalizedEpoch.isEmpty else {
+            lastAppliedBridgeReplayEpoch = nil
+            SecureStore.deleteValue(for: CodexSecureKeys.relayBridgeReplayEpoch)
+            return
+        }
+        lastAppliedBridgeReplayEpoch = normalizedEpoch
+        SecureStore.writeString(normalizedEpoch, for: CodexSecureKeys.relayBridgeReplayEpoch)
+    }
+
     func trustMac(
         deviceId: String,
         publicKey: String,
@@ -983,11 +1038,7 @@ private extension CodexService {
                 if bridgeOutboundSeq <= lastAppliedBridgeOutboundSeq {
                     return
                 }
-                lastAppliedBridgeOutboundSeq = bridgeOutboundSeq
-                SecureStore.writeString(
-                    String(bridgeOutboundSeq),
-                    for: CodexSecureKeys.relayLastAppliedBridgeOutboundSeq
-                )
+                advanceBridgeOutboundReplayCursor(to: bridgeOutboundSeq)
             }
 
             lastRawMessage = payload.payloadText
@@ -1412,7 +1463,10 @@ private extension CodexService {
     }
 
     func debugSecureLog(_ message: String) {
+        #if DEBUG
+        guard AppEnvironment.verboseDiagnosticsEnabled else { return }
         print("[CodexSecure] \(message)")
+        #endif
     }
 
     func shortSecureId(_ value: String) -> String {

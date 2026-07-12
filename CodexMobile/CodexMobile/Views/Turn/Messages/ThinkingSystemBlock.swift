@@ -110,31 +110,41 @@ private struct ThinkingDisclosureView: View {
         let hasDetail = !section.detail.isEmpty
 
         return VStack(alignment: .leading, spacing: 6) {
-            Button {
-                guard hasDetail else { return }
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                    if isExpanded {
-                        expandedSectionIDs.remove(section.id)
-                    } else {
-                        expandedSectionIDs.insert(section.id)
+            if hasDetail {
+                Button {
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                        if isExpanded {
+                            expandedSectionIDs.remove(section.id)
+                        } else {
+                            expandedSectionIDs.insert(section.id)
+                        }
                     }
-                }
-            } label: {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    RemodexIcon.image(systemName: "chevron.right")
-                        .font(AppFont.system(size: 10, weight: .semibold))
-                        .foregroundStyle(hasDetail ? .secondary : .tertiary)
-                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
-                        .frame(width: 10)
+                } label: {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        RemodexIcon.image(systemName: "chevron.right")
+                            .font(AppFont.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                            .frame(width: 10)
 
-                    Text(section.title)
-                        .font(AppFont.caption(weight: .semibold))
-                        .foregroundStyle(.secondary.opacity(0.95))
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        Text(section.title)
+                            .font(AppFont.caption(weight: .semibold))
+                            .foregroundStyle(.secondary.opacity(0.95))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .contentShape(Rectangle())
                 }
-                .contentShape(Rectangle())
+                .buttonStyle(.plain)
+            } else {
+                // Summary-only reasoning items have nothing to disclose. Render
+                // them as plain activity text, matching tool-call typography.
+                Text(section.title)
+                    .font(AppFont.body(weight: .regular))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .buttonStyle(.plain)
 
             if isExpanded, hasDetail {
                 detailText(section.detail)

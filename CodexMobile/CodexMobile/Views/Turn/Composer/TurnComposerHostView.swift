@@ -11,6 +11,7 @@ struct TurnComposerHostView: View {
 
     let codex: CodexService
     let thread: CodexThread
+    let usesThreadRuntimeSettings: Bool
     let activeTurnID: String?
     let isThreadRunning: Bool
     let isEmptyThread: Bool
@@ -46,6 +47,9 @@ struct TurnComposerHostView: View {
     // Pass-through for the New Chat draft surface; defaults to true so every
     // existing call site keeps its meta bar.
     var showsSecondaryBar: Bool = true
+    // Composer surfaces collapse to a capsule when the keyboard is closed;
+    // call sites may opt out for constrained hosts.
+    var allowsCollapsedComposer: Bool = true
 
     // ─── ENTRY POINT ─────────────────────────────────────────────
     var body: some View {
@@ -66,7 +70,7 @@ struct TurnComposerHostView: View {
                     isPlanModeArmed: viewModel.isPlanModeArmed
                 )
                     && !availableForkDestinations.isEmpty,
-                allowsGoalCommand: allowsGoalCommand
+                allowsGoalCommand: allowsGoalCommand && codex.supportsThreadGoals
             ),
             fileAutocompleteItems: viewModel.fileAutocompleteItems,
             isFileAutocompleteVisible: viewModel.isFileAutocompleteVisible,
@@ -106,15 +110,42 @@ struct TurnComposerHostView: View {
             voiceAudioLevels: voiceAudioLevels,
             voiceRecordingDuration: voiceRecordingDuration
         )
+        let runtimeThreadId = usesThreadRuntimeSettings ? thread.id : nil
         let runtimeState = TurnComposerRuntimeState.resolve(
             codex: codex,
+            threadId: runtimeThreadId,
             reasoningDisplayOptions: reasoningDisplayOptions
         )
-        let runtimeActions = TurnComposerRuntimeActions.resolve(codex: codex)
-        let selectedModelID = codex.visibleSelectedModelIDForComposer()
-        let isRuntimeSelectionLoading = codex.isRuntimeSelectionLoadingForComposer()
+        let runtimeActions = TurnComposerRuntimeActions.resolve(codex: codex, threadId: runtimeThreadId)
+        let selectedModelID = codex.visibleSelectedModelIDForComposer(threadId: runtimeThreadId)
+        let isRuntimeSelectionLoading = codex.isRuntimeSelectionLoadingForComposer(threadId: runtimeThreadId)
         let hasComposerWorkingDirectory = thread.gitWorkingDirectory != nil
             && !SidebarThreadGrouping.isRootlessChatThread(thread)
+        let gitState = TurnComposerGitState(
+            showsGitBranchSelector: showsGitControls,
+            isGitBranchSelectorEnabled: isGitBranchSelectorEnabled,
+            availableGitBranchTargets: viewModel.availableGitBranchTargets,
+            gitBranchesCheckedOutElsewhere: viewModel.gitBranchesCheckedOutElsewhere,
+            gitWorktreePathsByBranch: viewModel.gitWorktreePathsByBranch,
+            selectedGitBaseBranch: viewModel.selectedGitBaseBranch,
+            currentGitBranch: viewModel.currentGitBranch,
+            gitDefaultBranch: viewModel.gitDefaultBranch,
+            isLoadingGitBranchTargets: viewModel.isLoadingGitBranchTargets,
+            isSwitchingGitBranch: viewModel.isSwitchingGitBranch,
+            isCreatingGitWorktree: viewModel.isCreatingGitWorktree,
+            canHandOffToWorktree: isGitBranchSelectorEnabled
+                && !isWorktreeProject
+                && !viewModel.isCreatingGitWorktree
+        )
+        let gitActions = TurnComposerGitActions(
+            onSelectGitBranch: onSelectGitBranch,
+            onCreateGitBranch: onCreateGitBranch,
+            onSelectGitBaseBranch: { branch in
+                viewModel.selectGitBaseBranch(branch)
+            },
+            onRefreshGitBranches: onRefreshGitBranches,
+            onTapCreateWorktree: onOpenWorktreeHandoff
+        )
 
         TurnComposerView(
             input: $viewModel.input,
@@ -149,35 +180,16 @@ struct TurnComposerHostView: View {
             isLoadingRateLimits: codex.isLoadingRateLimits,
             rateLimitsErrorMessage: codex.rateLimitsErrorMessage,
             shouldAutoRefreshUsageStatus: codex.shouldAutoRefreshUsageStatus(threadId: thread.id),
-            showsGitBranchSelector: showsGitControls,
-            isGitBranchSelectorEnabled: isGitBranchSelectorEnabled,
-            availableGitBranchTargets: viewModel.availableGitBranchTargets,
-            gitBranchesCheckedOutElsewhere: viewModel.gitBranchesCheckedOutElsewhere,
-            gitWorktreePathsByBranch: viewModel.gitWorktreePathsByBranch,
-            selectedGitBaseBranch: viewModel.selectedGitBaseBranch,
-            currentGitBranch: viewModel.currentGitBranch,
-            gitDefaultBranch: viewModel.gitDefaultBranch,
-            isLoadingGitBranchTargets: viewModel.isLoadingGitBranchTargets,
-            isSwitchingGitBranch: viewModel.isSwitchingGitBranch,
-            isCreatingGitWorktree: viewModel.isCreatingGitWorktree,
-            onSelectGitBranch: onSelectGitBranch,
-            onCreateGitBranch: onCreateGitBranch,
-            onSelectGitBaseBranch: { branch in
-                viewModel.selectGitBaseBranch(branch)
-            },
-            onRefreshGitBranches: onRefreshGitBranches,
+            gitState: gitState,
+            gitActions: gitActions,
             onRefreshUsageStatus: {
                 await codex.refreshUsageStatus(threadId: thread.id)
             },
             onSelectAccessMode: codex.setSelectedAccessMode,
-            canHandOffToWorktree: isGitBranchSelectorEnabled
-                && !isWorktreeProject
-                && !viewModel.isCreatingGitWorktree,
             onTapAddImage: { viewModel.openPhotoLibraryPicker(codex: codex) },
             onTapTakePhoto: { viewModel.openCamera(codex: codex) },
             onTapVoice: onTapVoice,
             onCancelVoiceRecording: onCancelVoiceRecording,
-            onTapCreateWorktree: onOpenWorktreeHandoff,
             onSetPlanModeArmed: { isArmed in
                 viewModel.setPlanModeArmed(isArmed)
                 viewModel.saveLocalDraft(codex: codex, threadID: thread.id)
@@ -316,7 +328,8 @@ struct TurnComposerHostView: View {
                 viewModel.removeQueuedDraft(id: draftID, codex: codex, threadID: thread.id)
             },
             onSend: onSend,
-            showsSecondaryBar: showsSecondaryBar
+            showsSecondaryBar: showsSecondaryBar,
+            allowsCollapsedComposer: allowsCollapsedComposer
         )
     }
 }

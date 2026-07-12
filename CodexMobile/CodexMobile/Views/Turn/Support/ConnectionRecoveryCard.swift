@@ -118,7 +118,7 @@ struct ConnectionRecoveryCard: View {
     private var headerRow: some View {
         HStack(alignment: .center, spacing: 6) {
             Text(snapshot.title)
-                .font(AppFont.mono(.caption2))
+                .font(AppFont.caption2())
                 .foregroundStyle(.secondary)
 
             Circle()

@@ -8,6 +8,6 @@
     "test": "node --test ./*.test.js"
   },
   "dependencies": {
-    "ws": "^8.19.0"
+    "ws": "^8.21.0"
   }
 }
