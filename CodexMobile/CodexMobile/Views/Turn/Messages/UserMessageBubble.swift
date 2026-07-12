@@ -79,6 +79,14 @@ struct UserMessageBubble: View {
                 onDismiss: { previewImage = nil }
             )
         }
+        .modifier(UserBubbleSendAppearance(isEnabled: isFreshLocalSend))
+    }
+
+    // Only a just-sent optimistic row animates in. History rows arrive confirmed
+    // (or old enough), so thread opens and scroll-backs never replay the effect.
+    private var isFreshLocalSend: Bool {
+        message.deliveryState == .pending
+            && Date().timeIntervalSince(message.createdAt) < 3
     }
 
     private var selectedUserBubbleColor: UserBubbleColor {
@@ -170,6 +178,39 @@ struct UserMessageBubble: View {
                     .font(AppFont.body())
             }
         }
+    }
+}
+
+// iMessage-style send reveal: fade + slight rise + scale from the composer corner.
+// Render-only (opacity/scaleEffect/offset), so the row claims its full height on
+// insertion and the timeline's scroll anchoring and caches see zero layout churn.
+private struct UserBubbleSendAppearance: ViewModifier {
+    let isEnabled: Bool
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var hasRevealed = false
+
+    private var isConcealed: Bool {
+        isEnabled && !hasRevealed
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(isConcealed ? 0 : 1)
+            .scaleEffect(
+                isConcealed && !reduceMotion ? 0.9 : 1,
+                anchor: .bottomTrailing
+            )
+            .offset(y: isConcealed && !reduceMotion ? 10 : 0)
+            .onAppear {
+                guard isEnabled, !hasRevealed else { return }
+                let animation: Animation = reduceMotion
+                    ? .easeOut(duration: 0.2)
+                    : .spring(response: 0.34, dampingFraction: 0.82)
+                withAnimation(animation) {
+                    hasRevealed = true
+                }
+            }
     }
 }
 
