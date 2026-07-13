@@ -16,7 +16,7 @@ struct CodexSideConversationPresentation: Identifiable, Equatable, Sendable {
 
 extension CodexService {
     var hasOpenSideConversation: Bool {
-        !sideConversationThreadIDs.isEmpty || !pendingSideConversationCleanupThreadIDs.isEmpty
+        !sideConversationThreadIDs.isEmpty
     }
 
     // Active sheets and remote-cleanup tombstones share the same isolation contract.
@@ -27,7 +27,15 @@ extension CodexService {
     }
 
     func isSideConversationIsolated(_ threadID: String) -> Bool {
-        sideConversationIsolationThreadIDs.contains(threadID)
+        sideConversationThreadIDs.contains(threadID)
+            || pendingSideConversationCleanupThreadIDs.contains(threadID)
+            || closedSideConversationThreadIDs.contains(threadID)
+    }
+
+    func shouldDropRetiredSideConversationEvent(_ threadID: String) -> Bool {
+        !sideConversationThreadIDs.contains(threadID)
+            && (pendingSideConversationCleanupThreadIDs.contains(threadID)
+                || closedSideConversationThreadIDs.contains(threadID))
     }
 
     func sideConversationRuntimeState(for threadID: String) -> CodexSideConversationRuntimeState {
@@ -175,15 +183,15 @@ extension CodexService {
         finishSideConversationCleanup(threadID: normalizedThreadID)
     }
 
-    // Clears the final observable tombstone after the owning sheet has dismissed.
+    // Clears sheet-visible runtime state; the transport tombstone remains for buffered replay safety.
     func acknowledgeSideConversationDismissal(threadID: String) {
         sideConversationRuntimeStateByThreadID.removeValue(forKey: threadID)
     }
 
     // Keeps the in-memory transcript visible while a short transport recovery is in progress.
     func markSideConversationsForReconnect() {
-        // The previous socket is closed, so it cannot deliver more events for retired side IDs.
-        closedSideConversationThreadIDs.removeAll()
+        // Closed IDs remain isolated because the replacement transport may replay
+        // buffered notifications emitted before the previous socket was cancelled.
         for threadID in sideConversationThreadIDs
             where !pendingSideConversationCleanupThreadIDs.contains(threadID) {
             sideConversationRuntimeStateByThreadID[threadID] = .recovering
@@ -291,12 +299,13 @@ extension CodexService {
     }
 
     func invalidateAllSideConversations(message: String) {
+        // Pending cleanup IDs can still have buffered events even though they no
+        // longer own a visible sheet. Promote them to durable in-memory tombstones.
+        closedSideConversationThreadIDs.formUnion(pendingSideConversationCleanupThreadIDs)
         for threadID in sideConversationThreadIDs.sorted() {
             invalidateSideConversation(threadID: threadID, message: message)
         }
-        // This path is used only when the old runtime/transport is no longer recoverable.
         pendingSideConversationCleanupThreadIDs.removeAll()
-        closedSideConversationThreadIDs.removeAll()
     }
 }
 

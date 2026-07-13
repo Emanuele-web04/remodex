@@ -77,6 +77,7 @@ struct ContentView: View {
     @State private var suppressAutomaticThreadSelection = false
     @State private var sidebarPrewarmTask: Task<Void, Never>?
     @State private var presentedRootSheet: RootSheetRoute?
+    @State private var pendingSideConversationPresentation: CodexSideConversationPresentation?
     @State private var isWhatsNewPresentationReady = false
     @State private var sidebarGestureDebugSequence = 0
     @State private var activeSidebarGestureDebugID: Int?
@@ -1601,18 +1602,15 @@ struct ContentView: View {
 
     // Keeps the side fork in the root-owned modal slot while the parent remains selected underneath.
     private func presentSideConversation(_ presentation: CodexSideConversationPresentation) {
-        guard presentedRootSheet == nil else {
-            Task { @MainActor in
-                do {
-                    try await codex.closeSideConversation(threadID: presentation.thread.id)
-                    codex.acknowledgeSideConversationDismissal(threadID: presentation.thread.id)
-                } catch {
-                    codex.abandonSideConversationLocally(threadID: presentation.thread.id)
-                }
-            }
+        if presentedRootSheet == nil {
+            presentedRootSheet = .sideConversation(presentation)
             return
         }
-        presentedRootSheet = .sideConversation(presentation)
+
+        // A deferred root sheet may win the same render pass in which `thread/fork`
+        // completes. Keep the live ephemeral fork queued instead of silently closing it.
+        pendingSideConversationPresentation = presentation
+        syncRootSheetPresentationIfNeeded()
     }
 
     private var missingNotificationThreadAlertIsPresented: Binding<Bool> {
@@ -1641,7 +1639,15 @@ struct ContentView: View {
         // Let bridge recovery take over immediately without marking What's New as already seen.
         if case .whatsNew = presentedRootSheet,
            case .bridgeUpdate = desiredRoute {
-            presentedRootSheet = desiredRoute
+            presentRootSheet(desiredRoute)
+            return
+        }
+
+        // A user-requested side conversation outranks a delayed announcement. Keep
+        // What's New pending so it can be presented again after the side sheet closes.
+        if case .whatsNew = presentedRootSheet,
+           case .sideConversation = desiredRoute {
+            presentRootSheet(desiredRoute)
             return
         }
 
@@ -1649,7 +1655,7 @@ struct ContentView: View {
         if case .bridgeUpdate = presentedRootSheet,
            case .bridgeUpdate = desiredRoute,
            presentedRootSheet?.id != desiredRoute.id {
-            presentedRootSheet = desiredRoute
+            presentRootSheet(desiredRoute)
             return
         }
 
@@ -1657,7 +1663,15 @@ struct ContentView: View {
             return
         }
 
-        presentedRootSheet = desiredRoute
+        presentRootSheet(desiredRoute)
+    }
+
+    private func presentRootSheet(_ route: RootSheetRoute) {
+        presentedRootSheet = route
+        if case .sideConversation(let presentation) = route,
+           pendingSideConversationPresentation?.id == presentation.id {
+            pendingSideConversationPresentation = nil
+        }
     }
 
     private var desiredRootSheetRoute: RootSheetRoute? {
@@ -1667,6 +1681,10 @@ struct ContentView: View {
 
         if let prompt = codex.bridgeUpdatePrompt {
             return .bridgeUpdate(prompt)
+        }
+
+        if let pendingSideConversationPresentation {
+            return .sideConversation(pendingSideConversationPresentation)
         }
 
         if let whatsNewVersion = pendingWhatsNewVersion {
@@ -1718,6 +1736,7 @@ struct ContentView: View {
         [
             String(canPresentDeferredRootSheet),
             codex.bridgeUpdatePrompt?.id.uuidString ?? "nil",
+            pendingSideConversationPresentation?.id ?? "nil",
             pendingWhatsNewVersion ?? "nil",
             presentedRootSheet?.id ?? "nil",
         ].joined(separator: "|")

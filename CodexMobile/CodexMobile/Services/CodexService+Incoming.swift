@@ -177,7 +177,7 @@ extension CodexService {
     func handleNotification(method: String, params: JSONValue?) {
         let paramsObject = params?.objectValue
         if let threadID = extractThreadID(from: paramsObject),
-           closedSideConversationThreadIDs.contains(threadID) {
+           shouldDropRetiredSideConversationEvent(threadID) {
             return
         }
         let previousReplayScope = isApplyingReplayedBridgeEvent
@@ -749,9 +749,6 @@ extension CodexService {
                 lastRunStartTurnIDByThread.removeValue(forKey: threadId)
             }
             markThreadAsRunning(threadId)
-            if isSideConversationIsolated(threadId) {
-                threadsPendingCompletionHaptic.remove(threadId)
-            }
             if isDesktopMirroredTurn {
                 markDesktopMirroredRunning(for: threadId)
                 markMirroredRunningCatchupNeeded(for: threadId)

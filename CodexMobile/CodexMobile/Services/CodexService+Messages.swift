@@ -798,18 +798,26 @@ extension CodexService {
 
     // Marks thread as actively running while ensuring stale outcomes are cleared.
     func markThreadAsRunning(_ threadId: String) {
+        let shouldArmCompletionHaptic = !isSideConversationIsolated(threadId)
+        let hasExpectedHapticState = shouldArmCompletionHaptic
+            ? threadsPendingCompletionHaptic.contains(threadId)
+            : !threadsPendingCompletionHaptic.contains(threadId)
         // Streaming deltas re-assert running on every chunk; when nothing would
         // change, skip the busy-roots rebuild and timeline refresh entirely so
         // token streaming stays O(1) instead of O(threads) per delta.
         if runningThreadIDs.contains(threadId),
-           threadsPendingCompletionHaptic.contains(threadId),
+           hasExpectedHapticState,
            latestTurnTerminalStateByThread[threadId] == nil,
            !readyThreadIDs.contains(threadId),
            !failedThreadIDs.contains(threadId) {
             return
         }
         runningThreadIDs.insert(threadId)
-        threadsPendingCompletionHaptic.insert(threadId)
+        if shouldArmCompletionHaptic {
+            threadsPendingCompletionHaptic.insert(threadId)
+        } else {
+            threadsPendingCompletionHaptic.remove(threadId)
+        }
         latestTurnTerminalStateByThread.removeValue(forKey: threadId)
         clearOutcomeBadge(for: threadId)
         refreshBusyRepoRootsAndDependentTimelineStates()
@@ -5979,7 +5987,8 @@ extension CodexService {
     ) {
         // Always consume the pending marker so stopped/failed turns don't leak.
         let wasPending = threadsPendingCompletionHaptic.remove(threadId) != nil
-        guard state == .completed,
+        guard !isSideConversationIsolated(threadId),
+              state == .completed,
               previousState != .completed,
               isAppInForeground,
               wasPending else {

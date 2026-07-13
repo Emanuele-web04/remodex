@@ -165,6 +165,27 @@ final class CodexSideConversationTests: XCTestCase {
         XCTAssertEqual(service.messages(for: "side-thread").map(\.text), ["local-only question"])
     }
 
+    func testReconnectKeepsClosedSideTombstonesForBufferedReplay() {
+        let service = makeService()
+        service.closedSideConversationThreadIDs.insert("closed-side")
+
+        service.markSideConversationsForReconnect()
+
+        XCTAssertTrue(service.closedSideConversationThreadIDs.contains("closed-side"))
+        XCTAssertTrue(service.isSideConversationIsolated("closed-side"))
+    }
+
+    func testRuntimeInvalidationPromotesPendingCleanupToClosedTombstone() {
+        let service = makeService()
+        service.pendingSideConversationCleanupThreadIDs.insert("pending-side")
+
+        service.invalidateAllSideConversations(message: "Runtime changed")
+
+        XCTAssertFalse(service.pendingSideConversationCleanupThreadIDs.contains("pending-side"))
+        XCTAssertTrue(service.closedSideConversationThreadIDs.contains("pending-side"))
+        XCTAssertTrue(service.shouldDropRetiredSideConversationEvent("pending-side"))
+    }
+
     func testCloseFailureOnLiveConnectionRestoresActiveState() async {
         let service = makeService()
         service.isConnected = true
@@ -340,19 +361,36 @@ final class CodexSideConversationTests: XCTestCase {
         XCTAssertEqual(Set(service.messagesEligibleForPersistence.keys), ["source-thread"])
     }
 
-    func testAbandonedCleanupTombstoneKeepsLateEventsOutOfPersistence() {
+    func testAbandonedCleanupTombstoneDropsLateEventsWithoutBlockingNewSide() {
         let service = makeService()
         service.threads = [makeSourceThread(), CodexThread(id: "side-thread", ephemeral: true)]
         service.sideConversationThreadIDs.insert("side-thread")
 
         service.abandonSideConversationLocally(threadID: "side-thread")
-        service.messagesByThread["side-thread"] = [
-            CodexMessage(threadId: "side-thread", role: .assistant, text: "late side event"),
-        ]
+        service.handleNotification(
+            method: "item/agentMessage/delta",
+            params: .object([
+                "threadId": .string("side-thread"),
+                "turnId": .string("late-turn"),
+                "itemId": .string("late-item"),
+                "delta": .string("late side event"),
+            ])
+        )
 
-        XCTAssertTrue(service.hasOpenSideConversation)
+        XCTAssertFalse(service.hasOpenSideConversation)
         XCTAssertTrue(service.isSideConversationIsolated("side-thread"))
+        XCTAssertTrue(service.messages(for: "side-thread").isEmpty)
         XCTAssertNil(service.messagesEligibleForPersistence["side-thread"])
+    }
+
+    func testSideRunningStateNeverArmsCompletionHaptic() {
+        let service = makeService()
+        service.sideConversationThreadIDs.insert("side-thread")
+
+        service.markThreadAsRunning("side-thread")
+
+        XCTAssertTrue(service.runningThreadIDs.contains("side-thread"))
+        XCTAssertFalse(service.threadsPendingCompletionHaptic.contains("side-thread"))
     }
 
     func testSuccessfulCloseKeepsLateNotificationsIsolatedWithoutBlockingNewSide() async throws {

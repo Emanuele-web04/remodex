@@ -382,20 +382,8 @@ extension CodexService {
 }
 
 private extension CodexService {
-    // Side conversations retain their own running state, but must not arm app-wide
-    // completion feedback that belongs to regular foreground/background turns.
     func markAssistantThreadAsRunning(_ threadId: String) {
-        if isSideConversationIsolated(threadId),
-           runningThreadIDs.contains(threadId),
-           latestTurnTerminalStateByThread[threadId] == nil,
-           !readyThreadIDs.contains(threadId),
-           !failedThreadIDs.contains(threadId) {
-            return
-        }
         markThreadAsRunning(threadId)
-        if isSideConversationIsolated(threadId) {
-            threadsPendingCompletionHaptic.remove(threadId)
-        }
     }
 
     // Upserts Desktop-mirrored user prompts delivered as item lifecycle events
