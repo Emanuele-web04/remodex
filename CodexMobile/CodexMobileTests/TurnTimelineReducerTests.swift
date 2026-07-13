@@ -794,7 +794,7 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(group.orderedMessages.map(\.id), ["command-1", "reasoning"])
     }
 
-    func testCompletedTimelineKeepsReasoningTraceWithCommandGroup() {
+    func testCompletedTimelineMovesCommandTraceIntoPreviousMessages() {
         let now = Date()
         let messages = [
             makeMessage(
@@ -879,13 +879,11 @@ final class TurnTimelineReducerTests: XCTestCase {
             completedTurnIDs: ["turn-1"]
         )
 
-        XCTAssertEqual(items.map(\.id), ["user", "command-group:command-1", "final"])
-        guard case .commandGroup(let group) = items[1] else {
-            return XCTFail("Expected one completed command disclosure with its trace")
+        XCTAssertEqual(items.map(\.id), ["user", "previous-messages:final", "final"])
+        guard case .previousMessages(let group) = items[1] else {
+            return XCTFail("Expected completed commands and their trace inside previous messages")
         }
-        XCTAssertEqual(group.commandCount, 4)
-        XCTAssertEqual(group.traceMessages.map(\.id), ["reasoning"])
-        XCTAssertEqual(group.orderedMessages.map(\.id), [
+        XCTAssertEqual(group.messages.map(\.id), [
             "command-1",
             "command-2",
             "reasoning",
@@ -894,7 +892,7 @@ final class TurnTimelineReducerTests: XCTestCase {
         ])
     }
 
-    func testCompletedTimelineKeepsCommandTraceVisibleAcrossInlineFileChange() {
+    func testCompletedTimelineMovesCommandTraceIntoHistoryBesideVisibleFileChange() {
         let now = Date()
         let messages = [
             makeMessage(
@@ -956,23 +954,11 @@ final class TurnTimelineReducerTests: XCTestCase {
             completedTurnIDs: ["turn-1"]
         )
 
-        XCTAssertEqual(items.map(\.id), ["user", "command-group:command-1", "final"])
-        guard case .commandGroup(let commandGroup) = items[1] else {
-            return XCTFail("Expected the file change and trace to remain with the command disclosure")
+        XCTAssertEqual(items.map(\.id), ["user", "previous-messages:final", "file-change", "final"])
+        guard case .previousMessages(let previousMessages) = items[1] else {
+            return XCTFail("Expected the completed command and trace inside previous messages")
         }
-        XCTAssertEqual(commandGroup.messages.map(\.id), ["command-1"])
-        XCTAssertEqual(commandGroup.traceMessages.map(\.id), ["reasoning"])
-        XCTAssertEqual(commandGroup.collapsedDetailMessages.map(\.id), ["file-change", "reasoning"])
-        XCTAssertEqual(commandGroup.orderedMessages.map(\.id), [
-            "command-1",
-            "file-change",
-            "reasoning",
-        ])
-        let previousMessages = items.compactMap { item -> TurnTimelinePreviousMessagesGroup? in
-            guard case .previousMessages(let group) = item else { return nil }
-            return group
-        }
-        XCTAssertFalse(previousMessages.flatMap(\.messages).contains { $0.id == "reasoning" })
+        XCTAssertEqual(previousMessages.messages.map(\.id), ["command-1", "reasoning"])
     }
 
     func testTimelineProjectionKeepsTrailingFileChangeOutsideCommandGroupWithoutLaterTrace() {
@@ -1061,7 +1047,7 @@ final class TurnTimelineReducerTests: XCTestCase {
         ])
     }
 
-    func testCompletedTimelineStillSplitsCommandsAcrossHiddenAssistantCommentary() {
+    func testCompletedTimelineMovesAllCommandsAndCommentaryIntoPreviousMessages() {
         let now = Date()
         let messages = [
             makeMessage(
@@ -1144,19 +1130,22 @@ final class TurnTimelineReducerTests: XCTestCase {
             messages: projectedMessages,
             completedTurnIDs: ["turn-1"]
         )
-        let commandGroups = items.compactMap { item -> TurnTimelineCommandGroup? in
-            guard case .commandGroup(let group) = item else { return nil }
-            return group
-        }
         let previousMessages = items.compactMap { item -> TurnTimelinePreviousMessagesGroup? in
             guard case .previousMessages(let group) = item else { return nil }
             return group
         }
 
-        XCTAssertEqual(commandGroups.count, 2)
-        XCTAssertEqual(commandGroups[0].messages.map(\.id), ["command-1", "command-2"])
-        XCTAssertEqual(commandGroups[1].messages.map(\.id), ["command-3", "command-4"])
-        XCTAssertEqual(previousMessages.flatMap(\.messages).map(\.id), ["commentary"])
+        XCTAssertFalse(items.contains { item in
+            if case .commandGroup = item { return true }
+            return false
+        })
+        XCTAssertEqual(previousMessages.flatMap(\.messages).map(\.id), [
+            "command-1",
+            "command-2",
+            "commentary",
+            "command-3",
+            "command-4",
+        ])
     }
 
     func testCompletedTimelineFoldsReasoningAfterHiddenAssistantCommentaryIntoPreviousMessages() {
@@ -1353,7 +1342,7 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(items.map(\.id), ["running", "command-group:finished"])
     }
 
-    func testTimelineRenderProjectionKeepsFinishedCommandGroupOutsideCompletedTurnPreviousMessages() {
+    func testTimelineRenderProjectionMovesFinishedCommandGroupInsideCompletedTurnPreviousMessages() {
         let now = Date()
         let messages = [
             makeMessage(
@@ -1417,16 +1406,12 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(items.map(\.id), [
             "user",
             "previous-messages:final",
-            "command-group:command",
             "final",
         ])
-        guard case .previousMessages(let previousMessages) = items[1],
-              case .commandGroup(let commandGroup) = items[2] else {
-            return XCTFail("Expected reasoning/status and command tool calls in separate disclosures")
+        guard case .previousMessages(let previousMessages) = items[1] else {
+            return XCTFail("Expected reasoning, status, and command tool calls in one closed history")
         }
-        XCTAssertEqual(previousMessages.messages.map(\.id), ["status", "reasoning"])
-        XCTAssertEqual(commandGroup.messages.map(\.id), ["command"])
-        XCTAssertEqual(commandGroup.commandCount, 1)
+        XCTAssertEqual(previousMessages.messages.map(\.id), ["status", "reasoning", "command"])
     }
 
     func testTimelineRenderProjectionCollapsesCompletedTurnBeforeFinalAnswer() {

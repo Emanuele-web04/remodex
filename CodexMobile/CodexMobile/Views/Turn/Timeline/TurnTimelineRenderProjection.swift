@@ -680,7 +680,6 @@ enum TurnTimelineRenderProjection {
         var hiddenIndices: [Int] = []
         var groupIndices: [Int] = []
         var generatedImageArtifactIndices: [Int] = []
-        var hasOpenFinishedCommandGroup = false
 
         for index in messageIndices.drop(while: { $0 < lowerBound }) {
             guard index != finalIndex else {
@@ -693,14 +692,12 @@ enum TurnTimelineRenderProjection {
             }
 
             if isGeneratedImageArtifactOnly(candidate) {
-                hasOpenFinishedCommandGroup = false
                 hiddenIndices.append(index)
                 generatedImageArtifactIndices.append(index)
                 continue
             }
 
             if isReplayOfFinalAssistant(candidate, finalMessage: finalMessage) {
-                hasOpenFinishedCommandGroup = false
                 hiddenIndices.append(index)
                 if shouldPreserveReplayAsPreviousMessage(candidate, finalMessage: finalMessage) {
                     groupIndices.append(index)
@@ -709,26 +706,14 @@ enum TurnTimelineRenderProjection {
             }
 
             if isPriorityVisibleMessage(candidate, finalMessage: finalMessage) {
-                if isFinishedCommandToolCall(candidate) {
-                    hasOpenFinishedCommandGroup = true
-                } else if !(candidate.role == .system && candidate.kind == .fileChange) {
-                    // Inline file-change cards are command output artifacts, not a
-                    // boundary for a reasoning trace that follows the command run.
-                    hasOpenFinishedCommandGroup = false
-                }
                 continue
             }
 
-            // A reasoning summary following terminal commands belongs to that command
-            // trace. Keep it out of Previous Messages so the render pass can retain it
-            // directly below the command disclosure after the turn completes.
-            if hasOpenFinishedCommandGroup, isCommandGroupingTrace(candidate) {
-                continue
-            }
-
+            // Tool calls and their traces stay compact while a turn is live, then
+            // move into the same closed history as the older tool rows once the
+            // final answer completes the turn.
             hiddenIndices.append(index)
             groupIndices.append(index)
-            hasOpenFinishedCommandGroup = false
         }
 
         return PreviousMessageSelection(
@@ -746,11 +731,7 @@ enum TurnTimelineRenderProjection {
                 return true
             case .plan:
                 return message.shouldDisplayInlinePlanResult
-            case .commandExecution:
-                // Keep terminal command tool calls available to the dedicated
-                // command disclosure instead of folding them into reasoning/status.
-                return isFinishedCommandToolCall(message)
-            case .thinking, .toolActivity, .chat:
+            case .thinking, .toolActivity, .commandExecution, .chat:
                 return false
             }
         }
