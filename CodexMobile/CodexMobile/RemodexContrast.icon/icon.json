@@ -3,18 +3,50 @@
   "groups" : [
     {
       "blur-material" : null,
+      "hidden-specializations" : [
+        {
+          "appearance" : "dark",
+          "value" : true
+        }
+      ],
       "layers" : [
         {
-          "image-name-specializations" : [
-            {
-              "value" : "VectorLight.svg"
-            },
-            {
-              "appearance" : "dark",
-              "value" : "VectorDark.svg"
-            }
-          ],
-          "name" : "Remodex",
+          "image-name" : "VectorLight.svg",
+          "name" : "Remodex Light",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              0.26439794274210726,
+              -27.3359375
+            ]
+          }
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "specular" : true,
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.05
+      }
+    },
+    {
+      "blur-material" : null,
+      "hidden-specializations" : [
+        {
+          "value" : true
+        },
+        {
+          "appearance" : "dark",
+          "value" : false
+        }
+      ],
+      "layers" : [
+        {
+          "image-name" : "VectorDark.svg",
+          "name" : "Remodex Dark",
           "position" : {
             "scale" : 1,
             "translation-in-points" : [
