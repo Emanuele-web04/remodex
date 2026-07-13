@@ -2,6 +2,7 @@
   "fill" : "system-light",
   "groups" : [
     {
+      "blend-mode" : "normal",
       "blur-material" : null,
       "hidden-specializations" : [
         {
@@ -22,14 +23,15 @@
           }
         }
       ],
+      "lighting" : "individual",
       "shadow" : {
-        "kind" : "neutral",
+        "kind" : "layer-color",
         "opacity" : 0.5
       },
       "specular" : true,
       "translucency" : {
         "enabled" : true,
-        "value" : 0.05
+        "value" : 0.4
       }
     },
     {
