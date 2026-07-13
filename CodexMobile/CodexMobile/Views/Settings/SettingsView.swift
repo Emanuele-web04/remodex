@@ -466,8 +466,8 @@ private struct AppIconPreviewImage: View {
 }
 
 private enum AppIconChoice: String, CaseIterable, Identifiable {
-    case classic
     case contrast
+    case classic
 
     var id: String { rawValue }
 
@@ -476,7 +476,7 @@ private enum AppIconChoice: String, CaseIterable, Identifiable {
         case .classic:
             "Classic"
         case .contrast:
-            "Contrast"
+            "Remodex"
         }
     }
 
@@ -485,25 +485,25 @@ private enum AppIconChoice: String, CaseIterable, Identifiable {
         case .classic:
             "Remodex 2"
         case .contrast:
-            "Dark in light mode, white in dark mode"
+            "Adapts automatically to light and dark mode"
         }
     }
 
     var alternateIconName: String? {
         switch self {
         case .classic:
-            nil
+            "Remodex2"
         case .contrast:
-            "RemodexContrast"
+            nil
         }
     }
 
     static var current: AppIconChoice {
         switch UIApplication.shared.alternateIconName {
-        case AppIconChoice.contrast.alternateIconName:
-            .contrast
-        default:
+        case AppIconChoice.classic.alternateIconName:
             .classic
+        default:
+            .contrast
         }
     }
 }
