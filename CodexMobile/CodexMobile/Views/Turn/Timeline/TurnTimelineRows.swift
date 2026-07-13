@@ -433,7 +433,7 @@ private struct TurnTimelineCommandGroupView: View {
                 }
             } label: {
                 HStack(spacing: 8) {
-                    RemodexIcon.image(systemName: "terminal", size: 14, relativeTo: .body)
+                    RemodexIcon.image(systemName: "terminal", size: 17, relativeTo: .body)
                         .foregroundStyle(.secondary)
                     Text(title)
                         .font(AppFont.body(weight: .regular))
