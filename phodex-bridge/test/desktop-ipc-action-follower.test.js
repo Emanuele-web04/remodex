@@ -1855,6 +1855,97 @@ test("desktop IPC follower falls back locally when no Desktop client can handle 
   );
 });
 
+test("desktop IPC follower falls back locally when Desktop settings sync times out before turn delivery", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-follower-settings-timeout-");
+  const serverFrames = [];
+  const localForwards = [];
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      serverFrames.push(frame);
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "desktop",
+          result: { clientId: "remodex-test" },
+        });
+      }
+      // Model an inactive/stale Desktop owner: the router accepts the settings
+      // request, but no renderer answers it before the bridge timeout.
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    forwardToLocalCodex(rawMessage) {
+      localForwards.push(JSON.parse(rawMessage));
+    },
+    requestTimeoutMs: 100,
+  });
+  t.after(() => follower.stopAll());
+
+  follower.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-settings-timeout" },
+  }));
+  await waitFor(() => serverSocket);
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop",
+    version: 6,
+    params: {
+      conversationId: "thread-settings-timeout",
+      change: {
+        type: "snapshot",
+        conversationState: { turns: [], requests: [] },
+      },
+    },
+  });
+  await wait(25);
+
+  const handled = follower.observeInbound(JSON.stringify({
+    id: "phone-turn-start-settings-timeout",
+    method: "turn/start",
+    params: {
+      threadId: "thread-settings-timeout",
+      input: [{ type: "input_text", text: "continue despite stale Desktop owner" }],
+      model: "gpt-test",
+      effort: "low",
+    },
+  }));
+  assert.equal(handled, true);
+
+  await waitFor(() => localForwards.length === 1, 1_000);
+  assert.equal(localForwards[0].id, "phone-turn-start-settings-timeout");
+  assert.equal(localForwards[0].method, "turn/start");
+  assert.equal(
+    serverFrames.some((frame) => frame.method === "thread-follower-start-turn"),
+    false,
+    "the Desktop turn must not be sent after settings sync times out"
+  );
+  assert.equal(
+    outbound.some((message) => message.id === "phone-turn-start-settings-timeout"),
+    false,
+    "the local app-server owns the eventual response"
+  );
+});
+
 test("desktop IPC follower does not rerun ambiguous Desktop failures locally", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-follower-ambiguous-error-");
   const localForwards = [];

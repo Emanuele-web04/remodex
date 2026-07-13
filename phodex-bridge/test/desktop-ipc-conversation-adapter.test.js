@@ -86,6 +86,30 @@ test("conversation adapter strips injected context user items from hydrated turn
   assert.deepEqual(turn.items.map((item) => item.id), ["reply"]);
 });
 
+test("conversation adapter supplies receiverThreads required by Desktop collab rendering", () => {
+  const state = buildConversationStateFromThread({
+    id: "thread-collab-compatibility",
+    cwd: "/Users/me/proj",
+    turns: [{
+      id: "turn-collab-compatibility",
+      status: "completed",
+      items: [{
+        id: "collab-send-message",
+        type: "collabAgentToolCall",
+        tool: "send_message",
+        status: "completed",
+        receiverThreadIds: ["thread-child-a", "thread-child-b"],
+        agentsStates: {},
+      }],
+    }],
+  });
+
+  assert.deepEqual(
+    state.turns[0].items[0].receiverThreads,
+    [{ threadId: "thread-child-a" }, { threadId: "thread-child-b" }]
+  );
+});
+
 test("conversation adapter evicts pre-existing contextual items on merge", () => {
   const conversations = new Map();
   const owned = new Set(["thread-context-merge"]);

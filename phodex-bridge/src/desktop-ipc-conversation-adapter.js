@@ -610,6 +610,7 @@ function buildConversationTurn(turn, {
   // Drop it here, position-independently, so no Desktop snapshot path leaks it
   // as a user bubble regardless of where the app-server placed it in the turn.
   builtTurn.items = builtTurn.items
+    .map(normalizeDesktopItemCompatibility)
     .map(sanitizeUserMessageItem)
     .filter(Boolean);
   // Hydrated turns from thread/read carry the prompt as an item with empty
@@ -756,6 +757,34 @@ function sanitizeUserMessageItem(item) {
   return {
     ...cloneJSON(item),
     content: sanitizedContent,
+  };
+}
+
+// Codex CLI 0.144.1 can omit receiverThreads from persisted collab tool calls,
+// while the matching Desktop renderer reads that collection without a fallback.
+// Keep the richer snapshots unchanged and synthesize lightweight references from
+// receiverThreadIds for older/CLI-owned rollouts so opening them cannot crash.
+function normalizeDesktopItemCompatibility(item) {
+  if (!item || typeof item !== "object" || normalizeToken(item.type) !== "collabagenttoolcall") {
+    return item;
+  }
+
+  const receiverThreads = Array.isArray(item.receiverThreads)
+    ? item.receiverThreads
+    : [];
+  const receiverThreadIds = Array.isArray(item.receiverThreadIds)
+    ? item.receiverThreadIds.map(readString).filter(Boolean)
+    : receiverThreads.map((entry) => readString(entry?.threadId)).filter(Boolean);
+  if (Array.isArray(item.receiverThreads) && Array.isArray(item.receiverThreadIds)) {
+    return item;
+  }
+
+  return {
+    ...item,
+    receiverThreadIds,
+    receiverThreads: Array.isArray(item.receiverThreads)
+      ? receiverThreads
+      : receiverThreadIds.map((threadId) => ({ threadId })),
   };
 }
 
@@ -936,8 +965,10 @@ function upsertItem(turn, item) {
   // user items too; no Codex UI renders it, so it must not reach the stream.
   // Also evict any copy that slipped into the state before this filter existed.
   const index = turn.items.findIndex((candidate) => readString(candidate?.id) === itemId);
-  const sanitizedItem = sanitizeUserMessageItem(item);
-  const existingItem = index >= 0 ? sanitizeUserMessageItem(turn.items[index]) : null;
+  const sanitizedItem = sanitizeUserMessageItem(normalizeDesktopItemCompatibility(item));
+  const existingItem = index >= 0
+    ? sanitizeUserMessageItem(normalizeDesktopItemCompatibility(turn.items[index]))
+    : null;
   if (!sanitizedItem) {
     if (index >= 0) {
       turn.items.splice(index, 1);

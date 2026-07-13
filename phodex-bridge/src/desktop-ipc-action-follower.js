@@ -1544,7 +1544,14 @@ function createDesktopIpcActionFollower({
       .then(() => resolveFollowerRequestParams(route))
       .then(async (resolvedParams) => {
         if (route.method === "thread-follower-start-turn") {
-          await syncDesktopOwnerRuntimeSettings(route.threadId, resolvedParams.turnStartParams);
+          try {
+            await syncDesktopOwnerRuntimeSettings(route.threadId, resolvedParams.turnStartParams);
+          } catch (error) {
+            // The actual turn has not reached Desktop yet. Even if the settings
+            // request timed out after being applied, continuing through the local
+            // app-server is safe because there is no Desktop turn to duplicate.
+            throw markDeliveryFailureError(error);
+          }
         }
         return {
           resolvedParams,
