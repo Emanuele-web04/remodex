@@ -9,12 +9,15 @@ import UIKit
 
 private enum RootSheetRoute: Identifiable, Equatable {
     case bridgeUpdate(CodexBridgeUpdatePrompt)
+    case sideConversation(CodexSideConversationPresentation)
     case whatsNew(version: String)
 
     var id: String {
         switch self {
         case .bridgeUpdate(let prompt):
             return "bridge-update-\(prompt.id.uuidString)"
+        case .sideConversation(let presentation):
+            return "side-conversation-\(presentation.id)"
         case .whatsNew(let version):
             return "whats-new-\(version)"
         }
@@ -170,6 +173,11 @@ struct ContentView: View {
             }
             .onChange(of: codex.activeThreadId) { _, activeThreadId in
                 debugSidebarLog("activeThreadId changed to=\(activeThreadId ?? "nil")")
+                if case .sideConversation(let presentation) = presentedRootSheet,
+                   activeThreadId == presentation.thread.id {
+                    // The modal owns this displayed thread; keep primary navigation on its parent.
+                    return
+                }
                 guard let activeThreadId,
                       let matchingThread = codex.threads.first(where: { $0.id == activeThreadId }),
                       selectedThread?.id != matchingThread.id else {
@@ -271,6 +279,9 @@ struct ContentView: View {
                 switch route {
                 case .bridgeUpdate(let prompt):
                     bridgeUpdateSheet(prompt: prompt)
+                case .sideConversation(let presentation):
+                    SideConversationSheet(presentation: presentation)
+                        .environment(codex)
                 case .whatsNew(let version):
                     whatsNewSheet(version: version)
                 }
@@ -746,7 +757,8 @@ struct ContentView: View {
                 },
                 onOpenTerminal: { workingDirectory in
                     openTerminal(preferredWorkingDirectory: workingDirectory)
-                }
+                },
+                onOpenSideConversation: presentSideConversation
             )
             .id(thread.id)
             .adaptiveNavigationBar()
@@ -813,7 +825,8 @@ struct ContentView: View {
                 },
                 onOpenTerminal: { workingDirectory in
                     openTerminal(preferredWorkingDirectory: workingDirectory)
-                }
+                },
+                onOpenSideConversation: presentSideConversation
             )
                 .id(thread.id)
                 .environment(\.reconnectAction, {
@@ -1586,6 +1599,22 @@ struct ContentView: View {
         )
     }
 
+    // Keeps the side fork in the root-owned modal slot while the parent remains selected underneath.
+    private func presentSideConversation(_ presentation: CodexSideConversationPresentation) {
+        guard presentedRootSheet == nil else {
+            Task { @MainActor in
+                do {
+                    try await codex.closeSideConversation(threadID: presentation.thread.id)
+                    codex.acknowledgeSideConversationDismissal(threadID: presentation.thread.id)
+                } catch {
+                    codex.abandonSideConversationLocally(threadID: presentation.thread.id)
+                }
+            }
+            return
+        }
+        presentedRootSheet = .sideConversation(presentation)
+    }
+
     private var missingNotificationThreadAlertIsPresented: Binding<Bool> {
         Binding(
             get: { codex.missingNotificationThreadPrompt != nil },
@@ -1727,6 +1756,19 @@ struct ContentView: View {
         switch route {
         case .bridgeUpdate:
             dismissBridgeUpdatePrompt()
+        case .sideConversation(let presentation):
+            guard codex.sideConversationThreadIDs.contains(presentation.thread.id) else {
+                codex.acknowledgeSideConversationDismissal(threadID: presentation.thread.id)
+                break
+            }
+            Task { @MainActor in
+                do {
+                    try await codex.closeSideConversation(threadID: presentation.thread.id)
+                    codex.acknowledgeSideConversationDismissal(threadID: presentation.thread.id)
+                } catch {
+                    codex.abandonSideConversationLocally(threadID: presentation.thread.id)
+                }
+            }
         case .whatsNew(let version):
             dismissWhatsNewSheet(version: version)
         }

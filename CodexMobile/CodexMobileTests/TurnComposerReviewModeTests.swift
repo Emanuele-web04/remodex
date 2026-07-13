@@ -147,7 +147,7 @@ final class TurnComposerReviewModeTests: XCTestCase {
                     allowsForkCommand: true
                 )
             ).map(\.commandToken),
-            ["/review", "/compact", "/feedback", "/fork", "/status", "/subagents"]
+            ["/review", "/compact", "/feedback", "/fork", "/goal", "/side", "/status", "/subagents"]
         )
     }
 
@@ -157,7 +157,7 @@ final class TurnComposerReviewModeTests: XCTestCase {
                 supportsThreadFork: true,
                 allowsForkCommand: false
             ).map(\.commandToken),
-            ["/review", "/compact", "/feedback", "/status", "/subagents"]
+            ["/review", "/compact", "/feedback", "/goal", "/side", "/status", "/subagents"]
         )
     }
 
@@ -170,6 +170,17 @@ final class TurnComposerReviewModeTests: XCTestCase {
             viewModel.slashCommandPanelState,
             .forkDestinations([.newWorktree, .local])
         )
+    }
+
+    func testSelectingSideClearsTokenWithoutOpeningForkDestinations() {
+        let viewModel = makeViewModel()
+        viewModel.input = "/side"
+        viewModel.slashCommandPanelState = .commands(query: "side")
+
+        viewModel.onSelectSlashCommand(.side)
+
+        XCTAssertEqual(viewModel.input, "")
+        XCTAssertEqual(viewModel.slashCommandPanelState, .hidden)
     }
 
     func testSelectingForkDestinationClearsSlashTokenAndClosesPanel() {

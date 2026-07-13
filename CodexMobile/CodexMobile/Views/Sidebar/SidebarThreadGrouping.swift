@@ -77,7 +77,8 @@ enum SidebarThreadGrouping {
         calendar _: Calendar = .current
     ) -> [SidebarThreadGroup] {
         var groups: [SidebarThreadGroup] = []
-        let scopedThreads = threadsForScope(scope, from: threads, projectlessRootPaths: projectlessRootPaths)
+        let userFacingThreads = threads.filter { !$0.ephemeral }
+        let scopedThreads = threadsForScope(scope, from: userFacingThreads, projectlessRootPaths: projectlessRootPaths)
         let pinnedThreads = collectPinnedThreads(from: scopedThreads, pinnedRootThreadIDs: pinnedThreadIDs)
         let pinnedThreadIDSet = Set(pinnedThreads.map(\.id))
 

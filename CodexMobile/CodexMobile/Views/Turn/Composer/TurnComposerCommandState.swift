@@ -12,10 +12,11 @@ enum TurnComposerSlashCommand: String, Identifiable, Codable, Equatable, Sendabl
     case feedback
     case fork
     case goal
+    case side
     case status
     case subagents
 
-    static let allCommands: [TurnComposerSlashCommand] = [.codeReview, .compact, .feedback, .fork, .goal, .status, .subagents]
+    static let allCommands: [TurnComposerSlashCommand] = [.codeReview, .compact, .feedback, .fork, .goal, .side, .status, .subagents]
 
     var id: String { rawValue }
 
@@ -31,6 +32,8 @@ enum TurnComposerSlashCommand: String, Identifiable, Codable, Equatable, Sendabl
             return "Fork"
         case .goal:
             return "Goal"
+        case .side:
+            return "Side"
         case .status:
             return "Status"
         case .subagents:
@@ -50,6 +53,8 @@ enum TurnComposerSlashCommand: String, Identifiable, Codable, Equatable, Sendabl
             return "Fork this thread into local or a new worktree"
         case .goal:
             return "Set a persistent goal Codex keeps working toward"
+        case .side:
+            return "Ask a quick question without interrupting the main task"
         case .status:
             return "Show context usage and rate limits"
         case .subagents:
@@ -69,6 +74,8 @@ enum TurnComposerSlashCommand: String, Identifiable, Codable, Equatable, Sendabl
             return "remodex.fork"
         case .goal:
             return "target"
+        case .side:
+            return "bubble.left.and.bubble.right"
         case .status:
             return "speedometer"
         case .subagents:
@@ -88,6 +95,8 @@ enum TurnComposerSlashCommand: String, Identifiable, Codable, Equatable, Sendabl
             return "/fork"
         case .goal:
             return "/goal"
+        case .side:
+            return "/side"
         case .status:
             return "/status"
         case .subagents:
@@ -100,13 +109,14 @@ enum TurnComposerSlashCommand: String, Identifiable, Codable, Equatable, Sendabl
         switch self {
         case .subagents:
             return "Run subagents for different tasks. Delegate distinct work in parallel when helpful and then synthesize the results."
-        case .codeReview, .compact, .feedback, .fork, .goal, .status:
+        case .codeReview, .compact, .feedback, .fork, .goal, .side, .status:
             return nil
         }
     }
 
     private var searchBlob: String {
-        "\(title) \(subtitle) \(commandToken)".lowercased()
+        let aliases = self == .side ? "/btw btw" : ""
+        return "\(title) \(subtitle) \(commandToken) \(aliases)".lowercased()
     }
 
     static func filtered(
@@ -124,15 +134,24 @@ enum TurnComposerSlashCommand: String, Identifiable, Codable, Equatable, Sendabl
     static func availableCommands(
         supportsThreadFork: Bool,
         allowsForkCommand: Bool,
-        allowsGoalCommand: Bool = true
+        allowsGoalCommand: Bool = true,
+        allowsSideCommand: Bool = true,
+        isSideConversation: Bool = false
     ) -> [TurnComposerSlashCommand] {
-        allCommands.filter { command in
+        if isSideConversation {
+            // Remodex currently implements Status from Codex's restricted side-command set.
+            return [.status]
+        }
+
+        return allCommands.filter { command in
             switch command {
             case .fork:
                 return supportsThreadFork && allowsForkCommand
             case .goal:
                 // Goals need a materialized thread, so new-chat drafts hide the command.
                 return allowsGoalCommand
+            case .side:
+                return supportsThreadFork && allowsSideCommand
             case .codeReview, .compact, .feedback, .status, .subagents:
                 return true
             }
@@ -242,6 +261,25 @@ struct TurnTrailingSlashCommandToken: Equatable {
 }
 
 enum TurnComposerCommandLogic {
+    // One shared gate keeps command-picker visibility and manually typed command routing aligned.
+    static func hasContentConflictingWithExclusiveCommand(
+        mentionedFileCount: Int = 0,
+        mentionedSkillCount: Int = 0,
+        mentionedPluginCount: Int = 0,
+        attachmentCount: Int = 0,
+        hasReviewSelection: Bool = false,
+        hasSubagentsSelection: Bool = false,
+        isPlanModeArmed: Bool = false
+    ) -> Bool {
+        mentionedFileCount > 0
+            || mentionedSkillCount > 0
+            || mentionedPluginCount > 0
+            || attachmentCount > 0
+            || hasReviewSelection
+            || hasSubagentsSelection
+            || isPlanModeArmed
+    }
+
     // Keeps review-mode conflict checks pure so they can be reused without touching observed state.
     static func hasContentConflictingWithReview(
         trimmedInput: String,
@@ -314,6 +352,7 @@ enum TurnComposerCommandLogic {
         in text: String,
         mentionedFileCount: Int = 0,
         mentionedSkillCount: Int = 0,
+        mentionedPluginCount: Int = 0,
         attachmentCount: Int = 0,
         hasReviewSelection: Bool = false,
         hasSubagentsSelection: Bool = false,
@@ -328,11 +367,57 @@ enum TurnComposerCommandLogic {
         let trimmedRemainingDraft = remainingDraft.trimmingCharacters(in: .whitespacesAndNewlines)
 
         return trimmedRemainingDraft.isEmpty
-            && mentionedFileCount == 0
-            && mentionedSkillCount == 0
-            && attachmentCount == 0
-            && !hasReviewSelection
-            && !hasSubagentsSelection
-            && !isPlanModeArmed
+            && !hasContentConflictingWithExclusiveCommand(
+                mentionedFileCount: mentionedFileCount,
+                mentionedSkillCount: mentionedSkillCount,
+                mentionedPluginCount: mentionedPluginCount,
+                attachmentCount: attachmentCount,
+                hasReviewSelection: hasReviewSelection,
+                hasSubagentsSelection: hasSubagentsSelection,
+                isPlanModeArmed: isPlanModeArmed
+            )
+    }
+
+    // `/side` and its picker entry also require an otherwise empty composer.
+    static func canOfferSideSlashCommand(
+        in text: String,
+        mentionedFileCount: Int = 0,
+        mentionedSkillCount: Int = 0,
+        mentionedPluginCount: Int = 0,
+        attachmentCount: Int = 0,
+        hasReviewSelection: Bool = false,
+        hasSubagentsSelection: Bool = false,
+        isPlanModeArmed: Bool = false
+    ) -> Bool {
+        canOfferForkSlashCommand(
+            in: text,
+            mentionedFileCount: mentionedFileCount,
+            mentionedSkillCount: mentionedSkillCount,
+            mentionedPluginCount: mentionedPluginCount,
+            attachmentCount: attachmentCount,
+            hasReviewSelection: hasReviewSelection,
+            hasSubagentsSelection: hasSubagentsSelection,
+            isPlanModeArmed: isPlanModeArmed
+        )
+    }
+
+    static func canExecuteInlineSideCommand(
+        mentionedFileCount: Int = 0,
+        mentionedSkillCount: Int = 0,
+        mentionedPluginCount: Int = 0,
+        attachmentCount: Int = 0,
+        hasReviewSelection: Bool = false,
+        hasSubagentsSelection: Bool = false,
+        isPlanModeArmed: Bool = false
+    ) -> Bool {
+        !hasContentConflictingWithExclusiveCommand(
+            mentionedFileCount: mentionedFileCount,
+            mentionedSkillCount: mentionedSkillCount,
+            mentionedPluginCount: mentionedPluginCount,
+            attachmentCount: attachmentCount,
+            hasReviewSelection: hasReviewSelection,
+            hasSubagentsSelection: hasSubagentsSelection,
+            isPlanModeArmed: isPlanModeArmed
+        )
     }
 }

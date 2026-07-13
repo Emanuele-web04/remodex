@@ -668,6 +668,44 @@ extension CodexService {
         }
     }
 
+    // Drops an in-memory `/side` fork without archiving it or recording a durable deletion.
+    func discardEphemeralThreadLocally(_ threadId: String) {
+        var ephemeralTurnIDs = Set(
+            threadIdByTurnID.compactMap { turnID, mappedThreadID in
+                mappedThreadID == threadId ? turnID : nil
+            }
+        )
+        ephemeralTurnIDs.formUnion((messagesByThread[threadId] ?? []).compactMap(\.turnId))
+        if let activeTurnID = activeTurnID(for: threadId) {
+            ephemeralTurnIDs.insert(activeTurnID)
+        }
+        for turnID in ephemeralTurnIDs {
+            terminalStateByTurnID.removeValue(forKey: turnID)
+        }
+        stoppedTurnIDsByThread.removeValue(forKey: threadId)
+        projectedTerminalStateByThreadID.removeValue(forKey: threadId)
+
+        let ephemeralChangeSetIDs = Set(
+            aiChangeSetsByID.values.lazy.filter { $0.threadId == threadId }.map(\.id)
+        )
+        for changeSetID in ephemeralChangeSetIDs {
+            aiChangeSetsByID.removeValue(forKey: changeSetID)
+        }
+        aiChangeSetIDByTurnKey = aiChangeSetIDByTurnKey.filter { $0.key.threadId != threadId }
+        aiChangeSetIDByAssistantMessageID = aiChangeSetIDByAssistantMessageID.filter {
+            !ephemeralChangeSetIDs.contains($0.value)
+        }
+
+        composerDraftsByThreadID.removeValue(forKey: threadId)
+        composerDraftMergeRevisionByThreadID.removeValue(forKey: threadId)
+        composerDraftPendingAttachmentIDsByThreadID.removeValue(forKey: threadId)
+        queuedTurnDraftsByThread.removeValue(forKey: threadId)
+        queuePauseStateByThread.removeValue(forKey: threadId)
+        removeThreadLocally(threadId, persistAsDeleted: false, persistMessages: false)
+        persistTurnTerminalStates()
+        persistAIChangeSetsAfterEphemeralCleanup()
+    }
+
     func clearHydrationCaches() {
         hydratedThreadIDs.removeAll()
         loadingThreadIDs.removeAll()

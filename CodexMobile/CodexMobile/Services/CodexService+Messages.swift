@@ -837,6 +837,9 @@ extension CodexService {
         clearRunningThreadWatch(threadId)
         let wasAlreadyReady = readyThreadIDs.contains(threadId)
         clearOutcomeBadge(for: threadId)
+        guard !isSideConversationIsolated(threadId) else {
+            return
+        }
         guard activeThreadId != threadId else {
             return
         }
@@ -851,6 +854,9 @@ extension CodexService {
     func markFailedIfUnread(threadId: String) {
         clearRunningThreadWatch(threadId)
         clearOutcomeBadge(for: threadId)
+        guard !isSideConversationIsolated(threadId) else {
+            return
+        }
         guard activeThreadId != threadId else {
             return
         }
@@ -902,17 +908,31 @@ extension CodexService {
     // Sets the active thread and lazily hydrates old messages from server history.
     @discardableResult
     func prepareThreadForDisplay(threadId: String) async -> Bool {
-        activeThreadId = threadId
+        let isSideConversation = sideConversationThreadIDs.contains(threadId)
+        if !isSideConversation {
+            activeThreadId = threadId
+        }
         markThreadAsViewed(threadId)
         // Opening a thread mid-mirror-batch must render immediately: settle any
         // open catch-up burst so the initial updateCurrentOutput below is not
         // deferred to the batch flush (finish is idempotent when no burst is open).
         finishTimelineCatchUpBurst(threadId: threadId)
-        updateCurrentOutput(for: threadId)
+        if !isSideConversation {
+            updateCurrentOutput(for: threadId)
+        }
         var didRefreshRunningState = false
         var shouldRequestImmediateSync = true
 
         guard isConnected else {
+            return true
+        }
+
+        // A side fork is already loaded and subscribed by `thread/fork`. Reading its
+        // inherited turns would expose the parent transcript that `/side` intentionally hides.
+        if isSideConversation {
+            hydratedThreadIDs.insert(threadId)
+            initialTurnsLoadedByThreadID.insert(threadId)
+            refreshThreadTimelineState(for: threadId)
             return true
         }
 
@@ -5250,7 +5270,7 @@ extension CodexService {
             try? await Task.sleep(nanoseconds: 250_000_000)
             guard !Task.isCancelled, let self else { return }
 
-            let snapshot = self.messagesByThread
+            let snapshot = self.messagesEligibleForPersistence
             let macDeviceId = self.currentMacScopedPersistenceDeviceId
             self.messagePersistenceDebounceTask = nil
 
@@ -5266,11 +5286,12 @@ extension CodexService {
             return
         }
 
-        let persistableStates = terminalStateByTurnID.filter { turnId, _ in
+        let persistableStates = terminalStatesEligibleForPersistence
+        let runtimeStatesWithoutProjectedIDs = terminalStateByTurnID.filter { turnId, _ in
             !CodexSyntheticIdentifiers.isProjectedDesktopTurnID(turnId)
         }
-        if persistableStates.count != terminalStateByTurnID.count {
-            terminalStateByTurnID = persistableStates
+        if runtimeStatesWithoutProjectedIDs.count != terminalStateByTurnID.count {
+            terminalStateByTurnID = runtimeStatesWithoutProjectedIDs
         }
 
         guard !persistableStates.isEmpty else {

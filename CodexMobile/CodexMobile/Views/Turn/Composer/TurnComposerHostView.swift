@@ -34,6 +34,9 @@ struct TurnComposerHostView: View {
     let onOpenWorktreeHandoff: () -> Void
     let onOpenFeedbackMail: () -> Void
     let onShowStatus: () -> Void
+    var allowsSideCommand: Bool = true
+    var isSideConversation: Bool = false
+    var onStartSideConversation: () -> Void = {}
     // Opens the thread goal sheet; receives any remaining composer draft as an objective prefill.
     var allowsGoalCommand: Bool = true
     var onShowGoal: (String?) -> Void = { _ in }
@@ -68,13 +71,25 @@ struct TurnComposerHostView: View {
                     in: viewModel.input,
                     mentionedFileCount: viewModel.composerMentionedFiles.count,
                     mentionedSkillCount: viewModel.composerMentionedSkills.count,
+                    mentionedPluginCount: viewModel.composerMentionedPlugins.count,
                     attachmentCount: viewModel.composerAttachments.count,
                     hasReviewSelection: viewModel.composerReviewSelection != nil,
                     hasSubagentsSelection: viewModel.isSubagentsSelectionArmed,
                     isPlanModeArmed: viewModel.isPlanModeArmed
                 )
                     && !availableForkDestinations.isEmpty,
-                allowsGoalCommand: allowsGoalCommand && codex.supportsThreadGoals
+                allowsGoalCommand: allowsGoalCommand && codex.supportsThreadGoals,
+                allowsSideCommand: allowsSideCommand && TurnComposerCommandLogic.canOfferSideSlashCommand(
+                    in: viewModel.input,
+                    mentionedFileCount: viewModel.composerMentionedFiles.count,
+                    mentionedSkillCount: viewModel.composerMentionedSkills.count,
+                    mentionedPluginCount: viewModel.composerMentionedPlugins.count,
+                    attachmentCount: viewModel.composerAttachments.count,
+                    hasReviewSelection: viewModel.composerReviewSelection != nil,
+                    hasSubagentsSelection: viewModel.isSubagentsSelectionArmed,
+                    isPlanModeArmed: viewModel.isPlanModeArmed
+                ),
+                isSideConversation: isSideConversation
             ),
             fileAutocompleteItems: viewModel.fileAutocompleteItems,
             isFileAutocompleteVisible: viewModel.isFileAutocompleteVisible,
@@ -278,6 +293,9 @@ struct TurnComposerHostView: View {
                     // must not become an objective. Inline `/goal <text>` (send path) is
                     // the explicit way to prefill.
                     onShowGoal(nil)
+                case .side:
+                    viewModel.onSelectSlashCommand(command)
+                    onStartSideConversation()
                 case .status:
                     viewModel.onSelectSlashCommand(command)
                     onShowStatus()

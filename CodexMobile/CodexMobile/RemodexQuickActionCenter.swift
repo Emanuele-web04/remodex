@@ -48,7 +48,7 @@ enum RemodexQuickActionCenter {
 
     private static func shortcutItems(for threads: [CodexThread]) -> [UIApplicationShortcutItem] {
         let recentThreads = threads
-            .filter { $0.syncState == .live }
+            .filter { $0.syncState == .live && !$0.ephemeral }
             .prefix(2)
 
         return [newChatShortcutItem()] + recentThreads.map(threadShortcutItem)

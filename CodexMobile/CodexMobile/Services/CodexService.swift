@@ -274,6 +274,14 @@ enum CodexConnectionPhase: Equatable, Sendable {
     case connected
 }
 
+// Tracks the connection-scoped lifecycle of an in-memory `/side` fork.
+enum CodexSideConversationRuntimeState: Equatable, Hashable, Sendable {
+    case active
+    case recovering
+    case closing
+    case unavailable(message: String)
+}
+
 enum CodexPendingThreadComposerAction: Equatable, Sendable {
     case codeReview(target: CodexPendingCodeReviewTarget)
 }
@@ -507,6 +515,14 @@ final class CodexService {
     var supportedBridgeVoiceTranscriptionFormats: Set<String> = ["wav"]
     // Runtime compatibility flag for native `thread/fork` conversation branching.
     var supportsThreadFork = true
+    // Client-owned ephemeral forks currently presented as native `/side` conversations.
+    @ObservationIgnored var sideConversationThreadIDs: Set<String> = []
+    // Remote identities retained until an interrupt-safe unsubscribe succeeds.
+    @ObservationIgnored var pendingSideConversationCleanupThreadIDs: Set<String> = []
+    // Closed identities remain isolated until the current transport ends so queued late events are harmless.
+    @ObservationIgnored var closedSideConversationThreadIDs: Set<String> = []
+    // Observable state lets the root-owned sheet react to reconnect and runtime expiry.
+    var sideConversationRuntimeStateByThreadID: [String: CodexSideConversationRuntimeState] = [:]
     // Runtime compatibility flag for `thread/turns/list` and `excludeTurns`.
     var supportsTurnPagination = true
     // Runtime compatibility flag for the `thread/goal/*` API (false after method-not-found).

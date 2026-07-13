@@ -700,6 +700,44 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertFalse(service.protectedRunningFallbackThreadIDs.contains(threadID))
     }
 
+    func testSideAssistantEventsKeepRuntimeStateThreadScoped() {
+        let service = makeService()
+        let parentThreadID = "parent-\(UUID().uuidString)"
+        let parentTurnID = "parent-turn-\(UUID().uuidString)"
+        let sideThreadID = "side-\(UUID().uuidString)"
+        let sideTurnID = "side-turn-\(UUID().uuidString)"
+        service.activeThreadId = parentThreadID
+        service.activeTurnId = parentTurnID
+        service.threads = [CodexThread(id: sideThreadID, ephemeral: true)]
+        service.sideConversationThreadIDs.insert(sideThreadID)
+
+        sendTurnStarted(service: service, threadID: sideThreadID, turnID: sideTurnID)
+        service.handleNotification(
+            method: "item/agentMessage/delta",
+            params: .object([
+                "threadId": .string(sideThreadID),
+                "turnId": .string(sideTurnID),
+                "itemId": .string("side-agent"),
+                "delta": .string("Side response"),
+            ])
+        )
+
+        XCTAssertEqual(service.activeThreadId, parentThreadID)
+        XCTAssertEqual(service.activeTurnId, parentTurnID)
+        XCTAssertEqual(service.activeTurnID(for: sideThreadID), sideTurnID)
+        XCTAssertTrue(service.runningThreadIDs.contains(sideThreadID))
+        XCTAssertFalse(service.threadsPendingCompletionHaptic.contains(sideThreadID))
+
+        sendTurnCompletedSuccess(service: service, threadID: sideThreadID, turnID: sideTurnID)
+
+        XCTAssertEqual(service.activeThreadId, parentThreadID)
+        XCTAssertEqual(service.activeTurnId, parentTurnID)
+        XCTAssertNil(service.activeTurnID(for: sideThreadID))
+        XCTAssertFalse(service.readyThreadIDs.contains(sideThreadID))
+        XCTAssertFalse(service.failedThreadIDs.contains(sideThreadID))
+        XCTAssertFalse(service.threadsPendingCompletionHaptic.contains(sideThreadID))
+    }
+
     func testDesktopMirrorActivityHeartbeatRestoresRunningAfterStaleClear() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"

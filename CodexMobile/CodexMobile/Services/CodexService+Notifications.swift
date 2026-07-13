@@ -224,7 +224,7 @@ extension CodexService {
 
     // Schedules a local alert only when a run finishes while the app is away from the foreground.
     func notifyRunCompletionIfNeeded(threadId: String, turnId: String?, result: CodexRunCompletionResult) {
-        guard !isAppInForeground else {
+        guard !isSideConversationIsolated(threadId), !isAppInForeground else {
             return
         }
 
@@ -245,7 +245,7 @@ extension CodexService {
         requestID: JSONValue,
         questions: [CodexStructuredUserInputQuestion]
     ) {
-        guard !isAppInForeground else {
+        guard !isSideConversationIsolated(threadId), !isAppInForeground else {
             return
         }
 
