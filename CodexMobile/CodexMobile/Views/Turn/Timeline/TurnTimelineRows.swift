@@ -425,10 +425,6 @@ private struct TurnTimelineCommandGroupView: View {
         return parts.joined(separator: " · ")
     }
 
-    private var summaryColor: Color {
-        group.hasUnsuccessfulCommands ? .red : .secondary
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Button {
@@ -438,10 +434,10 @@ private struct TurnTimelineCommandGroupView: View {
             } label: {
                 HStack(spacing: 8) {
                     RemodexIcon.image(systemName: "terminal", size: 14, relativeTo: .body)
-                        .foregroundStyle(summaryColor)
+                        .foregroundStyle(.secondary)
                     Text(title)
                         .font(AppFont.body(weight: .regular))
-                        .foregroundStyle(summaryColor)
+                        .foregroundStyle(.secondary)
                     RemodexIcon.image(systemName: "chevron.right", size: 13, relativeTo: .body)
                         .foregroundStyle(.secondary)
                         .rotationEffect(.degrees(isExpanded ? 90 : 0))
