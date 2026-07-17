@@ -26,6 +26,11 @@ struct CodexRecentActivityLine {
     let timestamp: Date
 }
 
+struct CodexAutoApprovalRetryToken: Sendable {
+    let event: JSONValue
+    let expiresAt: Date
+}
+
 struct CodexRunningThreadWatch: Equatable, Sendable {
     let threadId: String
     let expiresAt: Date
@@ -34,6 +39,7 @@ struct CodexRunningThreadWatch: Equatable, Sendable {
 struct CodexThreadResumeRequestSignature: Equatable, Sendable {
     let projectPath: String?
     let modelIdentifier: String?
+    let accessConfiguration: RuntimeAccessConfiguration
 }
 
 struct CodexThreadHistoryPaginationState: Codable, Equatable, Sendable {
@@ -446,6 +452,8 @@ final class CodexService {
     @ObservationIgnored var projectedTerminalStateByThreadID: [String: [String: CodexTurnTerminalState]] = [:]
     // Ordered pending runtime approvals keyed by request id so concurrent prompts do not overwrite each other.
     var pendingApprovals: [CodexApprovalRequest] = []
+    @ObservationIgnored var autoApprovalRetryReviewIDsInFlight: Set<String> = []
+    @ObservationIgnored var autoApprovalRetryTokensByReviewKey: [String: CodexAutoApprovalRetryToken] = [:]
     var lastRawMessage: String?
     var lastErrorMessage: String?
     var keepMacAwakeWhileBridgeRuns = false

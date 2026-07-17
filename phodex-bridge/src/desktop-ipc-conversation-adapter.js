@@ -350,6 +350,30 @@ function applyAppServerMessageToConversationState({
       conversation.updatedAt = now();
       return { threadId, changed: true };
     }
+    case "item/autoApprovalReview/started":
+    case "item/autoApprovalReview/completed": {
+      const threadId = readThreadIdFromParams(message.params);
+      if (!threadId || !shouldOwnThread(threadId)) {
+        return null;
+      }
+      const item = automaticApprovalReviewItemFromParams(message.params);
+      if (!item) {
+        return { threadId, changed: false };
+      }
+      const conversation = ensureConversationInMap(conversations, threadId, { hostId, now });
+      const turn = ensureTurn(conversation, resolveTurnIdForParams({
+        conversation,
+        params: message.params,
+        fallbackTurnIdsByThreadId,
+        now,
+      }), { now });
+      if (turn) {
+        upsertItem(turn, item);
+        turn.firstTurnWorkItemStartedAtMs = turn.firstTurnWorkItemStartedAtMs || now();
+      }
+      conversation.updatedAt = now();
+      return { threadId, changed: true };
+    }
     case "item/agentMessage/delta":
     case "item/plan/delta":
     case "item/reasoning/summaryTextDelta":
@@ -1156,6 +1180,28 @@ function readTurnIdFromTurn(turn) {
   return readString(turn?.id)
     || readString(turn?.turnId)
     || readString(turn?.turn_id);
+}
+
+function automaticApprovalReviewItemFromParams(params) {
+  const reviewId = readString(params?.reviewId);
+  const review = params?.review && typeof params.review === "object" ? params.review : null;
+  const status = readString(review?.status);
+  if (!reviewId || !status || !params?.action) {
+    return null;
+  }
+  return {
+    id: `automatic-approval-review:${reviewId}`,
+    type: "automaticApprovalReview",
+    reviewId,
+    targetItemId: readString(params?.targetItemId) || null,
+    status,
+    startedAtMs: params?.startedAtMs ?? null,
+    completedAtMs: params?.completedAtMs ?? null,
+    decisionSource: readString(params?.decisionSource) || null,
+    review: cloneJSON(review),
+    action: cloneJSON(params.action),
+    remodexGuardianRetrySupported: false,
+  };
 }
 
 function timestampSecondsToMs(value) {

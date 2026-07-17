@@ -301,6 +301,32 @@ extension CodexService {
                         timeZoneIdentifier: timeZoneIdentifier
                     )
 
+                case "automaticapprovalreview":
+                    // Only Desktop-mirrored threads persist guardian reviews as
+                    // items (the local app-server keeps them notification-only),
+                    // so history backfill reuses the live notification decoder.
+                    guard let turnID, !turnID.isEmpty else { continue }
+                    var reviewParams = itemObject
+                    reviewParams["threadId"] = .string(threadId)
+                    reviewParams["turnId"] = .string(turnID)
+                    guard let review = decodeAutoApprovalReview(from: reviewParams) else { continue }
+                    appendHistoryMessage(
+                        to: &result,
+                        role: .system,
+                        kind: .autoApprovalReview,
+                        text: review.actionSummary,
+                        threadId: threadId,
+                        turnId: turnID,
+                        // Match the live-notification row id so item-aware
+                        // reconciliation merges instead of duplicating rows.
+                        itemId: "auto-approval-review:\(review.reviewId)",
+                        createdAt: review.startedAtMs > 0
+                            ? Date(timeIntervalSince1970: Double(review.startedAtMs) / 1_000)
+                            : timestamp,
+                        timeZoneIdentifier: timeZoneIdentifier,
+                        autoApprovalReview: review
+                    )
+
                 case "contextcompaction":
                     appendHistoryMessage(
                         to: &result,
@@ -2057,6 +2083,16 @@ extension CodexService {
         if let structuredUserInputRequest = serverMessage.structuredUserInputRequest {
             value.structuredUserInputRequest = structuredUserInputRequest
         }
+        if var serverReview = serverMessage.autoApprovalReview {
+            if let localReview = localMessage.autoApprovalReview {
+                serverReview.retryApproved = localReview.retryApproved
+                if localReview.retryApproved || localReview.retryUnavailableReason != nil {
+                    serverReview.retryUnavailableReason = localReview.retryUnavailableReason
+                }
+            }
+            value.autoApprovalReview = serverReview
+            value.text = serverReview.actionSummary
+        }
         if value.attachments.isEmpty && !serverMessage.attachments.isEmpty {
             value.attachments = serverMessage.attachments
         }
@@ -3120,12 +3156,14 @@ extension CodexService {
         attachments: [CodexImageAttachment] = [],
         planState: CodexPlanState? = nil,
         planPresentation: CodexPlanPresentation? = nil,
-        subagentAction: CodexSubagentAction? = nil
+        subagentAction: CodexSubagentAction? = nil,
+        autoApprovalReview: CodexAutoApprovalReview? = nil
     ) {
         guard !text.isEmpty
             || !attachments.isEmpty
             || planState != nil
-            || subagentAction != nil else {
+            || subagentAction != nil
+            || autoApprovalReview != nil else {
             return
         }
 
@@ -3154,7 +3192,8 @@ extension CodexService {
                 proposedPlan: role == .assistant && text.utf8.count <= Self.historyLargeTextByteLimit
                     ? CodexProposedPlanParser.parse(from: text)
                     : nil,
-                subagentAction: subagentAction
+                subagentAction: subagentAction,
+                autoApprovalReview: autoApprovalReview
             )
         )
     }

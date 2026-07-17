@@ -100,6 +100,8 @@ extension CodexService {
     // Clears all volatile approval prompts on disconnect or server switch.
     func clearPendingApprovals() {
         pendingApprovals.removeAll()
+        autoApprovalRetryReviewIDsInFlight.removeAll()
+        autoApprovalRetryTokensByReviewKey.removeAll()
     }
 
     func listThreads(limit: Int? = nil) async throws {
@@ -169,6 +171,7 @@ extension CodexService {
             return model?.supportsServiceTier(requestedTier) == false ? nil : requestedTier.rawValue
         }()
         var includesServiceTier = explicitServiceTier != nil
+        let accessConfiguration = runtimeAccessConfiguration()
 
         while true {
             let params = CodexThreadStartProjectBinding.makeThreadStartParams(
@@ -178,7 +181,16 @@ extension CodexService {
             )
 
             do {
-                let response = try await sendRequestWithSandboxFallback(method: "thread/start", baseParams: params)
+                let response = try await sendRequestWithSandboxFallback(
+                    method: "thread/start",
+                    baseParams: params,
+                    accessConfiguration: accessConfiguration
+                )
+                try validateAppliedAccessConfiguration(
+                    in: response,
+                    expected: accessConfiguration,
+                    context: "thread/start"
+                )
 
                 guard let result = response.result,
                       let resultObject = result.objectValue,
@@ -1271,7 +1283,8 @@ extension CodexService {
         threadId: String,
         force: Bool = false,
         preferredProjectPath: String? = nil,
-        modelIdentifierOverride: String? = nil
+        modelIdentifierOverride: String? = nil,
+        accessConfigurationOverride: RuntimeAccessConfiguration? = nil
     ) async throws -> CodexThread? {
         guard !threadId.isEmpty else {
             return nil
@@ -1286,7 +1299,8 @@ extension CodexService {
         let requestedSignature = CodexThreadResumeRequestSignature(
             projectPath: CodexThreadStartProjectBinding.normalizedProjectPath(preferredProjectPath)
                 ?? thread(for: threadId)?.gitWorkingDirectory,
-            modelIdentifier: modelIdentifierOverride ?? runtimeModelIdentifierForTurn(threadId: threadId)
+            modelIdentifier: modelIdentifierOverride ?? runtimeModelIdentifierForTurn(threadId: threadId),
+            accessConfiguration: accessConfigurationOverride ?? runtimeAccessConfiguration()
         )
         let refreshGeneration = currentPerThreadRefreshGeneration(for: threadId)
         if let existingTask = threadResumeTaskByThreadID[threadId] {
@@ -1299,7 +1313,8 @@ extension CodexService {
                 threadId: threadId,
                 force: force,
                 preferredProjectPath: preferredProjectPath,
-                modelIdentifierOverride: modelIdentifierOverride
+                modelIdentifierOverride: modelIdentifierOverride,
+                accessConfigurationOverride: accessConfigurationOverride
             )
         }
 
@@ -1329,7 +1344,11 @@ extension CodexService {
             var didRequestExcludedTurns = params["excludeTurns"] != nil
             let response: RPCMessage
             do {
-                response = try await sendRequestWithSandboxFallback(method: "thread/resume", baseParams: params)
+                response = try await sendRequestWithSandboxFallback(
+                    method: "thread/resume",
+                    baseParams: params,
+                    accessConfiguration: requestedSignature.accessConfiguration
+                )
             } catch {
                 guard didRequestExcludedTurns, consumeUnsupportedTurnPagination(error) else {
                     throw error
@@ -1337,8 +1356,17 @@ extension CodexService {
 
                 params.removeValue(forKey: "excludeTurns")
                 didRequestExcludedTurns = false
-                response = try await sendRequestWithSandboxFallback(method: "thread/resume", baseParams: params)
+                response = try await sendRequestWithSandboxFallback(
+                    method: "thread/resume",
+                    baseParams: params,
+                    accessConfiguration: requestedSignature.accessConfiguration
+                )
             }
+            try validateAppliedAccessConfiguration(
+                in: response,
+                expected: requestedSignature.accessConfiguration,
+                context: "thread/resume"
+            )
             guard !Task.isCancelled,
                   isPerThreadRefreshCurrent(for: threadId, generation: refreshGeneration) else {
                 throw CancellationError()
@@ -1626,6 +1654,7 @@ extension CodexService {
         var effectiveCollaborationMode = supportsTurnCollaborationMode ? collaborationMode : nil
         var didDowngradePlanModeForRuntime = false
         var includesServiceTier = runtimeServiceTierForTurn(threadId: threadId) != nil
+        let accessConfiguration = runtimeAccessConfiguration()
 
         if collaborationMode != nil, effectiveCollaborationMode == nil {
             debugRuntimeLog(
@@ -1653,7 +1682,8 @@ extension CodexService {
                 }
                 let response = try await sendRequestWithSandboxFallback(
                     method: "turn/start",
-                    baseParams: requestParams
+                    baseParams: requestParams,
+                    accessConfiguration: accessConfiguration
                 )
                 let resolvedTurnID = handleSuccessfulTurnStartResponse(
                     response,

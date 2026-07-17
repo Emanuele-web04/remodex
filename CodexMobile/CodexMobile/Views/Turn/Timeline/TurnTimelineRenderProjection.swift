@@ -727,7 +727,7 @@ enum TurnTimelineRenderProjection {
     private static func isPriorityVisibleMessage(_ message: CodexMessage, finalMessage: CodexMessage? = nil) -> Bool {
         if message.role == .system {
             switch message.kind {
-            case .fileChange, .subagentAction, .userInputPrompt:
+            case .fileChange, .subagentAction, .userInputPrompt, .autoApprovalReview:
                 return true
             case .plan:
                 return message.shouldDisplayInlinePlanResult
@@ -969,7 +969,7 @@ enum TurnTimelineRenderProjection {
         switch message.kind {
         case .toolActivity, .commandExecution:
             return true
-        case .thinking, .chat, .plan, .userInputPrompt, .fileChange, .subagentAction:
+        case .thinking, .chat, .plan, .userInputPrompt, .autoApprovalReview, .fileChange, .subagentAction:
             return false
         }
     }

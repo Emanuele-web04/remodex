@@ -38,7 +38,59 @@ private enum RuntimeSelectionDefaults {
     }
 }
 
+private enum RuntimeSandboxParameter {
+    case sandbox
+    case sandboxPolicy
+
+    var name: String {
+        switch self {
+        case .sandbox:
+            return "sandbox"
+        case .sandboxPolicy:
+            return "sandboxPolicy"
+        }
+    }
+
+    func applying(
+        configuration: RuntimeAccessConfiguration,
+        to baseParams: RPCObject
+    ) -> RPCObject {
+        var params = baseParams
+        switch self {
+        case .sandbox:
+            params[name] = .string(configuration.legacySandbox)
+        case .sandboxPolicy:
+            params[name] = configuration.sandboxPolicy
+        }
+        return params
+    }
+}
+
+private enum RuntimeRequestContract {
+    static let approvalOverrideMethods: Set<String> = [
+        "thread/start",
+        "thread/resume",
+        "thread/fork",
+        "turn/start",
+    ]
+
+    static func sandboxParameters(for method: String) -> [RuntimeSandboxParameter]? {
+        switch method {
+        case "thread/start", "thread/resume", "thread/fork":
+            return [.sandbox, .sandboxPolicy]
+        case "turn/start":
+            return [.sandboxPolicy, .sandbox]
+        default:
+            return nil
+        }
+    }
+}
+
 extension CodexService {
+    func runtimeAccessConfiguration() -> RuntimeAccessConfiguration {
+        RuntimeAccessConfiguration(mode: selectedAccessMode)
+    }
+
     // Resolves the effective per-chat override record after normalizing the thread id.
     func threadRuntimeOverride(for threadId: String?) -> CodexThreadRuntimeOverride? {
         guard let normalizedThreadID = normalizedInterruptIdentifier(threadId) else {
@@ -47,30 +99,64 @@ extension CodexService {
         return threadRuntimeOverridesByThreadID[normalizedThreadID]
     }
 
-    // Sends one request while trying approvalPolicy enum variants for cross-version compatibility.
+    // Sends one request while trying approval policy and reviewer variants for cross-version compatibility.
     func sendRequestWithApprovalPolicyFallback(
         method: String,
         baseParams: RPCObject,
-        context: String
+        context: String,
+        accessConfiguration: RuntimeAccessConfiguration? = nil
     ) async throws -> RPCMessage {
-        let policies = selectedAccessMode.approvalPolicyCandidates
+        let accessConfiguration = accessConfiguration ?? RuntimeAccessConfiguration(mode: selectedAccessMode)
+        let policies = accessConfiguration.approvalPolicyCandidates
+        let supportsReviewerOverride = RuntimeRequestContract.approvalOverrideMethods.contains(method)
+        let reviewers = supportsReviewerOverride
+            ? accessConfiguration.approvalsReviewerCandidates
+            : [nil]
         var lastError: Error?
 
-        for (index, policy) in policies.enumerated() {
-            var params = baseParams
-            params["approvalPolicy"] = .string(policy)
-
-            do {
-                return try await sendRequest(method: method, params: .object(params))
-            } catch {
-                lastError = error
-                let hasMorePolicies = index < (policies.count - 1)
-                if hasMorePolicies, shouldRetryWithApprovalPolicyFallback(error) {
-                    debugRuntimeLog("\(method) \(context) fallback approvalPolicy=\(policy)")
-                    continue
+        for (reviewerIndex, reviewer) in reviewers.enumerated() {
+            for (policyIndex, policy) in policies.enumerated() {
+                var params = baseParams
+                params["approvalPolicy"] = .string(policy)
+                if let reviewer {
+                    params["approvalsReviewer"] = .string(reviewer)
                 }
-                throw error
+
+                do {
+                    return try await sendRequest(method: method, params: .object(params))
+                } catch {
+                    lastError = error
+                    let hasMorePolicies = policyIndex < (policies.count - 1)
+                    // Reviewer rejections must advance the reviewer loop directly;
+                    // retrying other policy candidates with a known-bad reviewer
+                    // only burns transport round trips.
+                    if hasMorePolicies,
+                       shouldRetryWithApprovalPolicyFallback(error),
+                       !shouldRetryWithApprovalsReviewerFallback(error) {
+                        debugRuntimeLog("\(method) \(context) fallback approvalPolicy=\(policy)")
+                        continue
+                    }
+                    break
+                }
             }
+
+            let hasMoreReviewers = reviewerIndex < (reviewers.count - 1)
+            if hasMoreReviewers, let lastError, shouldRetryWithApprovalsReviewerFallback(lastError) {
+                debugRuntimeLog(
+                    "\(method) \(context) fallback approvalsReviewer=\(reviewer ?? "omitted")"
+                )
+                continue
+            }
+            break
+        }
+
+        if supportsReviewerOverride,
+           accessConfiguration.mode == .autoReview,
+           let lastError,
+           shouldRetryWithApprovalsReviewerFallback(lastError) {
+            throw CodexServiceError.invalidInput(
+                "Approve for me requires a newer Codex version. Update Codex on your Mac and retry."
+            )
         }
 
         throw lastError ?? CodexServiceError.invalidResponse("\(method) failed with unknown approvalPolicy error")
@@ -409,17 +495,7 @@ extension CodexService {
     }
 
     func runtimeSandboxPolicyObject(for accessMode: CodexAccessMode) -> JSONValue {
-        switch accessMode {
-        case .onRequest:
-            return .object([
-                "type": .string("workspaceWrite"),
-                "networkAccess": .bool(true),
-            ])
-        case .fullAccess:
-            return .object([
-                "type": .string("dangerFullAccess"),
-            ])
-        }
+        RuntimeAccessConfiguration(mode: accessMode).sandboxPolicy
     }
 
     func shouldFallbackFromSandboxPolicy(_ error: Error) -> Bool {
@@ -437,8 +513,14 @@ extension CodexService {
             return false
         }
 
-        return loweredMessage.contains("invalid params")
-            || loweredMessage.contains("invalid param")
+        let identifiesSandbox = loweredMessage.contains("sandboxpolicy")
+            || loweredMessage.contains("sandbox_policy")
+            || loweredMessage.contains("sandbox")
+        guard identifiesSandbox else {
+            return false
+        }
+
+        return loweredMessage.contains("invalid")
             || loweredMessage.contains("unknown field")
             || loweredMessage.contains("unexpected field")
             || loweredMessage.contains("unrecognized field")
@@ -446,46 +528,107 @@ extension CodexService {
             || loweredMessage.contains("unsupported")
     }
 
-    func sendRequestWithSandboxFallback(method: String, baseParams: RPCObject) async throws -> RPCMessage {
-        var firstAttemptParams = baseParams
-        firstAttemptParams["sandboxPolicy"] = runtimeSandboxPolicyObject(for: selectedAccessMode)
-
-        do {
-            debugRuntimeLog("\(method) using sandboxPolicy")
-            return try await sendRequestWithApprovalPolicyFallback(
-                method: method,
-                baseParams: firstAttemptParams,
-                context: "sandboxPolicy"
+    func sendRequestWithSandboxFallback(
+        method: String,
+        baseParams: RPCObject,
+        accessConfiguration: RuntimeAccessConfiguration? = nil
+    ) async throws -> RPCMessage {
+        guard let sandboxParameters = RuntimeRequestContract.sandboxParameters(for: method) else {
+            throw CodexServiceError.invalidInput(
+                "\(method) does not support runtime sandbox overrides."
             )
-        } catch {
-            guard shouldFallbackFromSandboxPolicy(error) else {
-                throw error
+        }
+
+        let accessConfiguration = accessConfiguration ?? RuntimeAccessConfiguration(mode: selectedAccessMode)
+        var lastError: Error?
+        for (index, sandboxParameter) in sandboxParameters.enumerated() {
+            let params = sandboxParameter.applying(
+                configuration: accessConfiguration,
+                to: baseParams
+            )
+            do {
+                debugRuntimeLog("\(method) using \(sandboxParameter.name)")
+                return try await sendRequestWithApprovalPolicyFallback(
+                    method: method,
+                    baseParams: params,
+                    context: sandboxParameter.name,
+                    accessConfiguration: accessConfiguration
+                )
+            } catch {
+                lastError = error
+                let hasFallback = index < sandboxParameters.count - 1
+                guard hasFallback, shouldFallbackFromSandboxPolicy(error) else {
+                    throw error
+                }
+                debugRuntimeLog("\(method) fallback from \(sandboxParameter.name)")
             }
         }
 
-        var secondAttemptParams = baseParams
-        secondAttemptParams["sandbox"] = .string(selectedAccessMode.sandboxLegacyValue)
-
-        do {
-            debugRuntimeLog("\(method) fallback using sandbox")
-            return try await sendRequestWithApprovalPolicyFallback(
-                method: method,
-                baseParams: secondAttemptParams,
-                context: "sandbox"
-            )
-        } catch {
-            guard shouldFallbackFromSandboxPolicy(error) else {
-                throw error
-            }
-        }
-
-        let finalAttemptParams = baseParams
-        debugRuntimeLog("\(method) fallback using minimal payload")
-        return try await sendRequestWithApprovalPolicyFallback(
-            method: method,
-            baseParams: finalAttemptParams,
-            context: "minimal"
+        throw lastError ?? CodexServiceError.invalidResponse(
+            "\(method) failed with an unknown sandbox error."
         )
+    }
+
+    func validateAppliedAccessConfiguration(
+        in response: RPCMessage,
+        expected: RuntimeAccessConfiguration,
+        context: String
+    ) throws {
+        guard let result = response.result?.objectValue else {
+            if expected.mode == .autoReview {
+                throw CodexServiceError.invalidResponse(
+                    "\(context) did not report the applied approval reviewer."
+                )
+            }
+            return
+        }
+
+        // Desktop-owned resumes are synthetic bridge reads. Their next
+        // turn/start still carries the captured access configuration, but the
+        // read itself cannot report app-server-applied settings.
+        if result["remodexDesktopIpcMirror"]?.boolValue == true {
+            return
+        }
+
+        guard let reviewer = result["approvalsReviewer"]?.stringValue else {
+            if expected.mode == .autoReview {
+                throw CodexServiceError.invalidInput(
+                    "Approve for me is not supported by this Codex runtime. Update Codex on your Mac and retry."
+                )
+            }
+            return
+        }
+        guard expected.approvalsReviewerCandidates.compactMap({ $0 }).contains(reviewer) else {
+            throw CodexServiceError.invalidResponse(
+                "\(context) applied approval reviewer \(reviewer) instead of \(expected.approvalsReviewer ?? "the selected reviewer")."
+            )
+        }
+
+        if let policy = result["approvalPolicy"]?.stringValue {
+            let normalizedPolicy = policy.lowercased().filter(\.isLetter)
+            let expectedPolicies = expected.approvalPolicyCandidates.map {
+                $0.lowercased().filter(\.isLetter)
+            }
+            guard expectedPolicies.contains(normalizedPolicy) else {
+                throw CodexServiceError.invalidResponse(
+                    "\(context) applied approval policy \(policy) instead of \(expected.approvalPolicy)."
+                )
+            }
+        }
+
+        if let appliedSandbox = result["sandbox"]?.objectValue,
+           let expectedSandbox = expected.sandboxPolicy.objectValue {
+            let appliedType = appliedSandbox["type"]?.stringValue
+            let expectedType = expectedSandbox["type"]?.stringValue
+            let appliedNetwork = appliedSandbox["networkAccess"]?.boolValue
+            let expectedNetwork = expectedSandbox["networkAccess"]?.boolValue
+            guard appliedType == expectedType,
+                  expectedNetwork == nil || appliedNetwork == expectedNetwork else {
+                throw CodexServiceError.invalidResponse(
+                    "\(context) did not apply the selected sandbox permissions."
+                )
+            }
+        }
     }
 
     func handleModelListFailure(_ error: Error) {
@@ -579,11 +722,24 @@ extension CodexService {
         }
 
         let message = rpcError.message.lowercased()
-        return message.contains("approval")
-            || message.contains("unknown variant")
-            || message.contains("expected one of")
+        return message.contains("approvalpolicy")
+            || message.contains("approval_policy")
             || message.contains("onrequest")
             || message.contains("on-request")
+    }
+
+    func shouldRetryWithApprovalsReviewerFallback(_ error: Error) -> Bool {
+        guard let serviceError = error as? CodexServiceError,
+              case .rpcError(let rpcError) = serviceError,
+              rpcError.code == -32600 || rpcError.code == -32602 else {
+            return false
+        }
+
+        let message = rpcError.message.lowercased()
+        return message.contains("approvalsreviewer")
+            || message.contains("approvals_reviewer")
+            || message.contains("auto_review")
+            || message.contains("guardian_subagent")
     }
 
     func normalizedServiceTierForSelectedModel(

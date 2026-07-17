@@ -33,10 +33,12 @@ extension CodexService {
             target: target,
             baseBranch: baseBranch
         )
+        let accessConfiguration = runtimeAccessConfiguration()
         let initialThreadId = try await resolveThreadID(threadId)
         let resolvedThreadId = try await sendReviewStartRecoveringThread(
             request,
-            initialThreadId: initialThreadId
+            initialThreadId: initialThreadId,
+            accessConfiguration: accessConfiguration
         )
         activeThreadId = resolvedThreadId
     }
@@ -44,18 +46,24 @@ extension CodexService {
     // Keeps review-start aligned with turn/start by recovering stale archived threads before retrying.
     private func sendReviewStartRecoveringThread(
         _ request: ReviewStartRequest,
-        initialThreadId: String
+        initialThreadId: String,
+        accessConfiguration: RuntimeAccessConfiguration
     ) async throws -> String {
         do {
-            try await ensureThreadResumed(threadId: initialThreadId)
+            try await prepareThreadRuntimeForReview(
+                threadId: initialThreadId,
+                accessConfiguration: accessConfiguration
+            )
         } catch {
             if shouldTreatAsThreadNotFound(error) {
                 return try await continueReviewStart(
                     request,
                     fromMissingThreadId: initialThreadId,
-                    removePendingUserMessage: false
+                    removePendingUserMessage: false,
+                    accessConfiguration: accessConfiguration
                 )
             }
+            throw error
         }
 
         do {
@@ -69,7 +77,8 @@ extension CodexService {
                 return try await continueReviewStart(
                     request,
                     fromMissingThreadId: initialThreadId,
-                    removePendingUserMessage: true
+                    removePendingUserMessage: true,
+                    accessConfiguration: accessConfiguration
                 )
             }
             throw error
@@ -114,7 +123,8 @@ extension CodexService {
     private func continueReviewStart(
         _ request: ReviewStartRequest,
         fromMissingThreadId missingThreadId: String,
-        removePendingUserMessage: Bool
+        removePendingUserMessage: Bool,
+        accessConfiguration: RuntimeAccessConfiguration
     ) async throws -> String {
         if removePendingUserMessage {
             removeLatestFailedUserMessage(
@@ -126,13 +136,30 @@ extension CodexService {
         handleMissingThread(missingThreadId)
 
         let continuationThread = try await createContinuationThread(from: missingThreadId)
-        try await ensureThreadResumed(threadId: continuationThread.id)
+        try await prepareThreadRuntimeForReview(
+            threadId: continuationThread.id,
+            accessConfiguration: accessConfiguration
+        )
         try await sendReviewStart(
             request,
             to: continuationThread.id
         )
         lastErrorMessage = nil
         return continuationThread.id
+    }
+
+    // review/start has no permission fields. A forced resume applies the full
+    // access configuration and returns the effective settings, unlike
+    // thread/settings/update whose empty response only acknowledges a queued update.
+    private func prepareThreadRuntimeForReview(
+        threadId: String,
+        accessConfiguration: RuntimeAccessConfiguration
+    ) async throws {
+        _ = try await ensureThreadResumed(
+            threadId: threadId,
+            force: true,
+            accessConfigurationOverride: accessConfiguration
+        )
     }
 
     // Sends `review/start` with the same optimistic row + runtime compatibility behavior as a chat send.
@@ -149,15 +176,14 @@ extension CodexService {
         setProtectedRunningFallback(true, for: threadId)
 
         do {
-            // Reuse the turn/start compatibility path so review runs honor the selected access mode.
             let requestParams = try buildReviewStartParams(
                 threadId: threadId,
                 target: request.target,
                 baseBranch: request.baseBranch
             )
-            let response = try await sendRequestWithSandboxFallback(
+            let response = try await sendRequest(
                 method: "review/start",
-                baseParams: requestParams
+                params: .object(requestParams)
             )
             handleSuccessfulReviewStartResponse(
                 response,

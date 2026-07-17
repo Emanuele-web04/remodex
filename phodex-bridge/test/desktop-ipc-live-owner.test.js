@@ -64,6 +64,53 @@ test("conversation adapter ignores empty plan updates but keeps explanation-only
   );
 });
 
+test("conversation adapter mirrors phone auto-approval review lifecycle into Desktop state", () => {
+  const threadId = "thread-review-owner";
+  const turnId = "turn-review-owner";
+  const conversations = new Map();
+  const apply = (message) => applyAppServerMessageToConversationState({
+    conversations,
+    message,
+    shouldOwnThread: (candidate) => candidate === threadId,
+    now: () => 1_000,
+  });
+  apply({
+    method: "thread/started",
+    params: { thread: { id: threadId, turns: [{ id: turnId, status: "inProgress", items: [] }] } },
+  });
+
+  apply({
+    method: "item/autoApprovalReview/started",
+    params: {
+      threadId,
+      turnId,
+      reviewId: "review-owner-1",
+      startedAtMs: 100,
+      review: { status: "inProgress", riskLevel: null, userAuthorization: null, rationale: null },
+      action: { type: "command", command: "git status", cwd: "/repo" },
+    },
+  });
+  apply({
+    method: "item/autoApprovalReview/completed",
+    params: {
+      threadId,
+      turnId,
+      reviewId: "review-owner-1",
+      startedAtMs: 100,
+      completedAtMs: 200,
+      decisionSource: "agent",
+      review: { status: "denied", riskLevel: "high", userAuthorization: "low", rationale: "Risky" },
+      action: { type: "command", command: "git status", cwd: "/repo" },
+    },
+  });
+
+  const items = conversations.get(threadId).turns[0].items;
+  assert.equal(items.length, 1);
+  assert.equal(items[0].id, "automatic-approval-review:review-owner-1");
+  assert.equal(items[0].status, "denied");
+  assert.equal(items[0].remodexGuardianRetrySupported, false);
+});
+
 test("live owner broadcasts Remodex-owned thread snapshots over Desktop IPC", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-");
   const frames = [];
@@ -376,6 +423,12 @@ test("live owner starts a local IPC router when no Codex IPC socket exists", asy
       turnStartParams: {
         input: [{ type: "text", text: "continue from desktop" }],
         cwd: "/tmp/router-project",
+        approvalPolicy: "on-request",
+        approvalsReviewer: "auto_review",
+        sandboxPolicy: {
+          type: "workspaceWrite",
+          networkAccess: true,
+        },
       },
     },
   });
@@ -391,6 +444,12 @@ test("live owner starts a local IPC router when no Codex IPC socket exists", asy
       threadId: "thread-router-owned",
       input: [{ type: "text", text: "continue from desktop" }],
       cwd: "/tmp/router-project",
+      approvalPolicy: "on-request",
+      approvalsReviewer: "auto_review",
+      sandboxPolicy: {
+        type: "workspaceWrite",
+        networkAccess: true,
+      },
     },
   }]);
 });

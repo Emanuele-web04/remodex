@@ -510,7 +510,11 @@ function diffTurnItems(threadId, previousProjection, nextProjection) {
         continue;
       }
       if (!isActiveTurn) {
-        notifications.push(itemCompletedNotification(threadId, nextTurn.id, nextItem));
+        if (isAutoApprovalReviewItem(nextItem) && !isTerminalItemState(nextItem)) {
+          notifications.push(itemStartedNotification(threadId, nextTurn.id, nextItem));
+        } else {
+          notifications.push(itemCompletedNotification(threadId, nextTurn.id, nextItem));
+        }
         continue;
       }
       notifications.push(...diffItem(threadId, nextTurn.id, previousItem, nextItem));
@@ -526,6 +530,11 @@ function diffItem(threadId, turnId, previousItem, nextItem) {
   // Previous text lengths come straight from the previous projection, which is
   // exactly what the per-thread snapshot map used to store.
   const snapshot = snapshotItem(previousItem);
+  if (isAutoApprovalReviewItem(nextItem)) {
+    return [isTerminalItemState(nextItem)
+      ? itemCompletedNotification(threadId, turnId, nextItem)
+      : itemStartedNotification(threadId, turnId, nextItem)];
+  }
   if (isAssistantMessageItem(nextItem)) {
     const previousText = assistantMessageText(previousItem);
     const nextText = assistantMessageText(nextItem);
@@ -693,6 +702,9 @@ function turnCompletedNotification(threadId, turn) {
 }
 
 function itemStartedNotification(threadId, turnId, item) {
+  if (isAutoApprovalReviewItem(item)) {
+    return autoApprovalReviewNotification("item/autoApprovalReview/started", threadId, turnId, item);
+  }
   return tagNotification({
     method: "item/started",
     params: {
@@ -705,6 +717,9 @@ function itemStartedNotification(threadId, turnId, item) {
 }
 
 function itemCompletedNotification(threadId, turnId, item) {
+  if (isAutoApprovalReviewItem(item)) {
+    return autoApprovalReviewNotification("item/autoApprovalReview/completed", threadId, turnId, item);
+  }
   return tagNotification({
     method: "item/completed",
     params: {
@@ -712,6 +727,21 @@ function itemCompletedNotification(threadId, turnId, item) {
       turnId,
       itemId: itemIdOf(item),
       item: cloneJSON(item),
+    },
+  });
+}
+
+// Guardian reviews have no ThreadItem variant in the app-server protocol; the
+// live wire shape is the dedicated `item/autoApprovalReview/*` notification.
+// Re-emit that shape so mobile reuses one decoder for owned and mirrored threads.
+function autoApprovalReviewNotification(method, threadId, turnId, item) {
+  const { type, id, status, ...payload } = item;
+  return tagNotification({
+    method,
+    params: {
+      threadId,
+      turnId,
+      ...cloneJSON(payload),
     },
   });
 }
@@ -1029,6 +1059,9 @@ function sanitizeUserInputEntries(entries) {
 // Keep the original type as metadata, but emit the generic shape iOS already decodes.
 // Returns null when the item has nothing user-visible left after sanitizing.
 function projectItemForMobile(item, itemType = normalizeToken(item?.type)) {
+  if (itemType === "automaticapprovalreview") {
+    return projectAutoApprovalReviewItem(item);
+  }
   if (itemType === "usermessage") {
     const visibleContent = sanitizeUserInputEntries(
       Array.isArray(item?.content) ? item.content : []
@@ -1059,8 +1092,53 @@ function projectItemForMobile(item, itemType = normalizeToken(item?.type)) {
   return projected;
 }
 
+const AUTO_APPROVAL_REVIEW_ITEM_ID_PREFIX = "automatic-approval-review:";
+
+function isAutoApprovalReviewItem(item) {
+  return normalizeToken(item?.type) === "automaticapprovalreview";
+}
+
+// Desktop flattens `item/autoApprovalReview/*` notifications into synthetic
+// `automaticApprovalReview` turn items. Normalize back to the app-server
+// notification shape; keep top-level `status` for lifecycle checks.
+function projectAutoApprovalReviewItem(item) {
+  const rawId = itemIdOf(item);
+  if (!rawId) {
+    return null;
+  }
+  const review = item?.review && typeof item.review === "object" ? item.review : item;
+  const status = readString(review.status);
+  if (!status) {
+    return null;
+  }
+  return {
+    type: "automaticApprovalReview",
+    id: rawId,
+    reviewId: readString(item.reviewId)
+      || (rawId.startsWith(AUTO_APPROVAL_REVIEW_ITEM_ID_PREFIX)
+        ? rawId.slice(AUTO_APPROVAL_REVIEW_ITEM_ID_PREFIX.length)
+        : rawId),
+    targetItemId: readString(item.targetItemId) || null,
+    status,
+    startedAtMs: item.startedAtMs ?? null,
+    completedAtMs: item.completedAtMs ?? null,
+    decisionSource: readString(item.decisionSource)
+      || readString(item?.event?.decision_source)
+      || null,
+    review: {
+      status,
+      riskLevel: readString(review.riskLevel) || null,
+      userAuthorization: readString(review.userAuthorization) || null,
+      rationale: readString(review.rationale) || null,
+    },
+    action: cloneJSON(item.action ?? null),
+    ...MIRROR_TAG,
+  };
+}
+
 function isSupportedItemType(type) {
   return type === "usermessage"
+    || type === "automaticapprovalreview"
     || type === "hookprompt"
     || type === "agentmessage"
     || type === "assistantmessage"

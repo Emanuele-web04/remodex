@@ -292,6 +292,10 @@ extension CodexService {
         case "turn/plan/updated":
             handleTurnPlanUpdated(paramsObject)
 
+        case "item/autoApprovalReview/started",
+             "item/autoApprovalReview/completed":
+            handleAutoApprovalReviewNotification(paramsObject)
+
         case "item/agentMessage/delta",
              "codex/event/agent_message_content_delta",
              "codex/event/agent_message_delta":

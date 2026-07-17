@@ -36,6 +36,8 @@ struct SystemMessageContentView: View {
             planSystemView
         case .userInputPrompt:
             userInputPromptSystemView
+        case .autoApprovalReview:
+            autoApprovalReviewSystemView
         case .chat:
             if isContextCompactionNotice(text) {
                 contextCompactionNoticeView(text: text)
@@ -198,6 +200,15 @@ struct SystemMessageContentView: View {
         if let request = message.structuredUserInputRequest {
             StructuredUserInputCard(request: request)
                 .id(request.requestID)
+        } else {
+            defaultSystemView(text: text)
+        }
+    }
+
+    @ViewBuilder
+    private var autoApprovalReviewSystemView: some View {
+        if let review = message.autoApprovalReview {
+            AutoApprovalReviewRow(threadId: message.threadId, review: review)
         } else {
             defaultSystemView(text: text)
         }

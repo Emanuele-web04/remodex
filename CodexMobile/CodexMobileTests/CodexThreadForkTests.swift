@@ -75,10 +75,11 @@ final class CodexThreadForkTests: XCTestCase {
         XCTAssertEqual(service.activeThreadId, "fork-local")
     }
 
-    func testForkSendsOnlyThreadIdToThreadFork() async throws {
+    func testForkAppliesSelectedAccessModeToThreadFork() async throws {
         let service = makeService()
         service.isConnected = true
         service.isInitialized = true
+        service.selectedAccessMode = .autoReview
         service.threads = [makeSourceThread()]
 
         var capturedForkParams: [String: JSONValue] = [:]
@@ -90,6 +91,9 @@ final class CodexThreadForkTests: XCTestCase {
                 return RPCMessage(
                     id: .string(UUID().uuidString),
                     result: .object([
+                        "approvalPolicy": .string("on-request"),
+                        "approvalsReviewer": .string("auto_review"),
+                        "sandbox": service.runtimeSandboxPolicyObject(for: .autoReview),
                         "thread": .object([
                             "id": .string("fork-local"),
                         ]),
@@ -101,6 +105,9 @@ final class CodexThreadForkTests: XCTestCase {
                 return RPCMessage(
                     id: .string(UUID().uuidString),
                     result: .object([
+                        "approvalPolicy": .string("on-request"),
+                        "approvalsReviewer": .string("auto_review"),
+                        "sandbox": service.runtimeSandboxPolicyObject(for: .autoReview),
                         "thread": .object([
                             "id": .string("fork-local"),
                             "cwd": .string("/tmp/remodex-worktree"),
@@ -133,7 +140,10 @@ final class CodexThreadForkTests: XCTestCase {
         )
 
         XCTAssertEqual(capturedForkParams["threadId"]?.stringValue, "source-thread")
-        XCTAssertEqual(capturedForkParams.count, 1)
+        XCTAssertEqual(capturedForkParams["approvalPolicy"], .string("on-request"))
+        XCTAssertEqual(capturedForkParams["approvalsReviewer"], .string("auto_review"))
+        XCTAssertEqual(capturedForkParams["sandbox"], .string("workspace-write"))
+        XCTAssertNil(capturedForkParams["sandboxPolicy"])
         XCTAssertEqual(capturedResumeParams["threadId"]?.stringValue, "fork-local")
         XCTAssertEqual(capturedResumeParams["cwd"]?.stringValue, "/tmp/remodex-worktree")
         XCTAssertEqual(forkedThread.id, "fork-local")

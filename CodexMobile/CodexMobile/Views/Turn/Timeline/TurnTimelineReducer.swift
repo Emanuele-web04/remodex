@@ -250,7 +250,7 @@ enum TurnTimelineReducer {
         switch message.kind {
         case .toolActivity, .commandExecution:
             return true
-        case .thinking, .chat, .plan, .userInputPrompt, .fileChange, .subagentAction:
+        case .thinking, .chat, .plan, .userInputPrompt, .autoApprovalReview, .fileChange, .subagentAction:
             return false
         }
     }
@@ -353,7 +353,7 @@ enum TurnTimelineReducer {
         switch message.kind {
         case .thinking, .toolActivity, .commandExecution:
             return true
-        case .chat, .plan, .userInputPrompt, .fileChange, .subagentAction:
+        case .chat, .plan, .userInputPrompt, .autoApprovalReview, .fileChange, .subagentAction:
             return false
         }
     }
@@ -371,6 +371,8 @@ enum TurnTimelineReducer {
             case .commandExecution:
                 return 2
             case .subagentAction:
+                return 3
+            case .autoApprovalReview:
                 return 3
             case .chat:
                 return 4

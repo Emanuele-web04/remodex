@@ -711,3 +711,141 @@ test("desktop conversation projector live-syncs goal metadata without transcript
   assert.deepEqual(cleared.notifications.map((entry) => entry.method), ["thread/goal/cleared"]);
   assert.equal(cleared.notifications[0].params.threadId, "thread-goal");
 });
+
+test("desktop conversation projector re-emits guardian reviews as autoApprovalReview notifications", () => {
+  const projector = createDesktopConversationProjector({ now: () => 1_710_000_000_000 });
+  const desktopReviewItem = {
+    id: "automatic-approval-review:review-guardian-1",
+    type: "automaticApprovalReview",
+    targetItemId: "item-guardian-1",
+    action: { type: "command", source: "unifiedExec", command: "curl https://example.com", cwd: "/repo" },
+    startedAtMs: 100,
+    completedAtMs: null,
+    event: null,
+    status: "inProgress",
+    riskLevel: null,
+    userAuthorization: null,
+    rationale: null,
+  };
+  const bootstrap = projector.project("thread-guardian", {
+    title: "Guardian",
+    turns: [{
+      turnId: "turn-guardian",
+      status: "inProgress",
+      items: [desktopReviewItem],
+    }],
+  });
+
+  const started = bootstrap.notifications.find(
+    (notification) => notification.method === "item/autoApprovalReview/started"
+  );
+  assert.ok(started, "expected a started notification for the in-progress review");
+  assert.equal(started.params.threadId, "thread-guardian");
+  assert.equal(started.params.turnId, "turn-guardian");
+  assert.equal(started.params.reviewId, "review-guardian-1");
+  assert.equal(started.params.targetItemId, "item-guardian-1");
+  assert.equal(started.params.review.status, "inProgress");
+  assert.equal(started.params.action.command, "curl https://example.com");
+  assert.equal(started.params.remodexDesktopIpcMirror, true);
+  assert.equal(started.params.status, undefined);
+  assert.equal(started.params.item, undefined);
+
+  const denial = projector.project("thread-guardian", {
+    title: "Guardian",
+    turns: [{
+      turnId: "turn-guardian",
+      status: "inProgress",
+      items: [{
+        ...desktopReviewItem,
+        completedAtMs: 200,
+        status: "denied",
+        riskLevel: "high",
+        userAuthorization: "low",
+        rationale: "Network write outside the workspace",
+        event: {
+          id: "review-guardian-1",
+          turn_id: "turn-guardian",
+          status: "denied",
+          decision_source: "agent",
+          action: { type: "command", source: "unified_exec", command: "curl https://example.com", cwd: "/repo" },
+        },
+      }],
+    }],
+  });
+
+  assert.deepEqual(
+    denial.notifications.map((notification) => notification.method),
+    ["item/autoApprovalReview/completed"]
+  );
+  const completed = denial.notifications[0];
+  assert.equal(completed.params.reviewId, "review-guardian-1");
+  assert.equal(completed.params.completedAtMs, 200);
+  assert.equal(completed.params.decisionSource, "agent");
+  assert.equal(completed.params.review.status, "denied");
+  assert.equal(completed.params.review.riskLevel, "high");
+  assert.equal(completed.params.review.userAuthorization, "low");
+  assert.equal(completed.params.review.rationale, "Network write outside the workspace");
+});
+
+test("projects Desktop guardian reviews into thread/read backfill items", () => {
+  const thread = projectDesktopConversationStateToThread("thread-guardian-read", {
+    title: "Guardian backfill",
+    turns: [{
+      turnId: "turn-guardian-read",
+      status: "completed",
+      items: [{
+        id: "automatic-approval-review:review-guardian-2",
+        type: "automaticApprovalReview",
+        targetItemId: null,
+        action: { type: "applyPatch", cwd: "/repo", files: ["a.txt"] },
+        startedAtMs: 100,
+        completedAtMs: 250,
+        event: null,
+        status: "approved",
+        riskLevel: "low",
+        userAuthorization: "high",
+        rationale: "Edits stay inside the workspace",
+      }],
+    }],
+  });
+
+  const item = thread.turns[0].items[0];
+  assert.equal(item.type, "automaticApprovalReview");
+  assert.equal(item.id, "automatic-approval-review:review-guardian-2");
+  assert.equal(item.reviewId, "review-guardian-2");
+  assert.equal(item.status, "approved");
+  assert.deepEqual(item.review, {
+    status: "approved",
+    riskLevel: "low",
+    userAuthorization: "high",
+    rationale: "Edits stay inside the workspace",
+  });
+  assert.equal(item.remodexDesktopIpcMirror, true);
+});
+
+test("desktop conversation projector keeps in-progress review metadata updates open", () => {
+  const projector = createDesktopConversationProjector({ now: () => 300 });
+  const base = {
+    title: "Guardian metadata",
+    turns: [{
+      turnId: "turn-review-metadata",
+      status: "inProgress",
+      items: [{
+        id: "automatic-approval-review:review-metadata",
+        type: "automaticApprovalReview",
+        status: "inProgress",
+        action: { type: "command", command: "git status" },
+        rationale: null,
+      }],
+    }],
+  };
+  projector.project("thread-review-metadata", base);
+  const changed = structuredClone(base);
+  changed.turns[0].items[0].rationale = "Inspecting repository state";
+
+  const output = projector.project("thread-review-metadata", changed);
+  assert.deepEqual(
+    output.notifications.map((notification) => notification.method),
+    ["item/autoApprovalReview/started"]
+  );
+});

@@ -84,6 +84,7 @@ enum RemodexIcon {
         "qrcode": "central-qr-code",
         "qrcode.viewfinder": "central-scan-code",
         "remodex.agent": "central-robot",
+        "remodex.auto-review": "central-shield-check-3",
         "remodex.branch": "central-branch",
         "remodex.changes": "changes",
         "remodex.plan-mode": "central-planning",

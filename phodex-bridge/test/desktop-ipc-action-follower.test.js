@@ -1751,6 +1751,47 @@ test("desktop IPC follower routes phone turns to Desktop-owned threads", async (
       result: { turn: { id: "turn-from-phone" } },
     });
   }
+
+  const serverFrameCountBeforeUnsupportedMutations = serverFrames.length;
+  const unsupportedMutations = [
+    {
+      id: "phone-guardian-retry-1",
+      method: "thread/approveGuardianDeniedAction",
+      params: { event: { id: "review-1", status: "denied" } },
+      message: "Approve this retry in Codex Desktop.",
+    },
+    {
+      id: "phone-review-start-1",
+      method: "review/start",
+      params: { target: { type: "uncommittedChanges" } },
+      message: "Start this review in Codex Desktop.",
+    },
+    {
+      id: "phone-settings-update-1",
+      method: "thread/settings/update",
+      params: { approvalsReviewer: "auto_review" },
+      message: "Change these thread settings in Codex Desktop.",
+    },
+  ];
+  for (const mutation of unsupportedMutations) {
+    const handled = follower.observeInbound(JSON.stringify({
+      id: mutation.id,
+      method: mutation.method,
+      params: {
+        threadId: "thread-desktop-owned",
+        ...mutation.params,
+      },
+    }));
+    assert.equal(handled, true);
+    assert.deepEqual(outbound.find((message) => message.id === mutation.id), {
+      id: mutation.id,
+      error: {
+        code: -32004,
+        message: mutation.message,
+      },
+    });
+  }
+  assert.equal(serverFrames.length, serverFrameCountBeforeUnsupportedMutations);
 });
 
 test("desktop IPC follower falls back locally when no Desktop client can handle the request", async (t) => {
@@ -2887,6 +2928,15 @@ test("desktop IPC background recovery stays lifecycle-only until open", async (t
   const read = outbound.find((message) => message.id === "open-background-recovery");
   assert.equal(read.result.thread.turns[0].id, "ipc-turn-0");
   assert.equal(read.result.thread.turns[0].items[0].text, "AB");
+
+  const handledResume = follower.observeInbound(JSON.stringify({
+    id: "resume-background-recovery",
+    method: "thread/resume",
+    params: { threadId: "thread-background-recovery" },
+  }));
+  assert.equal(handledResume, true);
+  const resume = outbound.find((message) => message.id === "resume-background-recovery");
+  assert.equal(resume.result.remodexDesktopIpcMirror, true);
 });
 
 test("desktop IPC follower normalizes phone turn starts before Desktop follower requests", async (t) => {
@@ -5877,6 +5927,263 @@ test("desktop IPC follower reuses its normalized history index for live content 
     message.method === "turn/started" && message.params?.turnId === "turn-index-next"
   )));
   assert.equal(indexRebuilds, 2, "a structural turn-order patch should rebuild exactly once");
+});
+
+test("desktop IPC follower incrementally mirrors normalized guardian review updates", async (t) => {
+  const { socketPath, state } = await startInitializedIpcTestServer(
+    t,
+    "remodex-ipc-normalized-guardian-review-"
+  );
+  const outbound = [];
+  let indexRebuilds = 0;
+  const threadId = "thread-normalized-guardian-review";
+  const turnKey = "turn:turn-normalized-review";
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    onNormalizedHistoryIndexRebuilt() {
+      indexRebuilds += 1;
+    },
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    requestTimeoutMs: 500,
+  });
+  t.after(() => follower.stopAll());
+
+  follower.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId },
+  }));
+  await waitFor(() => state.socket);
+  writeFrame(state.socket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop-live",
+    version: 11,
+    params: {
+      conversationId: threadId,
+      change: {
+        type: "snapshot",
+        conversationState: {
+          turns: [],
+          requests: [],
+          threadRuntimeStatus: { type: "idle", activeFlags: [] },
+          turnHistory: {
+            kind: "canonical",
+            history: {
+              entitiesByKey: {
+                [turnKey]: {
+                  turnId: "turn-normalized-review",
+                  status: "completed",
+                  items: [
+                    {
+                      id: "automatic-approval-review:review-normalized",
+                      type: "automaticApprovalReview",
+                      reviewId: "review-normalized",
+                      targetItemId: "command-normalized",
+                      startedAtMs: 100,
+                      completedAtMs: null,
+                      review: { status: "inProgress", riskLevel: null },
+                      action: {
+                        type: "command",
+                        source: "shell",
+                        command: "pwd",
+                        cwd: "/tmp",
+                      },
+                    },
+                    { id: "assistant-normalized", type: "agentMessage", text: "A" },
+                  ],
+                },
+              },
+              islands: [{
+                id: "tail:normalized-review",
+                entries: [{ key: turnKey, value: turnKey }],
+              }],
+              isComplete: true,
+            },
+          },
+        },
+      },
+    },
+  });
+  await waitFor(() => outbound.some((message) => (
+    message.method === "item/autoApprovalReview/started"
+  )));
+  assert.equal(indexRebuilds, 1);
+  outbound.length = 0;
+
+  writeFrame(state.socket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop-live",
+    version: 11,
+    params: {
+      conversationId: threadId,
+      change: {
+        type: "patches",
+        patches: [
+          {
+            op: "replace",
+            path: [
+              "turnHistory", "history", "entitiesByKey", turnKey,
+              "items", 0, "review", "status",
+            ],
+            value: "denied",
+          },
+          {
+            op: "replace",
+            path: [
+              "turnHistory", "history", "entitiesByKey", turnKey,
+              "items", 0, "completedAtMs",
+            ],
+            value: 200,
+          },
+        ],
+      },
+    },
+  });
+  await waitFor(() => outbound.some((message) => (
+    message.method === "item/autoApprovalReview/completed"
+  )));
+  assert.equal(indexRebuilds, 1, "review field updates must not rebuild normalized history");
+  outbound.length = 0;
+
+  writeFrame(state.socket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop-live",
+    version: 11,
+    params: {
+      conversationId: threadId,
+      change: {
+        type: "patches",
+        patches: [{
+          op: "replace",
+          path: [
+            "turnHistory", "history", "entitiesByKey", turnKey,
+            "items", 1, "text",
+          ],
+          value: "AB",
+        }],
+      },
+    },
+  });
+  await wait(50);
+  assert.equal(
+    outbound.some((message) => message.method?.startsWith("item/autoApprovalReview/")),
+    false,
+    "unrelated content patches must not rescan or replay review overlays"
+  );
+  assert.equal(indexRebuilds, 1);
+});
+
+test("desktop IPC follower delivers normalized guardian reviews when an idle background thread is opened", async (t) => {
+  const { socketPath, state } = await startInitializedIpcTestServer(
+    t,
+    "remodex-ipc-bg-open-review-"
+  );
+  const outbound = [];
+  const threadId = "thread-background-open-review";
+  const turnKey = "turn:turn-background-review";
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    requestTimeoutMs: 500,
+  });
+  t.after(() => follower.stopAll());
+
+  // Sidebar refresh connects the Desktop bus without opening any thread, so
+  // the snapshot below lands while the thread is still background-only.
+  follower.observeInbound(JSON.stringify({
+    method: "thread/list",
+    params: {},
+  }));
+  await waitFor(() => state.socket);
+  writeFrame(state.socket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop-live",
+    version: 11,
+    params: {
+      conversationId: threadId,
+      change: {
+        type: "snapshot",
+        conversationState: {
+          turns: [],
+          requests: [],
+          threadRuntimeStatus: { type: "idle", activeFlags: [] },
+          turnHistory: {
+            kind: "canonical",
+            history: {
+              entitiesByKey: {
+                [turnKey]: {
+                  turnId: "turn-background-review",
+                  status: "completed",
+                  items: [
+                    {
+                      id: "automatic-approval-review:review-background-open",
+                      type: "automaticApprovalReview",
+                      reviewId: "review-background-open",
+                      targetItemId: "command-background",
+                      startedAtMs: 100,
+                      completedAtMs: 200,
+                      review: { status: "denied", riskLevel: "high" },
+                      event: { decision_source: "agent" },
+                      action: {
+                        type: "command",
+                        source: "shell",
+                        command: "rm -rf build",
+                        cwd: "/tmp",
+                      },
+                    },
+                    { id: "assistant-background", type: "agentMessage", text: "A" },
+                  ],
+                },
+              },
+              islands: [{
+                id: "tail:background-review",
+                entries: [{ key: turnKey, value: turnKey }],
+              }],
+              isComplete: true,
+            },
+          },
+        },
+      },
+    },
+  });
+  await wait(100);
+  assert.equal(
+    outbound.some((message) => message.method?.startsWith("item/autoApprovalReview/")),
+    false,
+    "background-only threads must not stream review rows before the phone opens them"
+  );
+
+  follower.observeInbound(JSON.stringify({
+    method: "thread/read",
+    params: { threadId },
+  }));
+  await waitFor(() => outbound.some((message) => (
+    message.method === "item/autoApprovalReview/completed"
+  )));
+  const reviewNotification = outbound.find((message) => (
+    message.method === "item/autoApprovalReview/completed"
+  ));
+  assert.equal(reviewNotification.params.threadId, threadId);
+  assert.equal(reviewNotification.params.reviewId, "review-background-open");
+  assert.equal(reviewNotification.params.review.status, "denied");
+  assert.equal(
+    reviewNotification.params.decisionSource,
+    "agent",
+    "overlay decisionSource must fall back to event.decision_source"
+  );
+  assert.equal(reviewNotification.params.remodexGuardianRetrySupported, false);
+  assert.equal(
+    outbound.some((message) => message.method === "thread/replaced"),
+    true,
+    "opening a canonical-history background thread announces a replacement"
+  );
 });
 
 test("desktop IPC follower keeps phone interest in a thread across a Desktop disconnect", async (t) => {

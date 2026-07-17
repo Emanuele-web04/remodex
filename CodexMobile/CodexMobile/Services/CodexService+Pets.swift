@@ -209,6 +209,10 @@ extension CodexService {
             return sanitizedPetPrompt(message.text) ?? "Thinking"
         case .userInputPrompt:
             return "Waiting for you"
+        case .autoApprovalReview:
+            return message.autoApprovalReview?.status == .inProgress
+                ? "Reviewing approval"
+                : "Reviewed approval"
         case .plan:
             return sanitizedPetPrompt(message.text) ?? "Planning"
         case .subagentAction:

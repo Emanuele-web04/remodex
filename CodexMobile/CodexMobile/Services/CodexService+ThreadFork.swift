@@ -34,16 +34,22 @@ extension CodexService {
 
         let resolvedProjectPath = resolvedForkProjectPath(for: target, sourceThread: sourceThread)
         let sourceModelIdentifier = sourceThread.model?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let accessConfiguration = runtimeAccessConfiguration()
 
         do {
             var baseParams: RPCObject = ["threadId": .string(normalizedSourceThreadId)]
             if supportsTurnPagination {
                 baseParams["excludeTurns"] = .bool(true)
             }
-            let response = try await sendRequestWithApprovalPolicyFallback(
+            let response = try await sendRequestWithSandboxFallback(
                 method: "thread/fork",
                 baseParams: baseParams,
-                context: "minimal"
+                accessConfiguration: accessConfiguration
+            )
+            try validateAppliedAccessConfiguration(
+                in: response,
+                expected: accessConfiguration,
+                context: "thread/fork"
             )
             let forkedThread = try await handleThreadForkResponse(
                 response,
@@ -57,10 +63,15 @@ extension CodexService {
             return forkedThread
         } catch {
             if supportsTurnPagination, consumeUnsupportedTurnPagination(error) {
-                let response = try await sendRequestWithApprovalPolicyFallback(
+                let response = try await sendRequestWithSandboxFallback(
                     method: "thread/fork",
                     baseParams: ["threadId": .string(normalizedSourceThreadId)],
-                    context: "minimal"
+                    accessConfiguration: accessConfiguration
+                )
+                try validateAppliedAccessConfiguration(
+                    in: response,
+                    expected: accessConfiguration,
+                    context: "thread/fork"
                 )
                 let forkedThread = try await handleThreadForkResponse(
                     response,
