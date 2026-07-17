@@ -399,6 +399,11 @@ extension CodexService {
             .first { isSameOrDescendantPath(normalizedWorkingDirectory, root: $0) }
         return matchingRoot ?? normalizedWorkingDirectory
     }
+
+    // Flushes the filtered store after an ephemeral side thread is discarded.
+    func persistAIChangeSetsAfterEphemeralCleanup() {
+        persistAIChangeSets()
+    }
 }
 
 private extension CodexService {
@@ -639,7 +644,7 @@ private extension CodexService {
 
     func persistAIChangeSets() {
         aiChangeSetPersistence.save(
-            aiChangeSetsByID.values.sorted {
+            aiChangeSetsEligibleForPersistence.sorted {
                 if $0.createdAt != $1.createdAt {
                     return $0.createdAt < $1.createdAt
                 }

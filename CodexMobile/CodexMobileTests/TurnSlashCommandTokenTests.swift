@@ -92,4 +92,34 @@ final class TurnSlashCommandTokenTests: XCTestCase {
             )
         )
     }
+
+    func testSideCommandMatchesCanonicalNameAndBtwAlias() {
+        XCTAssertEqual(TurnComposerSlashCommand.filtered(matching: "si"), [.side])
+        XCTAssertEqual(TurnComposerSlashCommand.filtered(matching: "btw"), [.side])
+    }
+
+    func testSideCommandRequiresOtherwiseEmptyComposerState() {
+        XCTAssertTrue(TurnComposerCommandLogic.canOfferSideSlashCommand(in: "/side"))
+        XCTAssertFalse(TurnComposerCommandLogic.canOfferSideSlashCommand(in: "explain /side"))
+        XCTAssertFalse(TurnComposerCommandLogic.canOfferSideSlashCommand(in: "/side", attachmentCount: 1))
+        XCTAssertFalse(TurnComposerCommandLogic.canOfferSideSlashCommand(in: "/side", mentionedPluginCount: 1))
+    }
+
+    func testTypedSideCommandUsesSameNonTextEligibilityAsAutocomplete() {
+        XCTAssertTrue(TurnComposerCommandLogic.canExecuteInlineSideCommand())
+        XCTAssertFalse(TurnComposerCommandLogic.canExecuteInlineSideCommand(attachmentCount: 1))
+        XCTAssertFalse(TurnComposerCommandLogic.canExecuteInlineSideCommand(mentionedFileCount: 1))
+        XCTAssertFalse(TurnComposerCommandLogic.canExecuteInlineSideCommand(mentionedSkillCount: 1))
+        XCTAssertFalse(TurnComposerCommandLogic.canExecuteInlineSideCommand(mentionedPluginCount: 1))
+        XCTAssertFalse(TurnComposerCommandLogic.canExecuteInlineSideCommand(hasReviewSelection: true))
+        XCTAssertFalse(TurnComposerCommandLogic.canExecuteInlineSideCommand(hasSubagentsSelection: true))
+        XCTAssertFalse(TurnComposerCommandLogic.canExecuteInlineSideCommand(isPlanModeArmed: true))
+    }
+
+    func testInlineSideCommandSupportsPromptAndAlias() {
+        XCTAssertEqual(TurnView.inlineSideCommandPrompt(in: "/side explain this"), "explain this")
+        XCTAssertEqual(TurnView.inlineSideCommandPrompt(in: "/btw status?"), "status?")
+        XCTAssertEqual(TurnView.inlineSideCommandPrompt(in: "/side"), "")
+        XCTAssertNil(TurnView.inlineSideCommandPrompt(in: "/sidebar"))
+    }
 }

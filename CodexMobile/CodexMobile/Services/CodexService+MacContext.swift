@@ -35,9 +35,45 @@ extension CodexService {
     // Persists the currently loaded local state under the provided Mac namespace.
     func saveLocalState(for macDeviceId: String?) {
         let normalizedMacDeviceId = normalizedMacScopedDeviceId(macDeviceId)
-        messagePersistence.save(messagesByThread, macDeviceId: normalizedMacDeviceId)
-        composerDraftPersistence.save(composerDraftsByThreadID, macDeviceId: normalizedMacDeviceId)
-        aiChangeSetPersistence.save(Array(aiChangeSetsByID.values), macDeviceId: normalizedMacDeviceId)
+        messagePersistence.save(messagesEligibleForPersistence, macDeviceId: normalizedMacDeviceId)
+        composerDraftPersistence.save(composerDraftsEligibleForPersistence, macDeviceId: normalizedMacDeviceId)
+        aiChangeSetPersistence.save(aiChangeSetsEligibleForPersistence, macDeviceId: normalizedMacDeviceId)
+    }
+
+    // `/side` timelines and drafts are connection-scoped RAM, never cold-start state.
+    var messagesEligibleForPersistence: [String: [CodexMessage]] {
+        let ephemeralThreadIDs = ephemeralThreadIDsExcludedFromLocalPersistence
+        return messagesByThread.filter { !ephemeralThreadIDs.contains($0.key) }
+    }
+
+    var composerDraftsEligibleForPersistence: [String: TurnComposerLocalDraft] {
+        let ephemeralThreadIDs = ephemeralThreadIDsExcludedFromLocalPersistence
+        return composerDraftsByThreadID.filter { !ephemeralThreadIDs.contains($0.key) }
+    }
+
+    var aiChangeSetsEligibleForPersistence: [AIChangeSet] {
+        let ephemeralThreadIDs = ephemeralThreadIDsExcludedFromLocalPersistence
+        return aiChangeSetsByID.values.filter { !ephemeralThreadIDs.contains($0.threadId) }
+    }
+
+    var terminalStatesEligibleForPersistence: [String: CodexTurnTerminalState] {
+        let ephemeralThreadIDs = ephemeralThreadIDsExcludedFromLocalPersistence
+        var ephemeralTurnIDs = Set(
+            threadIdByTurnID.compactMap { turnID, threadID in
+                ephemeralThreadIDs.contains(threadID) ? turnID : nil
+            }
+        )
+        for threadID in ephemeralThreadIDs {
+            ephemeralTurnIDs.formUnion((messagesByThread[threadID] ?? []).compactMap(\.turnId))
+        }
+        return terminalStateByTurnID.filter { turnID, _ in
+            !CodexSyntheticIdentifiers.isProjectedDesktopTurnID(turnID)
+                && !ephemeralTurnIDs.contains(turnID)
+        }
+    }
+
+    var ephemeralThreadIDsExcludedFromLocalPersistence: Set<String> {
+        sideConversationIsolationThreadIDs.union(threads.lazy.filter(\.ephemeral).map(\.id))
     }
 
     // Loads messages, drafts, and assistant change-set metadata for the provided Mac namespace.
@@ -435,7 +471,8 @@ extension CodexService {
             return
         }
 
-        let capturedThreads = threads
+        // In-memory `/side` forks must never survive into the cold-start sidebar snapshot.
+        let capturedThreads = threads.filter { !$0.ephemeral }
         let capturedMacDeviceId = currentMacScopedPersistenceDeviceId
         threadListSnapshotPersistenceTask?.cancel()
         threadListSnapshotPersistenceTask = Task { @MainActor [weak self] in
@@ -459,7 +496,9 @@ extension CodexService {
 
         threadListSnapshotPersistenceTask?.cancel()
         threadListSnapshotPersistenceTask = nil
-        let snapshot = Array(sortThreads(threads).prefix(recentActiveThreadListLimit))
+        let snapshot = Array(
+            sortThreads(threads.filter { !$0.ephemeral }).prefix(recentActiveThreadListLimit)
+        )
         threadListPersistence.save(
             snapshot,
             macDeviceId: currentMacScopedPersistenceDeviceId

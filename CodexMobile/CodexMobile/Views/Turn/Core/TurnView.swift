@@ -21,6 +21,9 @@ struct TurnView: View {
     private let initiallyAwaitingAssistantResponse: Bool
     private let onInitialAssistantResponseTrackingConsumed: (() -> Void)?
     var onOpenTerminal: ((String?) -> Void)? = nil
+    private let isSideConversation: Bool
+    private let initialSidePrompt: String?
+    private let onOpenSideConversation: ((CodexSideConversationPresentation) -> Void)?
 
     @Environment(CodexService.self) private var codex
     @Environment(SubscriptionService.self) private var subscriptions
@@ -47,23 +50,31 @@ struct TurnView: View {
     @State private var isHandingOffToMac = false
     @State private var isStartingSiblingChat = false
     @State private var isForkingThread = false
+    @State private var isStartingSideConversation = false
     @State private var checkedOutElsewhereAlert: CheckedOutElsewhereAlert?
     @StateObject private var voiceInput = VoiceInputCoordinator()
     @State private var hasConsumedInitialAssistantResponseTracking = false
     @State private var workspaceFilePreviewRequest: WorkspaceFilePreviewRequest?
+    @State private var hasSubmittedInitialSidePrompt = false
 
     init(
         thread: CodexThread,
         isWakingMacDisplayRecovery: Bool,
         initiallyAwaitingAssistantResponse: Bool = false,
         onInitialAssistantResponseTrackingConsumed: (() -> Void)? = nil,
-        onOpenTerminal: ((String?) -> Void)? = nil
+        onOpenTerminal: ((String?) -> Void)? = nil,
+        isSideConversation: Bool = false,
+        initialSidePrompt: String? = nil,
+        onOpenSideConversation: ((CodexSideConversationPresentation) -> Void)? = nil
     ) {
         self.thread = thread
         self.isWakingMacDisplayRecovery = isWakingMacDisplayRecovery
         self.initiallyAwaitingAssistantResponse = initiallyAwaitingAssistantResponse
         self.onInitialAssistantResponseTrackingConsumed = onInitialAssistantResponseTrackingConsumed
         self.onOpenTerminal = onOpenTerminal
+        self.isSideConversation = isSideConversation
+        self.initialSidePrompt = initialSidePrompt
+        self.onOpenSideConversation = onOpenSideConversation
         _viewModel = State(initialValue: TurnViewModel(
             isAwaitingAssistantResponse: initiallyAwaitingAssistantResponse
         ))
@@ -80,7 +91,7 @@ struct TurnView: View {
         let isRootlessChat = SidebarThreadGrouping.isRootlessChatThread(resolvedThread)
         let gitWorkingDirectory = isRootlessChat ? nil : resolvedThread.gitWorkingDirectory
         let isThreadRunning = renderSnapshot.isThreadRunning
-        let showsGitControls = repoGitControlsVisible(
+        let showsGitControls = !isSideConversation && repoGitControlsVisible(
             for: resolvedThread,
             gitWorkingDirectory: gitWorkingDirectory
         )
@@ -111,7 +122,9 @@ struct TurnView: View {
             isThreadRunning: isThreadRunning,
             gitWorkingDirectory: gitWorkingDirectory
         )
-        let toolbarNavigationContext = isRootlessChat ? nil : threadNavigationContext(for: resolvedThread)
+        let toolbarNavigationContext = (isRootlessChat || isSideConversation)
+            ? nil
+            : threadNavigationContext(for: resolvedThread)
         let toolbarWorktreeHandoffTitle = isWorktreeProject ? "Hand off to Local" : "Hand off to Worktree"
         let isGitActionEnabled = viewModel.gitRepoSync != nil && canRunGitAction(
             isThreadRunning: isThreadRunning,
@@ -125,7 +138,7 @@ struct TurnView: View {
         let onTapWorktreeHandoff: (() -> Void)? = showsGitControls ? {
             handleWorktreeHandoffTap(currentThread: resolvedThread)
         } : nil
-        let onTapNewChat: (() -> Void)? = codex.isConnected && !isWorktreeProject ? {
+        let onTapNewChat: (() -> Void)? = codex.isConnected && !isWorktreeProject && !isSideConversation ? {
             startSiblingChat()
         } : nil
         let onTapRepoDiff: (() -> Void)? = showsGitControls ? {
@@ -236,15 +249,16 @@ struct TurnView: View {
             )
         } as (() -> Void)? : nil)
         .environment(\.inlineCommitAndPushPhase, viewModel.inlineCommitAndPushPhase)
-        .navigationTitle(resolvedThread.displayTitle)
+        .navigationTitle(isSideConversation ? "Side conversation" : resolvedThread.displayTitle)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             TurnToolbarContent(
-                displayTitle: resolvedThread.displayTitle,
+                displayTitle: isSideConversation ? "Side conversation" : resolvedThread.displayTitle,
                 navigationContext: toolbarNavigationContext,
-                showsThreadActions: codex.isConnected,
+                showsThreadActions: codex.isConnected && !isSideConversation,
                 isHandingOffToMac: isHandingOffToMac,
                 isStartingNewChat: isStartingSiblingChat,
+                isStartingSideConversation: isStartingSideConversation,
                 canHandOffToWorktree: canHandOffToWorktree,
                 worktreeHandoffTitle: toolbarWorktreeHandoffTitle,
                 isCreatingGitWorktree: viewModel.isCreatingGitWorktree,
@@ -260,6 +274,12 @@ struct TurnView: View {
                 onTapMacHandoff: onTapMacHandoff,
                 onTapWorktreeHandoff: onTapWorktreeHandoff,
                 onTapNewChat: onTapNewChat,
+                onTapSideConversation: onOpenSideConversation == nil ? nil : {
+                    startSideConversation()
+                },
+                canStartSideConversation: codex.supportsThreadFork
+                    && !codex.hasOpenSideConversation
+                    && !isSideConversation,
                 onTapTerminal: onOpenTerminal == nil ? nil : {
                     onOpenTerminal?(gitWorkingDirectory)
                 },
@@ -429,6 +449,10 @@ struct TurnView: View {
                 syncApprovalAlertPresentation()
             }
         )
+        .onChange(of: codex.sideConversationRuntimeStateByThreadID[thread.id]) { _, state in
+            guard state == .active else { return }
+            submitInitialSidePromptIfReady()
+        }
         .onDisappear {
             viewModel.saveLifecycleLocalDraft(codex: codex, threadID: thread.id)
             handleVoiceViewDisappear()
@@ -764,6 +788,17 @@ struct TurnView: View {
         return remainder.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    // Parses both native aliases while rejecting ordinary prose that merely starts similarly.
+    static func inlineSideCommandPrompt(in text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        for command in ["/side", "/btw"] where trimmed.hasPrefix(command) {
+            let remainder = trimmed.dropFirst(command.count)
+            guard remainder.isEmpty || remainder.first?.isWhitespace == true else { continue }
+            return remainder.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return nil
+    }
+
     // Keeps the goal chip accurate on open/resume even when the live
     // `thread/goal/updated` snapshot was missed (reconnect, mirrored threads).
     private func refreshThreadGoalSnapshot() async {
@@ -868,6 +903,48 @@ struct TurnView: View {
 
     private func handleSend() {
         guard !isVoiceInputActive else { return }
+        if isSideConversation,
+           codex.sideConversationRuntimeStateByThreadID[thread.id] != .active {
+            return
+        }
+        if isSideConversation,
+           Self.inlineGoalCommandObjective(in: viewModel.input) != nil {
+            codex.lastErrorMessage = "Goals aren't available in side conversations. Close this side conversation to update the main thread's goal."
+            return
+        }
+        if !isSideConversation,
+           let sidePrompt = Self.inlineSideCommandPrompt(in: viewModel.input) {
+            guard codex.supportsThreadFork,
+                  onOpenSideConversation != nil,
+                  !codex.hasOpenSideConversation else {
+                codex.lastErrorMessage = codex.hasOpenSideConversation
+                    ? "A side conversation is already open. Close it before starting another one."
+                    : "Side conversations aren't available for this session."
+                return
+            }
+            guard TurnComposerCommandLogic.canExecuteInlineSideCommand(
+                mentionedFileCount: viewModel.composerMentionedFiles.count,
+                mentionedSkillCount: viewModel.composerMentionedSkills.count,
+                mentionedPluginCount: viewModel.composerMentionedPlugins.count,
+                attachmentCount: viewModel.composerAttachments.count,
+                hasReviewSelection: viewModel.composerReviewSelection != nil,
+                hasSubagentsSelection: viewModel.isSubagentsSelectionArmed,
+                isPlanModeArmed: viewModel.isPlanModeArmed
+            ) else {
+                codex.lastErrorMessage = "Start a side conversation from a plain text draft. Remove attachments, mentions, review or subagent selections, and Plan mode first."
+                return
+            }
+            let originalInput = viewModel.input
+            viewModel.clearComposerAutocomplete()
+            viewModel.input = ""
+            viewModel.saveLocalDraft(codex: codex, threadID: thread.id)
+            startSideConversation(
+                initialPrompt: sidePrompt.isEmpty ? nil : sidePrompt,
+                restoreInputOnFailure: originalInput
+            )
+            isInputFocused = false
+            return
+        }
         // `/goal <objective>` typed inline opens the goal sheet with the objective
         // prefilled instead of sending a chat message (Codex TUI parity).
         if let objective = Self.inlineGoalCommandObjective(in: viewModel.input) {
@@ -1088,13 +1165,29 @@ struct TurnView: View {
             viewModel.isAwaitingAssistantResponse = true
             onInitialAssistantResponseTrackingConsumed?()
         }
-        if let pendingComposerAction = codex.consumePendingComposerAction(for: thread.id) {
+        if isSideConversation {
+            submitInitialSidePromptIfReady()
+        } else if let pendingComposerAction = codex.consumePendingComposerAction(for: thread.id) {
             viewModel.applyPendingComposerAction(pendingComposerAction)
             viewModel.saveLocalDraft(codex: codex, threadID: thread.id)
             isInputFocused = true
         } else {
             viewModel.restoreSavedLocalDraftIfNeeded(codex: codex, threadID: thread.id)
         }
+    }
+
+    private func submitInitialSidePromptIfReady() {
+        guard isSideConversation,
+              codex.sideConversationRuntimeStateByThreadID[thread.id] == .active,
+              !hasSubmittedInitialSidePrompt,
+              let initialSidePrompt,
+              !initialSidePrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return
+        }
+
+        hasSubmittedInitialSidePrompt = true
+        viewModel.input = initialSidePrompt
+        viewModel.sendTurn(codex: codex, subscriptions: subscriptions, threadID: thread.id)
     }
 
     private func handlePhotoPickerItemsChanged(_ newItems: [PhotosPickerItem]) {
@@ -1319,6 +1412,39 @@ struct TurnView: View {
         }
     }
 
+    // Opens an ephemeral fork without rerouting the primary ContentView selection.
+    private func startSideConversation(
+        initialPrompt: String? = nil,
+        restoreInputOnFailure: String? = nil
+    ) {
+        guard !isSideConversation, let onOpenSideConversation else { return }
+
+        Task { @MainActor in
+            guard !isStartingSideConversation, !codex.hasOpenSideConversation else { return }
+            isStartingSideConversation = true
+            defer { isStartingSideConversation = false }
+
+            do {
+                let sideThread = try await codex.startSideConversation(from: thread.id)
+                onOpenSideConversation(
+                    CodexSideConversationPresentation(
+                        thread: sideThread,
+                        parentThreadID: thread.id,
+                        initialPrompt: initialPrompt
+                    )
+                )
+            } catch {
+                if let restoreInputOnFailure,
+                   viewModel.input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    viewModel.input = restoreInputOnFailure
+                    viewModel.saveLocalDraft(codex: codex, threadID: thread.id)
+                }
+                codex.lastErrorMessage = codex.userFacingTurnErrorMessageForFooter(from: error)
+                    ?? error.localizedDescription
+            }
+        }
+    }
+
     // Creates a named worktree, then forks the conversation into that checkout.
     private func submitForkIntoNewWorktree(
         branchName: String,
@@ -1515,6 +1641,12 @@ struct TurnView: View {
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
+            if isStartingSideConversation {
+                sideConversationLoadingNotice
+                    .padding(.horizontal, 12)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+
             TurnComposerHostView(
                 viewModel: viewModel,
                 codex: codex,
@@ -1613,6 +1745,14 @@ struct TurnView: View {
                     ))
                 },
                 onShowStatus: presentStatusSheet,
+                allowsSideCommand: !isSideConversation
+                    && onOpenSideConversation != nil
+                    && !codex.hasOpenSideConversation,
+                isSideConversation: isSideConversation,
+                onStartSideConversation: {
+                    startSideConversation()
+                },
+                allowsGoalCommand: !isSideConversation,
                 onShowGoal: { objectivePrefill in
                     presentGoalSheet(objectivePrefill: objectivePrefill)
                 },
@@ -1734,6 +1874,26 @@ struct TurnView: View {
                 Text("Creating fork...")
                     .font(AppFont.subheadline(weight: .semibold))
                 Text("Opening the new chat")
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .adaptiveGlass(.regular, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+    }
+
+    private var sideConversationLoadingNotice: some View {
+        HStack(spacing: 10) {
+            ProgressView()
+                .controlSize(.small)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Starting side conversation...")
+                    .font(AppFont.subheadline(weight: .semibold))
+                Text("Keeping the main task running")
                     .font(AppFont.caption())
                     .foregroundStyle(.secondary)
             }

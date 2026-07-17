@@ -43,7 +43,7 @@ extension CodexService {
                for: extractTurnID(from: paramsObject),
                threadId: directThreadId
            ) == nil {
-            markThreadAsRunning(directThreadId)
+            markAssistantThreadAsRunning(directThreadId)
         }
 
         guard let context = resolveAssistantEventContext(
@@ -57,11 +57,13 @@ extension CodexService {
 
         if !isReplayedEvent,
            turnTerminalState(for: turnId, threadId: context.threadId) == nil {
-            markThreadAsRunning(context.threadId)
+            markAssistantThreadAsRunning(context.threadId)
             if activeTurnID(for: context.threadId) == nil {
                 setActiveTurnID(turnId, for: context.threadId)
                 threadIdByTurnID[turnId] = context.threadId
-                activeTurnId = turnId
+                if !isSideConversationIsolated(context.threadId) {
+                    activeTurnId = turnId
+                }
                 setProtectedRunningFallback(false, for: context.threadId)
             }
         }
@@ -310,7 +312,7 @@ extension CodexService {
         if let directThreadId = extractThreadID(from: paramsObject),
            !directThreadId.isEmpty,
            !isReplayedBridgeEvent(paramsObject) {
-            markThreadAsRunning(directThreadId)
+            markAssistantThreadAsRunning(directThreadId)
         }
 
         guard let itemObject = extractIncomingItemObject(from: paramsObject, eventObject: eventObject) else {
@@ -380,6 +382,10 @@ extension CodexService {
 }
 
 private extension CodexService {
+    func markAssistantThreadAsRunning(_ threadId: String) {
+        markThreadAsRunning(threadId)
+    }
+
     // Upserts Desktop-mirrored user prompts delivered as item lifecycle events
     // (item/started for active turns, item/completed for non-active ones).
     func handleMirroredUserMessageItem(

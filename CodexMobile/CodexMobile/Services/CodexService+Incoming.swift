@@ -176,6 +176,10 @@ extension CodexService {
     // Handles stream notifications to keep UI state in sync.
     func handleNotification(method: String, params: JSONValue?) {
         let paramsObject = params?.objectValue
+        if let threadID = extractThreadID(from: paramsObject),
+           shouldDropRetiredSideConversationEvent(threadID) {
+            return
+        }
         let previousReplayScope = isApplyingReplayedBridgeEvent
         if isBufferedReplayResetEvent(paramsObject) {
             handleBufferedReplayReset(paramsObject)
@@ -480,7 +484,8 @@ extension CodexService {
             if activeTurnID(for: threadId) == nil, let turnId = mirroredTurnID {
                 setActiveTurnID(turnId, for: threadId)
                 threadIdByTurnID[turnId] = threadId
-                if !isBackgroundDiscoveryBridgeEvent(paramsObject) || threadId == activeThreadId {
+                if (!isBackgroundDiscoveryBridgeEvent(paramsObject) || threadId == activeThreadId),
+                   !isSideConversationIsolated(threadId) {
                     activeTurnId = turnId
                 }
                 setProtectedRunningFallback(false, for: threadId)
@@ -772,7 +777,8 @@ extension CodexService {
 
         if let turnID,
            !isReplayedEvent,
-           !isBackgroundDiscoveryTurn || threadId == activeThreadId {
+           (!isBackgroundDiscoveryTurn || threadId == activeThreadId),
+           threadId.map({ !isSideConversationIsolated($0) }) ?? true {
             activeTurnId = turnID
         }
 

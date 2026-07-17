@@ -19,6 +19,7 @@ struct TurnToolbarContent: ToolbarContent {
     let showsThreadActions: Bool
     let isHandingOffToMac: Bool
     let isStartingNewChat: Bool
+    let isStartingSideConversation: Bool
     let canHandOffToWorktree: Bool
     let worktreeHandoffTitle: String
     let isCreatingGitWorktree: Bool
@@ -34,6 +35,8 @@ struct TurnToolbarContent: ToolbarContent {
     var onTapMacHandoff: (() -> Void)?
     var onTapWorktreeHandoff: (() -> Void)?
     var onTapNewChat: (() -> Void)?
+    var onTapSideConversation: (() -> Void)?
+    var canStartSideConversation = false
     var onTapTerminal: (() -> Void)?
     var onTapRepoDiff: (() -> Void)?
     let onGitAction: (TurnGitActionKind) -> Void
@@ -41,18 +44,22 @@ struct TurnToolbarContent: ToolbarContent {
     @Binding var isShowingPathSheet: Bool
 
     var body: some ToolbarContent {
-        let isThreadActionLoading = isHandingOffToMac || isStartingNewChat
+        let isThreadActionLoading = isHandingOffToMac || isStartingNewChat || isStartingSideConversation
         let canTapMacHandoff = onTapMacHandoff != nil && !isThreadActionLoading
         // Worktree handoff has its own Git/worktree gates; keep it aligned with the composer Local menu.
         let canTapWorktreeHandoff = onTapWorktreeHandoff != nil
             && canHandOffToWorktree
             && !isCreatingGitWorktree
         let canTapNewChat = onTapNewChat != nil && !isThreadActionLoading
+        let canTapSideConversation = onTapSideConversation != nil
+            && canStartSideConversation
+            && !isThreadActionLoading
         let canTapTerminal = onTapTerminal != nil
         let threadActions = threadActionItems(
             canTapMacHandoff: canTapMacHandoff,
             canTapWorktreeHandoff: canTapWorktreeHandoff,
             canTapNewChat: canTapNewChat,
+            canTapSideConversation: canTapSideConversation,
             canTapTerminal: canTapTerminal
         )
 
@@ -151,6 +158,7 @@ struct TurnToolbarContent: ToolbarContent {
         canTapMacHandoff: Bool,
         canTapWorktreeHandoff: Bool,
         canTapNewChat: Bool,
+        canTapSideConversation: Bool,
         canTapTerminal: Bool
     ) -> [TurnThreadActionMenuItem] {
         var actions: [TurnThreadActionMenuItem] = [
@@ -176,6 +184,13 @@ struct TurnToolbarContent: ToolbarContent {
         }
 
         actions.append(contentsOf: [
+            TurnThreadActionMenuItem(
+                title: isStartingSideConversation ? "Starting side conversation..." : "Side conversation",
+                icon: .system("bubble.left.and.bubble.right"),
+                isEnabled: canTapSideConversation
+            ) {
+                onTapSideConversation?()
+            },
             TurnThreadActionMenuItem(
                 title: "New chat",
                 icon: .system("square.and.pencil"),

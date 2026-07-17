@@ -108,6 +108,7 @@ extension CodexService {
             isConnected = true
             lastErrorMessage = nil
             try await initializeSession()
+            await recoverSideConversationsAfterReconnect()
             flushPendingReplayDiscontinuityHistoryRefresh()
             shouldAutoReconnectOnForeground = false
             connectionRecoveryState = .idle
@@ -153,6 +154,13 @@ extension CodexService {
 
         isConnected = false
         isInitialized = false
+        if preserveReconnectIntent {
+            markSideConversationsForReconnect()
+        } else {
+            invalidateAllSideConversations(
+                message: "The temporary side conversation ended when Remodex disconnected. The main conversation is unchanged."
+            )
+        }
         isLoadingThreads = false
         isLoadingModels = false
         pendingRuntimeOptionRefresh = false
@@ -238,6 +246,9 @@ extension CodexService {
 
     // Clears all remembered relay metadata when the pairing itself is no longer trustworthy.
     func clearSavedRelaySession() {
+        invalidateAllSideConversations(
+            message: "The temporary side conversation ended because this Mac pairing was cleared. The main conversation is unchanged."
+        )
         SecureStore.deleteValue(for: CodexSecureKeys.relaySessionId)
         SecureStore.deleteValue(for: CodexSecureKeys.relayUrl)
         SecureStore.deleteValue(for: CodexSecureKeys.relayMacDeviceId)
@@ -513,6 +524,13 @@ extension CodexService {
         }
         connectionRecoveryState = disposition.connectionRecoveryState
         lastErrorMessage = disposition.lastErrorMessage
+        if disposition.shouldAutoReconnectOnForeground {
+            markSideConversationsForReconnect()
+        } else {
+            invalidateAllSideConversations(
+                message: "The temporary side conversation ended when its runtime disconnected. The main conversation is unchanged."
+            )
+        }
         finalizeAllStreamingState()
         endBackgroundRunGraceTask(reason: "receive-error")
         clearConnectionSyncState()
@@ -672,6 +690,9 @@ extension CodexService {
 
     // Clears volatile runtime state on server switch.
     func resetThreadRuntimeStateForServerSwitch() {
+        invalidateAllSideConversations(
+            message: "The temporary side conversation ended because Remodex switched Mac runtimes. The main conversation is unchanged."
+        )
         activeThreadId = nil
         activeTurnId = nil
         activeTurnIdByThread.removeAll()

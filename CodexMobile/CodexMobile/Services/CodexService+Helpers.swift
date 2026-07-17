@@ -15,7 +15,9 @@ extension CodexService {
                 (thread.id, index)
             }
         )
-        firstLiveThreadIDCache = threads.first(where: { $0.syncState == .live })?.id
+        firstLiveThreadIDCache = threads.first(where: {
+            $0.syncState == .live && !$0.ephemeral
+        })?.id
         refreshSubagentIdentityDirectoryFromThreads()
     }
 
@@ -58,11 +60,13 @@ extension CodexService {
             with: existingThread,
             treatAsServerState: treatAsServerState
         )
-        if resolvedThread.forkedFromThreadId == nil {
+        if !resolvedThread.ephemeral, resolvedThread.forkedFromThreadId == nil {
             resolvedThread.forkedFromThreadId = persistedForkOrigin(for: resolvedThread.id)
         }
         applyPersistedThreadRename(to: &resolvedThread)
-        rememberForkOriginIfNeeded(sourceThreadId: resolvedThread.forkedFromThreadId, forkedThreadId: resolvedThread.id)
+        if !resolvedThread.ephemeral {
+            rememberForkOriginIfNeeded(sourceThreadId: resolvedThread.forkedFromThreadId, forkedThreadId: resolvedThread.id)
+        }
         let derivedIdentity = resolvedThread.derivedSubagentIdentity
         upsertSubagentIdentity(
             threadId: resolvedThread.id,
@@ -127,6 +131,7 @@ extension CodexService {
            merged.runtimeSettingsRevision == nil {
             merged.serviceTier = existing.serviceTier
         }
+        merged.ephemeral = merged.ephemeral || existing.ephemeral
         if merged.runtimeSettingsRevision == nil {
             merged.runtimeSettingsRevision = existing.runtimeSettingsRevision
             merged.runtimeSettingsUpdatedAt = existing.runtimeSettingsUpdatedAt

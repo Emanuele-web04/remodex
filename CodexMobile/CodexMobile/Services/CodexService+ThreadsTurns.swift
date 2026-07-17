@@ -307,7 +307,7 @@ extension CodexService {
         }
 
         composerDraftPersistence.save(
-            composerDraftsByThreadID,
+            composerDraftsEligibleForPersistence,
             macDeviceId: currentMacScopedPersistenceDeviceId
         )
     }
@@ -1530,7 +1530,8 @@ extension CodexService {
                         if threadIdByTurnID[existingTurnID] == normalizedThreadID {
                             threadIdByTurnID.removeValue(forKey: existingTurnID)
                         }
-                        if activeTurnId == existingTurnID {
+                        if activeTurnId == existingTurnID,
+                           !isSideConversationIsolated(normalizedThreadID) {
                             activeTurnId = nil
                         }
                     }
@@ -1543,7 +1544,9 @@ extension CodexService {
                     setProtectedRunningFallback(false, for: normalizedThreadID)
                     setActiveTurnID(runningTurnID, for: normalizedThreadID)
                     threadIdByTurnID[runningTurnID] = normalizedThreadID
-                    activeTurnId = runningTurnID
+                    if !isSideConversationIsolated(normalizedThreadID) {
+                        activeTurnId = runningTurnID
+                    }
                     return true
                 }
 
@@ -1564,7 +1567,9 @@ extension CodexService {
                         if let existingTurnID {
                             setProtectedRunningFallback(false, for: normalizedThreadID)
                             threadIdByTurnID[existingTurnID] = normalizedThreadID
-                            activeTurnId = existingTurnID
+                            if !isSideConversationIsolated(normalizedThreadID) {
+                                activeTurnId = existingTurnID
+                            }
                         } else {
                             setProtectedRunningFallback(true, for: normalizedThreadID)
                         }
@@ -1578,7 +1583,8 @@ extension CodexService {
                     if threadIdByTurnID[existingTurnID] == normalizedThreadID {
                         threadIdByTurnID.removeValue(forKey: existingTurnID)
                     }
-                    if activeTurnId == existingTurnID {
+                    if activeTurnId == existingTurnID,
+                       !isSideConversationIsolated(normalizedThreadID) {
                         activeTurnId = nil
                     }
                 }
@@ -1605,6 +1611,12 @@ extension CodexService {
         preAppendedUserMessageID: String? = nil,
         automaticTitleSeedOverride: String? = nil
     ) async throws {
+        if isSideConversationIsolated(threadId),
+           sideConversationRuntimeStateByThreadID[threadId] != .active {
+            throw CodexServiceError.invalidInput(
+                "This side conversation is closing and cannot start another turn."
+            )
+        }
         let outgoingDisplayText = displayTextForOutgoingTurn(
             userInput: userInput,
             skillMentions: skillMentions,
@@ -1640,7 +1652,10 @@ extension CodexService {
         } else {
             pendingMessageId = ""
         }
-        activeThreadId = threadId
+        // A modal `/side` turn must not replace the main conversation as the app-wide selection.
+        if !isSideConversationIsolated(threadId) {
+            activeThreadId = threadId
+        }
         markThreadAsRunning(threadId)
         setProtectedRunningFallback(true, for: threadId)
         let messageStartCheckpointTask = scheduleMessageStartWorkspaceCheckpointIfPossible(
@@ -1685,6 +1700,17 @@ extension CodexService {
                     baseParams: requestParams,
                     accessConfiguration: accessConfiguration
                 )
+                if isSideConversationIsolated(threadId),
+                   sideConversationRuntimeStateByThreadID[threadId] != .active {
+                    let lateTurnID = extractTurnID(from: response.result)
+                        ?? (try? await resolveInFlightTurnID(threadId: threadId))
+                    if let lateTurnID {
+                        try? await interruptTurn(turnId: lateTurnID, threadId: threadId)
+                    }
+                    throw CodexServiceError.invalidInput(
+                        "The side conversation closed before this turn could start."
+                    )
+                }
                 let resolvedTurnID = handleSuccessfulTurnStartResponse(
                     response,
                     pendingMessageId: pendingMessageId,
@@ -2029,7 +2055,9 @@ extension CodexService {
                     state: .confirmed,
                     turnId: resolvedTurnID
                 )
-                activeTurnId = resolvedTurnID
+                if !isSideConversationIsolated(normalizedThreadID) {
+                    activeTurnId = resolvedTurnID
+                }
                 setActiveTurnID(resolvedTurnID, for: normalizedThreadID)
                 threadIdByTurnID[resolvedTurnID] = normalizedThreadID
                 markThreadAsRunning(normalizedThreadID)
@@ -2076,7 +2104,9 @@ extension CodexService {
                            refreshedTurnID != currentExpectedTurnID {
                             didRetryWithRefreshedTurnID = true
                             currentExpectedTurnID = refreshedTurnID
-                            activeTurnId = refreshedTurnID
+                            if !isSideConversationIsolated(normalizedThreadID) {
+                                activeTurnId = refreshedTurnID
+                            }
                             setActiveTurnID(refreshedTurnID, for: normalizedThreadID)
                             threadIdByTurnID[refreshedTurnID] = normalizedThreadID
                             continue
@@ -2867,7 +2897,9 @@ extension CodexService {
         )
 
         if let turnID = resolvedTurnID {
-            activeTurnId = turnID
+            if !isSideConversationIsolated(threadId) {
+                activeTurnId = turnID
+            }
             setActiveTurnID(turnID, for: threadId)
             threadIdByTurnID[turnID] = threadId
             setProtectedRunningFallback(false, for: threadId)
