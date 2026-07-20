@@ -700,6 +700,240 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertFalse(service.protectedRunningFallbackThreadIDs.contains(threadID))
     }
 
+    func testTurnlessAgentDeltaReusesKnownItemTurnAfterTransportReset() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let itemID = "item-\(UUID().uuidString)"
+
+        sendTurnStarted(service: service, threadID: threadID, turnID: turnID)
+        service.handleNotification(
+            method: "item/agentMessage/delta",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "itemId": .string(itemID),
+                "delta": .string("Hello"),
+            ])
+        )
+        service.flushPendingAssistantDeltas(for: threadID, turnId: turnID)
+        service.finalizeAllStreamingState()
+
+        service.handleNotification(
+            method: "item/agentMessage/delta",
+            params: .object([
+                "threadId": .string(threadID),
+                "itemId": .string(itemID),
+                "delta": .string(" world"),
+            ])
+        )
+        service.flushPendingAssistantDeltas(for: threadID, turnId: turnID)
+
+        let assistant = service.messages(for: threadID).first {
+            $0.role == .assistant && $0.itemId == itemID
+        }
+        XCTAssertEqual(assistant?.turnId, turnID)
+        XCTAssertEqual(assistant?.text, "Hello world")
+        XCTAssertEqual(service.activeTurnID(for: threadID), turnID)
+    }
+
+    func testTurnlessAgentDeltaUsesActiveTurnForNewItem() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let itemID = "item-\(UUID().uuidString)"
+
+        sendTurnStarted(service: service, threadID: threadID, turnID: turnID)
+        service.handleNotification(
+            method: "item/agentMessage/delta",
+            params: .object([
+                "threadId": .string(threadID),
+                "itemId": .string(itemID),
+                "delta": .string("Recovered"),
+            ])
+        )
+        service.flushPendingAssistantDeltas(for: threadID, turnId: turnID)
+
+        let assistant = service.messages(for: threadID).first {
+            $0.role == .assistant && $0.itemId == itemID
+        }
+        XCTAssertEqual(assistant?.turnId, turnID)
+        XCTAssertEqual(assistant?.text, "Recovered")
+    }
+
+    func testTurnlessAgentDeltaUsesProvisionalIdentityForIDLessRun() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let itemID = "item-\(UUID().uuidString)"
+
+        service.handleNotification(
+            method: "turn/started",
+            params: .object(["threadId": .string(threadID)])
+        )
+        guard let provisionalTurnID = service.provisionalIDLessTurnIDByThread[threadID] else {
+            return XCTFail("Expected a stable provisional turn identity")
+        }
+
+        service.handleNotification(
+            method: "item/agentMessage/delta",
+            params: .object([
+                "threadId": .string(threadID),
+                "itemId": .string(itemID),
+                "delta": .string("Recovered without a turn id"),
+            ])
+        )
+        service.flushPendingAssistantDeltas(for: threadID, turnId: provisionalTurnID)
+
+        let assistant = service.messages(for: threadID).first {
+            $0.role == .assistant && $0.itemId == itemID
+        }
+        XCTAssertEqual(assistant?.text, "Recovered without a turn id")
+        XCTAssertEqual(assistant?.turnId, provisionalTurnID)
+        XCTAssertTrue(service.threadHasActiveOrRunningTurn(threadID))
+
+        sendTurnStarted(service: service, threadID: threadID, turnID: "turn-canonical")
+
+        XCTAssertNil(service.provisionalIDLessTurnIDByThread[threadID])
+        XCTAssertEqual(
+            service.messages(for: threadID).first { $0.itemId == itemID }?.turnId,
+            "turn-canonical"
+        )
+    }
+
+    func testTurnlessItemStartDoesNotReviveInactiveThread() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+
+        service.handleNotification(
+            method: "item/started",
+            params: .object([
+                "threadId": .string(threadID),
+                "item": .object([
+                    "id": .string("late-item"),
+                    "type": .string("agentMessage"),
+                    "text": .string("Late"),
+                ]),
+            ])
+        )
+
+        XCTAssertFalse(service.threadHasActiveOrRunningTurn(threadID))
+        XCTAssertTrue(service.messages(for: threadID).isEmpty)
+    }
+
+    func testUnknownTurnlessAgentDeltaDoesNotReviveInactiveThread() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+
+        service.handleNotification(
+            method: "item/agentMessage/delta",
+            params: .object([
+                "threadId": .string(threadID),
+                "itemId": .string("unknown-item"),
+                "delta": .string("Late"),
+            ])
+        )
+
+        XCTAssertFalse(service.threadHasActiveOrRunningTurn(threadID))
+        XCTAssertTrue(service.messages(for: threadID).isEmpty)
+    }
+
+    func testDelayedCompletionForSupersededTurnKeepsNewIDLessRunRunning() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let firstTurnID = "turn-a"
+
+        sendTurnStarted(service: service, threadID: threadID, turnID: firstTurnID)
+        service.handleNotification(
+            method: "turn/started",
+            params: .object(["threadId": .string(threadID)])
+        )
+
+        XCTAssertNil(service.activeTurnID(for: threadID))
+        XCTAssertTrue(service.protectedRunningFallbackThreadIDs.contains(threadID))
+        XCTAssertTrue(service.supersededTurnIDsByIDLessRunByThread[threadID]?.contains(firstTurnID) == true)
+
+        sendTurnCompletedSuccess(service: service, threadID: threadID, turnID: firstTurnID)
+
+        XCTAssertTrue(service.threadHasActiveOrRunningTurn(threadID))
+        XCTAssertTrue(service.protectedRunningFallbackThreadIDs.contains(threadID))
+        XCTAssertEqual(service.threadRunBadgeState(for: threadID), .running)
+        XCTAssertNil(service.latestTurnTerminalStateByThread[threadID])
+    }
+
+    func testCompletingNewestParallelTurnPromotesOlderActiveTurn() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let olderTurnID = "turn-a"
+        let newerTurnID = "turn-b"
+
+        sendTurnStarted(service: service, threadID: threadID, turnID: olderTurnID)
+        sendTurnStarted(service: service, threadID: threadID, turnID: newerTurnID)
+        XCTAssertTrue(service.displacedActiveTurnIDsByThread[threadID]?.contains(olderTurnID) == true)
+
+        sendTurnCompletedSuccess(service: service, threadID: threadID, turnID: newerTurnID)
+
+        XCTAssertEqual(service.activeTurnID(for: threadID), olderTurnID)
+        XCTAssertEqual(service.threadRunBadgeState(for: threadID), .running)
+        XCTAssertNil(service.latestTurnTerminalStateByThread[threadID])
+        XCTAssertEqual(service.terminalStateByTurnID[newerTurnID], .completed)
+    }
+
+    func testEmptyTurnSnapshotPreservesProtectedIDLessRun() async {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        service.isConnected = true
+        service.isInitialized = true
+        service.supportsTurnPagination = true
+        service.runningThreadIDs.insert(threadID)
+        service.protectedRunningFallbackThreadIDs.insert(threadID)
+        service.requestTransportOverride = { method, _ in
+            XCTAssertEqual(method, "thread/turns/list")
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object(["data": .array([])]),
+                includeJSONRPC: false
+            )
+        }
+
+        let refreshed = await service.refreshInFlightTurnState(threadId: threadID)
+
+        XCTAssertTrue(refreshed)
+        XCTAssertTrue(service.threadHasActiveOrRunningTurn(threadID))
+        XCTAssertTrue(service.protectedRunningFallbackThreadIDs.contains(threadID))
+        XCTAssertEqual(service.threadRunBadgeState(for: threadID), .running)
+    }
+
+    func testTerminalTurnSnapshotClearsProtectedIDLessRun() async {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        service.isConnected = true
+        service.isInitialized = true
+        service.supportsTurnPagination = true
+        service.runningThreadIDs.insert(threadID)
+        service.protectedRunningFallbackThreadIDs.insert(threadID)
+        service.pendingReconnectRunContinuityThreadIDs.insert(threadID)
+        service.requestTransportOverride = { method, _ in
+            XCTAssertEqual(method, "thread/turns/list")
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object([
+                    "data": .array([.object([
+                        "id": .string("turn-terminal"),
+                        "status": .string("completed"),
+                    ])]),
+                ]),
+                includeJSONRPC: false
+            )
+        }
+
+        let refreshed = await service.refreshInFlightTurnState(threadId: threadID)
+
+        XCTAssertTrue(refreshed)
+        XCTAssertFalse(service.threadHasActiveOrRunningTurn(threadID))
+        XCTAssertNil(service.threadRunBadgeState(for: threadID))
+        XCTAssertFalse(service.pendingReconnectRunContinuityThreadIDs.contains(threadID))
+    }
+
     func testDesktopMirrorActivityHeartbeatRestoresRunningAfterStaleClear() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"
@@ -1269,6 +1503,46 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
             service.connectionRecoveryState,
             .retrying(attempt: 0, message: "Reconnecting...")
         )
+    }
+
+    func testRetryableReceiveErrorAndEmptyRehydratePreserveRunLifecycle() async {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        sendTurnStarted(service: service, threadID: threadID, turnID: turnID)
+        service.isConnected = true
+        service.isInitialized = true
+
+        service.handleReceiveError(NWError.posix(.ECONNABORTED))
+
+        XCTAssertFalse(service.isConnected)
+        XCTAssertEqual(service.activeTurnID(for: threadID), turnID)
+        XCTAssertEqual(service.threadIdByTurnID[turnID], threadID)
+        XCTAssertTrue(service.runningThreadIDs.contains(threadID))
+        XCTAssertTrue(service.pendingReconnectRunContinuityThreadIDs.contains(threadID))
+
+        // Re-announced lifecycle can arrive before the bridge's first fresh turn page.
+        sendTurnStarted(service: service, threadID: threadID, turnID: turnID)
+        XCTAssertTrue(service.pendingReconnectRunContinuityThreadIDs.contains(threadID))
+
+        service.isConnected = true
+        service.isInitialized = true
+        service.supportsTurnPagination = true
+        service.requestTransportOverride = { method, _ in
+            XCTAssertEqual(method, "thread/turns/list")
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object(["data": .array([])]),
+                includeJSONRPC: false
+            )
+        }
+
+        let refreshed = await service.refreshInFlightTurnState(threadId: threadID)
+
+        XCTAssertTrue(refreshed)
+        XCTAssertEqual(service.activeTurnID(for: threadID), turnID)
+        XCTAssertEqual(service.threadRunBadgeState(for: threadID), .running)
+        XCTAssertTrue(service.pendingReconnectRunContinuityThreadIDs.contains(threadID))
     }
 
     func testForegroundConnectionTimeoutSuppressesErrorAndArmsReconnect() {
@@ -3031,6 +3305,82 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
 
         XCTAssertEqual(snapshot.interruptibleTurnID, "turn-31")
         XCTAssertEqual(snapshot.latestTurnID, "turn-31")
+    }
+
+    func testTurnStateSnapshotFindsOlderParallelRunPastNewerTerminalTurn() {
+        let service = makeService()
+        let turnObjects: [RPCObject] = [
+            [
+                "id": .string("turn-b"),
+                "status": .string("completed"),
+            ],
+            [
+                "id": .string("turn-a"),
+                "status": .string("inProgress"),
+            ],
+        ]
+
+        let snapshot = service.turnStateSnapshot(
+            from: turnObjects,
+            newestFirst: true,
+            knownParallelTurnIDs: ["turn-a"]
+        )
+
+        XCTAssertEqual(snapshot.interruptibleTurnID, "turn-a")
+        XCTAssertFalse(snapshot.hasInterruptibleTurnWithoutID)
+        XCTAssertEqual(snapshot.latestTurnID, "turn-b")
+    }
+
+    func testTurnStateSnapshotDoesNotReviveStaleIdentifiedHistoryPastTerminalTurn() {
+        let service = makeService()
+        let turnObjects: [RPCObject] = [
+            [
+                "id": .string("turn-b"),
+                "status": .string("completed"),
+            ],
+            [
+                "id": .string("turn-a"),
+                "status": .string("inProgress"),
+            ],
+        ]
+
+        let snapshot = service.turnStateSnapshot(from: turnObjects, newestFirst: true)
+
+        XCTAssertNil(snapshot.interruptibleTurnID)
+        XCTAssertFalse(snapshot.hasInterruptibleTurnWithoutID)
+        XCTAssertEqual(snapshot.latestTurnID, "turn-b")
+    }
+
+    func testServerSwitchClearsOverlapAndProvisionalTurnState() {
+        let service = makeService()
+        service.displacedActiveTurnIDsByThread["thread-a"] = ["turn-a"]
+        service.supersededTurnIDsByIDLessRunByThread["thread-b"] = ["turn-b"]
+        service.provisionalIDLessTurnIDByThread["thread-c"] = "ipc-turn-idless-test"
+
+        service.resetThreadRuntimeStateForServerSwitch()
+
+        XCTAssertTrue(service.displacedActiveTurnIDsByThread.isEmpty)
+        XCTAssertTrue(service.supersededTurnIDsByIDLessRunByThread.isEmpty)
+        XCTAssertTrue(service.provisionalIDLessTurnIDByThread.isEmpty)
+    }
+
+    func testTurnStateSnapshotDoesNotReviveStatuslessHistoryPastTerminalTurn() {
+        let service = makeService()
+        let turnObjects: [RPCObject] = [
+            [
+                "id": .string("turn-b"),
+                "status": .string("completed"),
+            ],
+            [
+                "id": .string("turn-a"),
+            ],
+        ]
+
+        let snapshot = service.turnStateSnapshot(from: turnObjects, newestFirst: true)
+
+        XCTAssertNil(snapshot.interruptibleTurnID)
+        XCTAssertFalse(snapshot.hasInterruptibleTurnWithoutID)
+        XCTAssertEqual(snapshot.latestTurnID, "turn-b")
     }
 
     private func sendTurnStarted(service: CodexService, threadID: String, turnID: String) {

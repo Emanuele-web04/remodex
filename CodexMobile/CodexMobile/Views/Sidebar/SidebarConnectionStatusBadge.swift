@@ -57,12 +57,19 @@ struct SidebarConnectionStatusBadge: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
-        .adaptiveGlass(
-            .regular,
-            isInteractive: false,
-            fallbackMaterial: .ultraThinMaterial,
-            in: Capsule(style: .continuous)
-        )
+        // Glass lives on a background layer instead of the content: the pulsing
+        // dot's repeatForever animation would otherwise invalidate the glass
+        // node every frame ("glassEffect() tried to update multiple times per
+        // frame").
+        .background {
+            Color.clear
+                .adaptiveGlass(
+                    .regular,
+                    isInteractive: false,
+                    fallbackMaterial: .ultraThinMaterial,
+                    in: Capsule(style: .continuous)
+                )
+        }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(Text("Connection status: \(statusLabel)"))
     }

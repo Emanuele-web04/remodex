@@ -88,7 +88,6 @@ private struct MessageRowMessageSignature: Equatable {
 private struct MessageRowAutoApprovalReviewSignature: Equatable {
     let reviewId: String
     let status: CodexAutoApprovalReviewStatus
-    let actionSummaryFingerprint: String
     let riskLevel: String?
     let userAuthorization: String?
     let rationaleFingerprint: String?
@@ -98,7 +97,6 @@ private struct MessageRowAutoApprovalReviewSignature: Equatable {
     init(_ review: CodexAutoApprovalReview) {
         reviewId = review.reviewId
         status = review.status
-        actionSummaryFingerprint = messageRowTextSignature(review.actionSummary)
         riskLevel = review.riskLevel
         userAuthorization = review.userAuthorization
         rationaleFingerprint = review.rationale.map(messageRowTextSignature)

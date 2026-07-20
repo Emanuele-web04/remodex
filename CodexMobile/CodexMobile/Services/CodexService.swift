@@ -431,9 +431,18 @@ final class CodexService {
     // lose a fast A-completed -> B-started transition to SwiftUI coalescing.
     var runStartGenerationByThread: [String: Int] = [:]
     @ObservationIgnored var lastRunStartTurnIDByThread: [String: String] = [:]
-    // Transport teardown clears running booleans before reconnect rehydrates A.
-    // Preserve one same-run start so reconnect does not masquerade as turn B.
+    // Preserve same-run identity until reconnect rehydration confirms live or
+    // terminal server state, so a stale empty page cannot masquerade as turn B.
     @ObservationIgnored var pendingReconnectRunContinuityThreadIDs: Set<String> = []
+    // Parallel turns share one UI-facing active id. Retain displaced siblings so
+    // finishing the newest turn can promote an older run that is still active.
+    @ObservationIgnored var displacedActiveTurnIDsByThread: [String: Set<String>] = [:]
+    // When a distinct id-less turn starts, remember every displaced identified
+    // turn so delayed completions cannot stop the newer protected run.
+    @ObservationIgnored var supersededTurnIDsByIDLessRunByThread: [String: Set<String>] = [:]
+    // Routes item/delta events that omit turnId while preserving the invariant
+    // that synthetic ids are never sent to turn/interrupt.
+    @ObservationIgnored var provisionalIDLessTurnIDByThread: [String: String] = [:]
 
     var runningThreadIDs: Set<String> = []
     // Protects active runs that are real but have not yielded a stable turnId yet.

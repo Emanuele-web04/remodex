@@ -36,19 +36,10 @@ extension CodexService {
         // the thread running but must append text as closed history, not streaming.
         let appliesAsReplay = isReplayedEvent || isApplyingReplayedBridgeEvent
 
-        if let directThreadId = extractThreadID(from: paramsObject),
-           !directThreadId.isEmpty,
-           !isReplayedEvent,
-           turnTerminalState(
-               for: extractTurnID(from: paramsObject),
-               threadId: directThreadId
-           ) == nil {
-            markThreadAsRunning(directThreadId)
-        }
-
         guard let context = resolveAssistantEventContext(
             paramsObject: paramsObject,
             eventObject: eventObject,
+            allowsActiveTurnFallback: true,
             requiresTurnId: true
         ),
         let turnId = context.identity.turnId else {
@@ -302,6 +293,13 @@ extension CodexService {
             from: paramsObject,
             turnIdHint: lifecycleTurnID
         )
+        // A delayed turn-less item start has no safe run to attach to once the
+        // thread is inactive. Ignore it before it can revive running UI.
+        if lifecycleTurnID == nil,
+           let lifecycleThreadID,
+           !threadHasActiveOrRunningTurn(lifecycleThreadID) {
+            return
+        }
         // Replayed item lifecycle events for finished turns must not revive running UI.
         if turnTerminalState(for: lifecycleTurnID, threadId: lifecycleThreadID) != nil {
             return
@@ -365,6 +363,7 @@ extension CodexService {
             paramsObject: paramsObject,
             eventObject: eventObject,
             itemObject: itemObject,
+            allowsActiveTurnFallback: true,
             requiresTurnId: true
         ),
         let turnId = context.identity.turnId else {
@@ -489,21 +488,41 @@ private extension CodexService {
         paramsObject: IncomingParamsObject,
         eventObject: IncomingParamsObject?,
         itemObject: IncomingParamsObject? = nil,
+        allowsActiveTurnFallback: Bool = false,
         requiresTurnId: Bool = false
     ) -> AssistantEventContext? {
-        let identity = extractAssistantEventIdentity(
+        let extractedIdentity = extractAssistantEventIdentity(
             paramsObject: paramsObject,
             eventObject: eventObject,
             itemObject: itemObject
         )
-
-        if requiresTurnId, identity.turnId == nil {
+        guard let threadId = resolveThreadID(from: paramsObject, turnIdHint: extractedIdentity.turnId) else {
             return nil
         }
 
-        guard let threadId = resolveThreadID(from: paramsObject, turnIdHint: identity.turnId) else {
+        let resolvedTurnId: String?
+        if let explicitTurnId = extractedIdentity.turnId {
+            resolvedTurnId = explicitTurnId
+        } else if let itemId = extractedIdentity.itemId,
+                  let knownTurnId = knownAssistantTurnId(threadId: threadId, itemId: itemId) {
+            resolvedTurnId = knownTurnId
+        } else if allowsActiveTurnFallback,
+                  threadHasActiveOrRunningTurn(threadId) {
+            resolvedTurnId = activeTurnID(for: threadId)
+                ?? provisionalIDLessTurnIDByThread[threadId]
+        } else {
+            resolvedTurnId = nil
+        }
+        if requiresTurnId, resolvedTurnId == nil {
             return nil
         }
+
+        let identity = AssistantEventIdentity(
+            turnId: resolvedTurnId,
+            itemId: extractedIdentity.itemId,
+            sourceItemKey: extractedIdentity.sourceItemKey,
+            phase: extractedIdentity.phase
+        )
 
         if let turnId = identity.turnId {
             threadIdByTurnID[turnId] = threadId

@@ -10,29 +10,34 @@ import SwiftUI
 // command group rows; expanding reveals the reviewed action, risk context, and
 // the one-shot retry control for denied reviews.
 struct AutoApprovalReviewRow: View {
-    @Environment(CodexService.self) private var codex
-
     let threadId: String
     let review: CodexAutoApprovalReview
+    let actionSummary: String
 
     @State private var isExpanded = false
-    @State private var isApprovingRetry = false
-    @State private var retryErrorMessage: String?
+
+    private var presentation: AutoApprovalReviewPresentation {
+        AutoApprovalReviewPresentation(status: review.status)
+    }
+
+    private var rowTitle: String {
+        "Auto-review · \(presentation.statusLabel)"
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Button {
-                withAnimation(.easeInOut(duration: 0.18)) {
-                    isExpanded.toggle()
-                }
-            } label: {
+            Button(action: toggleExpanded) {
                 HStack(spacing: 8) {
                     if review.status == .inProgress {
                         ProgressView()
                             .controlSize(.small)
                     } else {
-                        RemodexIcon.image(systemName: statusIconSystemName, size: 17, relativeTo: .body)
-                            .foregroundStyle(statusColor)
+                        RemodexIcon.image(
+                            systemName: presentation.iconSystemName,
+                            size: 17,
+                            relativeTo: .body
+                        )
+                        .foregroundStyle(presentation.color)
                     }
                     Text(rowTitle)
                         .font(AppFont.body(weight: .regular))
@@ -45,40 +50,49 @@ struct AutoApprovalReviewRow: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Auto-review, \(statusLabel)")
+            .accessibilityLabel("Auto-review, \(presentation.statusLabel)")
             .accessibilityHint(isExpanded ? "Collapse review details" : "Expand review details")
 
             if isExpanded {
-                details
+                AutoApprovalReviewDetails(
+                    threadId: threadId,
+                    review: review,
+                    actionSummary: actionSummary,
+                    statusColor: presentation.color
+                )
             }
         }
         .accessibilityElement(children: .contain)
     }
 
-    private var rowTitle: String {
-        "Auto-review · \(statusLabel)"
-    }
-
-    private var statusLabel: String {
-        switch review.status {
-        case .inProgress:
-            return "Reviewing"
-        case .approved:
-            return "Approved"
-        case .denied:
-            return "Denied"
-        case .timedOut:
-            return "Timed out"
-        case .aborted:
-            return "Stopped"
-        case .unknown:
-            return "Updated"
+    private func toggleExpanded() {
+        withAnimation(.easeInOut(duration: 0.18)) {
+            isExpanded.toggle()
         }
     }
+}
 
-    private var details: some View {
+private struct AutoApprovalReviewDetails: View {
+    let threadId: String
+    let review: CodexAutoApprovalReview
+    let actionSummary: String
+    let statusColor: Color
+
+    private var normalizedRationale: String? {
+        normalized(review.rationale)
+    }
+
+    private var riskLabel: String? {
+        normalized(review.riskLevel).map { "\($0.capitalized) risk" }
+    }
+
+    private var normalizedAuthorization: String? {
+        normalized(review.userAuthorization)
+    }
+
+    var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(review.actionSummary)
+            Text(actionSummary)
                 .font(AppFont.footnote(weight: .medium))
                 .foregroundStyle(.primary)
                 .textSelection(.enabled)
@@ -103,7 +117,55 @@ struct AutoApprovalReviewRow: View {
             }
 
             if review.status == .denied {
-                retryControl
+                AutoApprovalRetryControl(threadId: threadId, review: review)
+            }
+        }
+        .padding(.leading, 25)
+    }
+
+    private func normalized(_ value: String?) -> String? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            return nil
+        }
+        return value
+    }
+}
+
+private struct AutoApprovalRetryControl: View {
+    @Environment(CodexService.self) private var codex
+
+    let threadId: String
+    let review: CodexAutoApprovalReview
+
+    @State private var isApprovingRetry = false
+    @State private var retryErrorMessage: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if review.retryApproved {
+                Label("Approval recorded; the retry will still be reviewed", systemImage: "checkmark")
+                    .font(AppFont.footnote(weight: .medium))
+                    .foregroundStyle(.secondary)
+            } else if let retryUnavailableReason = review.retryUnavailableReason {
+                Text(retryUnavailableReason)
+                    .font(AppFont.footnote())
+                    .foregroundStyle(.secondary)
+            } else {
+                Button(action: approveOneRetry) {
+                    HStack(spacing: 7) {
+                        if isApprovingRetry {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                        Text("Approve one retry")
+                    }
+                    .font(AppFont.footnote(weight: .semibold))
+                }
+                .buttonStyle(.borderedProminent)
+                .buttonBorderShape(.capsule)
+                .tint(.blue)
+                .disabled(isApprovingRetry)
             }
 
             if let retryErrorMessage {
@@ -111,94 +173,6 @@ struct AutoApprovalReviewRow: View {
                     .font(AppFont.caption())
                     .foregroundStyle(.red)
             }
-        }
-        .padding(.leading, 25)
-    }
-
-    @ViewBuilder
-    private var retryControl: some View {
-        if review.retryApproved {
-            Label("Approval recorded; the retry will still be reviewed", systemImage: "checkmark")
-                .font(AppFont.footnote(weight: .medium))
-                .foregroundStyle(.secondary)
-        } else if let retryUnavailableReason = review.retryUnavailableReason {
-            Text(retryUnavailableReason)
-                .font(AppFont.footnote())
-                .foregroundStyle(.secondary)
-        } else {
-            Button {
-                approveOneRetry()
-            } label: {
-                HStack(spacing: 7) {
-                    if isApprovingRetry {
-                        ProgressView()
-                            .controlSize(.small)
-                    }
-                    Text("Approve one retry")
-                }
-                .font(AppFont.footnote(weight: .semibold))
-            }
-            .buttonStyle(.borderedProminent)
-            .buttonBorderShape(.capsule)
-            .tint(.blue)
-            .disabled(isApprovingRetry)
-        }
-    }
-
-    private var normalizedRationale: String? {
-        guard let rationale = review.rationale?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !rationale.isEmpty else {
-            return nil
-        }
-        return rationale
-    }
-
-    private var riskLabel: String? {
-        guard let risk = review.riskLevel?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !risk.isEmpty else {
-            return nil
-        }
-        return "\(risk.capitalized) risk"
-    }
-
-    private var normalizedAuthorization: String? {
-        guard let authorization = review.userAuthorization?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-              !authorization.isEmpty else {
-            return nil
-        }
-        return authorization
-    }
-
-    // Every status name resolves to a bundled Central asset in RemodexIcon
-    // so the row matches the app's icon language instead of raw SF Symbols.
-    private var statusIconSystemName: String {
-        switch review.status {
-        case .inProgress, .approved:
-            return "remodex.auto-review"
-        case .denied:
-            return "exclamationmark.triangle.fill"
-        case .timedOut:
-            return "hourglass"
-        case .aborted:
-            return "xmark.circle.fill"
-        case .unknown:
-            return "questionmark.circle"
-        }
-    }
-
-    private var statusColor: Color {
-        switch review.status {
-        case .inProgress:
-            return .secondary
-        case .approved:
-            return .green
-        case .denied:
-            return .orange
-        case .timedOut, .aborted:
-            return .secondary
-        case .unknown:
-            return .secondary
         }
     }
 
@@ -221,6 +195,41 @@ struct AutoApprovalReviewRow: View {
             } catch {
                 retryErrorMessage = error.localizedDescription
             }
+        }
+    }
+}
+
+private struct AutoApprovalReviewPresentation {
+    let statusLabel: String
+    let iconSystemName: String
+    let color: Color
+
+    init(status: CodexAutoApprovalReviewStatus) {
+        switch status {
+        case .inProgress:
+            statusLabel = "Reviewing"
+            iconSystemName = "remodex.auto-review"
+            color = .secondary
+        case .approved:
+            statusLabel = "Approved"
+            iconSystemName = "remodex.auto-review"
+            color = .green
+        case .denied:
+            statusLabel = "Denied"
+            iconSystemName = "exclamationmark.triangle.fill"
+            color = .orange
+        case .timedOut:
+            statusLabel = "Timed out"
+            iconSystemName = "hourglass"
+            color = .secondary
+        case .aborted:
+            statusLabel = "Stopped"
+            iconSystemName = "xmark.circle.fill"
+            color = .secondary
+        case .unknown:
+            statusLabel = "Updated"
+            iconSystemName = "questionmark.circle"
+            color = .secondary
         }
     }
 }

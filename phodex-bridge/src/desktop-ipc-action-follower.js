@@ -36,7 +36,6 @@ const MAX_BASELINE_RECOVERY_ATTEMPTS = 5;
 const BASELINE_RECOVERY_BASE_DELAY_MS = 1_000;
 const BASELINE_RECOVERY_MAX_DELAY_MS = 15_000;
 const MAX_QUEUED_CHANGES_PER_THREAD = 300;
-const BACKGROUND_DISCONNECT_GRACE_MS = 30_000;
 // Phone interest survives per-thread release by design, so cap the set to keep a
 // marathon single Desktop connection from accumulating every thread id forever.
 const MAX_ACTIVE_THREAD_IDS = 512;
@@ -53,12 +52,13 @@ const DESKTOP_STATE_READ_METHODS = new Set([
 // cannot discover runs that started on the Mac.
 const DESKTOP_BACKGROUND_DISCOVERY_METHODS = new Set(["thread/list"]);
 const DESKTOP_TURNS_CURSOR_PREFIX = "remodex-desktop-turns:";
-// A cached Desktop state that claims an active turn is only trustworthy while
-// Desktop keeps streaming updates for it. Live runs broadcast deltas far more
-// often than this window; a silent "active" cache is a stale reconnect echo
-// (e.g. Desktop never saw the turn finish) and must not answer phone reads, or
-// the phone shows a phantom running indicator until real history loads.
+// Per-thread activity can be quiet during tools and subagents, so the short
+// freshness window alone does not revoke a healthy Desktop owner.
 const STALE_ACTIVE_READ_MAX_AGE_MS = 20_000;
+// An open Unix socket is not unlimited proof of a functioning publisher. If no
+// frame arrives for this generous lease, yield stale active reads so canonical
+// or rollout recovery can clear a phantom run.
+const CONNECTED_IPC_ACTIVITY_LEASE_MS = 5 * 60_000;
 const MAX_NORMALIZED_REVIEW_FINGERPRINTS_PER_THREAD = 128;
 const DESKTOP_FOLLOWER_REQUEST_METHODS = new Set([
   "turn/start",
@@ -229,7 +229,6 @@ function createDesktopIpcActionFollower({
   onNormalizedHistoryIndexRebuilt = () => {},
   requestTimeoutMs = REQUEST_TIMEOUT_MS,
   ownershipProbeTimeoutMs = OWNERSHIP_PROBE_TIMEOUT_MS,
-  backgroundDisconnectGraceMs = BACKGROUND_DISCONNECT_GRACE_MS,
 } = {}) {
   const ipc = createDesktopIpcClient({
     socketPath,
@@ -268,7 +267,6 @@ function createDesktopIpcActionFollower({
   // baseline. Otherwise a disconnect/eviction can erase the only evidence
   // needed to send the matching completion and leave a phantom running badge.
   const announcedBackgroundTurnsByThreadId = new Map();
-  const backgroundDisconnectTimersByThreadId = new Map();
   // JS Set preserves insertion order; delete-before-add refreshes recency, and
   // cap eviction skips threads with pending prompts so approvals are not lost.
   function rememberActiveThread(threadId) {
@@ -364,7 +362,6 @@ function createDesktopIpcActionFollower({
         } else {
           settleAnnouncedBackgroundTurn(threadId, "interrupted");
         }
-        clearBackgroundDisconnectTimer(threadId);
         announcedBackgroundTurnsByThreadId.delete(threadId);
         if (rawState) {
           const liveState = boundedDesktopLiveStateForThread(threadId, rawState);
@@ -500,10 +497,6 @@ function createDesktopIpcActionFollower({
     activeThreadIds.clear();
     backgroundOnlyThreadIds.clear();
     announcedBackgroundTurnsByThreadId.clear();
-    for (const timer of backgroundDisconnectTimersByThreadId.values()) {
-      clearTimeout(timer);
-    }
-    backgroundDisconnectTimersByThreadId.clear();
     recoveringThreadIds.clear();
     baselineRecoveryStateByThreadId.clear();
     queuedChangesByThreadId.clear();
@@ -545,9 +538,6 @@ function createDesktopIpcActionFollower({
     }
     if (!threadId) {
       return;
-    }
-    if (isSnapshotChange(params.change)) {
-      clearBackgroundDisconnectTimer(threadId);
     }
     const peerOwnershipSnapshot = isPeerOwnershipSnapshot(params);
     if (peerOwnershipSnapshot && !isLocallyOwnedThread(threadId)) {
@@ -744,9 +734,9 @@ function createDesktopIpcActionFollower({
     queuedChangesByThreadId.clear();
     pendingOwnershipProbeTokensByThreadId.clear();
     desktopOwnedByProbeThreadIds.clear();
-    for (const threadId of announcedBackgroundTurnsByThreadId.keys()) {
-      scheduleBackgroundDisconnectSettlement(threadId);
-    }
+    // A lost IPC connection is not evidence that Desktop stopped the turn.
+    // Keep announced lifecycle state until a reconnect snapshot, archive, or
+    // another authoritative state transition supplies a real terminal status.
     // Keep activeThreadIds: phone interest is phone-scoped, not connection-scoped.
     // Clearing it here would make reconnect snapshots for a thread the phone is
     // still viewing fail the activeThreadIds.has() guard until the phone happens
@@ -1100,11 +1090,13 @@ function createDesktopIpcActionFollower({
       return ownsDesktopCursor ? rejectDesktopTurnsCursor(message) : false;
     }
     const thread = projectDesktopConversationStateToThread(threadId, rawState, { now });
-    // A run that Desktop stopped streaming updates for is not a live run: serving
-    // it from cache would answer thread-list refreshes with a phantom "running"
-    // turn until real history loads. Let the local app-server answer instead.
+    // While IPC remains connected, an explicitly active Desktop snapshot stays
+    // authoritative through quiet tools, reasoning, approvals, and subagents.
+    // Falling through to a second app-server here can replace a genuinely
+    // running turn with stale idle history and make the phone clear Stop.
     if (hasActiveProjectedTurn(thread)
       && isRawStateStaleForActiveRead(threadId)
+      && !hasResponsiveDesktopIpc()
       && !ownsDesktopCursor) {
       staleYieldedThreadIds.add(threadId);
       return false;
@@ -1215,6 +1207,10 @@ function createDesktopIpcActionFollower({
     return now() - updatedAt > STALE_ACTIVE_READ_MAX_AGE_MS;
   }
 
+  function hasResponsiveDesktopIpc() {
+    return ipc.hasRecentActivity(CONNECTED_IPC_ACTIVITY_LEASE_MS);
+  }
+
   function boundedDesktopLiveStateForThread(threadId, state) {
     return boundedDesktopLiveState(
       state,
@@ -1242,6 +1238,8 @@ function createDesktopIpcActionFollower({
     const previousById = desktopLiveLifecycleByThreadId.get(threadId) || new Map();
     const nextTurns = activeDesktopTurnDescriptors(liveState);
     const nextById = new Map(nextTurns.map((turn) => [turn.id, turn]));
+    const completedTurnIds = new Set();
+    const startedTurnIds = new Set();
     const {
       previousTurnIds: continuityPreviousTurnIds,
       nextTurnIds: continuityNextTurnIds,
@@ -1266,6 +1264,7 @@ function createDesktopIpcActionFollower({
         threadId,
         { id: previous.id, status: terminalStatus }
       )));
+      completedTurnIds.add(previous.id);
     }
     for (const next of nextTurns) {
       if (previousById.has(next.id)) {
@@ -1281,7 +1280,52 @@ function createDesktopIpcActionFollower({
           ? notificationWithTurnIdentityContinuity(startedNotification)
           : startedNotification
       ));
+      startedTurnIds.add(next.id);
     }
+    reannounceRemainingParallelTurn(
+      threadId,
+      previousById,
+      nextTurns,
+      completedTurnIds,
+      startedTurnIds
+    );
+  }
+
+  // iOS tracks one phone-visible active turn per thread. If parallel turn B was
+  // the most recently announced turn and finishes while older A is still live,
+  // B's completion clears that slot. Re-announce A as continuity so Stop and
+  // running state stay attached to the existing run without advancing its
+  // generation. A newly started replacement already performs this handoff.
+  function reannounceRemainingParallelTurn(
+    threadId,
+    previousById,
+    nextTurns,
+    completedTurnIds,
+    startedTurnIds
+  ) {
+    const restorationTurnId = remainingParallelTurnRestorationId(
+      previousById,
+      nextTurns,
+      completedTurnIds
+    );
+    if (!restorationTurnId || startedTurnIds.has(restorationTurnId)) {
+      return;
+    }
+    const nextVisibleTurn = nextTurns.find((turn) => turn.id === restorationTurnId);
+    sendApplicationResponse(JSON.stringify(notificationWithTurnIdentityContinuity(
+      desktopLiveTurnLifecycleNotification("turn/started", threadId, nextVisibleTurn)
+    )));
+  }
+
+  function remainingParallelTurnRestorationId(previousById, nextTurns, completedTurnIds) {
+    const previousVisibleTurn = [...previousById.values()].at(-1);
+    if (!previousVisibleTurn || !completedTurnIds.has(previousVisibleTurn.id)) {
+      return "";
+    }
+    const nextVisibleTurn = nextTurns.at(-1);
+    return nextVisibleTurn && previousById.has(nextVisibleTurn.id)
+      ? nextVisibleTurn.id
+      : "";
   }
 
   function syncProjectedConversationState(threadId, nextState, { isFullSnapshot = false } = {}) {
@@ -1298,10 +1342,13 @@ function createDesktopIpcActionFollower({
       && !canonicalHistoryReplacementSentThreadIds.has(threadId)) {
       canonicalHistoryReplacementSentThreadIds.add(threadId);
       conversationProjector.remove(threadId);
-      // Seed the bounded live tail before asking the phone for canonical
-      // history. Subsequent 8-50ms Desktop patches then become small deltas
-      // instead of replaying hundreds of current-turn items as a baseline.
-      conversationProjector.seed(threadId, liveState);
+      // Project the bounded active tail before asking the phone for canonical
+      // history. On reconnect this snapshot may contain output produced while
+      // IPC was unavailable; silently seeding it would permanently eat that
+      // content when canonical JSONL/rollout history is still behind.
+      const bootstrapOutput = conversationProjector.project(threadId, liveState, {
+        includeAllActiveTurns: true,
+      });
       sendApplicationResponse(JSON.stringify({
         method: "thread/replaced",
         params: {
@@ -1316,6 +1363,11 @@ function createDesktopIpcActionFollower({
         normalizedLiveIndexesByThreadId.get(threadId)
       );
       emitDesktopSnapshotLifecycleTransition(threadId, liveState);
+      for (const notification of bootstrapOutput.notifications || []) {
+        if (readString(notification?.method).startsWith("item/")) {
+          sendApplicationResponse(JSON.stringify(notification));
+        }
+      }
       rememberDesktopLiveProjection(threadId, liveState);
       return;
     }
@@ -1361,16 +1413,39 @@ function createDesktopIpcActionFollower({
         },
       }));
     }
-    for (const notification of output.notifications || []) {
+    const outputNotifications = output.notifications || [];
+    const previousById = desktopLiveLifecycleByThreadId.get(threadId) || new Map();
+    const nextTurns = activeDesktopTurnDescriptors(liveState);
+    const completedTurnIds = new Set(outputNotifications
+      .filter((notification) => notification.method === "turn/completed")
+      .map((notification) => readString(notification.params?.turnId))
+      .filter(Boolean));
+    const startedTurnIds = new Set(outputNotifications
+      .filter((notification) => notification.method === "turn/started")
+      .map((notification) => readString(notification.params?.turnId))
+      .filter(Boolean));
+    const parallelRestorationTurnId = remainingParallelTurnRestorationId(
+      previousById,
+      nextTurns,
+      completedTurnIds
+    );
+    for (const notification of outputNotifications) {
+      const notificationTurnId = readString(notification.params?.turnId);
       const preservesTurnIdentity = notification.method === "turn/started"
-        && output.turnIdentityContinuityTurnIds?.includes(
-          readString(notification.params?.turnId)
-        );
+        && (parallelRestorationTurnId === notificationTurnId
+          || output.turnIdentityContinuityTurnIds?.includes(notificationTurnId));
       const projectedNotification = preservesTurnIdentity
         ? notificationWithTurnIdentityContinuity(notification)
         : notification;
       sendApplicationResponse(JSON.stringify(projectedNotification));
     }
+    reannounceRemainingParallelTurn(
+      threadId,
+      previousById,
+      nextTurns,
+      completedTurnIds,
+      startedTurnIds
+    );
     rememberDesktopLiveProjection(threadId, liveState);
   }
 
@@ -1470,14 +1545,12 @@ function createDesktopIpcActionFollower({
         nextActiveTurn
       )));
       announcedBackgroundTurnsByThreadId.set(threadId, nextActiveTurn);
-      clearBackgroundDisconnectTimer(threadId);
     }
   }
 
   function settleAnnouncedBackgroundTurn(threadId, status = "interrupted", turn = null) {
     const announcedTurn = announcedBackgroundTurnsByThreadId.get(threadId);
     if (!announcedTurn) {
-      clearBackgroundDisconnectTimer(threadId);
       return false;
     }
     const settledTurn = {
@@ -1492,34 +1565,7 @@ function createDesktopIpcActionFollower({
       settledTurn
     )));
     announcedBackgroundTurnsByThreadId.delete(threadId);
-    clearBackgroundDisconnectTimer(threadId);
     return true;
-  }
-
-  function scheduleBackgroundDisconnectSettlement(threadId) {
-    if (!announcedBackgroundTurnsByThreadId.has(threadId)
-      || backgroundDisconnectTimersByThreadId.has(threadId)) {
-      return;
-    }
-    const expectedTurnId = announcedBackgroundTurnsByThreadId.get(threadId)?.id;
-    const timer = setTimeout(() => {
-      backgroundDisconnectTimersByThreadId.delete(threadId);
-      if (announcedBackgroundTurnsByThreadId.get(threadId)?.id !== expectedTurnId) {
-        return;
-      }
-      settleAnnouncedBackgroundTurn(threadId, "interrupted");
-    }, Math.max(0, backgroundDisconnectGraceMs));
-    timer.unref?.();
-    backgroundDisconnectTimersByThreadId.set(threadId, timer);
-  }
-
-  function clearBackgroundDisconnectTimer(threadId) {
-    const timer = backgroundDisconnectTimersByThreadId.get(threadId);
-    if (!timer) {
-      return;
-    }
-    clearTimeout(timer);
-    backgroundDisconnectTimersByThreadId.delete(threadId);
   }
 
   function syncThreadArchiveBroadcast(envelope) {
@@ -1914,7 +1960,9 @@ function createDesktopIpcActionFollower({
         return false;
       }
       const thread = projectDesktopConversationStateToThread(normalizedThreadId, liveState, { now });
-      if (hasActiveProjectedTurn(thread) && isRawStateStaleForActiveRead(normalizedThreadId)) {
+      if (hasActiveProjectedTurn(thread)
+        && isRawStateStaleForActiveRead(normalizedThreadId)
+        && !hasResponsiveDesktopIpc()) {
         staleYieldedThreadIds.add(normalizedThreadId);
         return false;
       }
@@ -1945,7 +1993,7 @@ function createDesktopIpcActionFollower({
       if (hasActiveProjectedTurn(thread)) {
         const updatedAt = rawStateUpdatedAtByThreadId.get(normalizedThreadId) || 0;
         const hasNewerFallbackActivity = Number(fallbackActivityAt) > updatedAt;
-        return ipc.isConnected()
+        return hasResponsiveDesktopIpc()
           && (!isRawStateStaleForActiveRead(normalizedThreadId) || !hasNewerFallbackActivity);
       }
       return !isRawStateStaleForActiveRead(normalizedThreadId);
@@ -1967,6 +2015,7 @@ function createDesktopIpcClient({
   let socket = null;
   let clientId = "";
   let isConnecting = false;
+  let lastActivityAt = 0;
   let readBuffer = Buffer.alloc(0);
   const pendingRequests = new Map();
   const pendingDiscoveries = new Map();
@@ -2078,6 +2127,9 @@ function createDesktopIpcClient({
   }
 
   function handleData(chunk) {
+    if (chunk.length > 0) {
+      lastActivityAt = now();
+    }
     readBuffer = Buffer.concat([readBuffer, chunk]);
     while (readBuffer.length >= FRAME_HEADER_BYTES) {
       const frameLength = readBuffer.readUInt32LE(0);
@@ -2153,6 +2205,7 @@ function createDesktopIpcClient({
     socket = null;
     clientId = "";
     isConnecting = false;
+    lastActivityAt = 0;
     readBuffer = Buffer.alloc(0);
     for (const waiter of pendingRequests.values()) {
       clearTimeout(waiter.timeout);
@@ -2190,6 +2243,11 @@ function createDesktopIpcClient({
     ensureConnected,
     isConnected() {
       return Boolean(socket && !socket.destroyed && clientId);
+    },
+    hasRecentActivity(maxAgeMs) {
+      return Boolean(socket && !socket.destroyed && clientId)
+        && lastActivityAt > 0
+        && now() - lastActivityAt <= Math.max(0, Number(maxAgeMs) || 0);
     },
     sendRequest,
     sendDiscoveryRequest,
@@ -2717,7 +2775,8 @@ function boundedDesktopLiveTurns(
   if (orderedTurns.length <= 1) {
     return normalizeBoundedTurnsForRuntime(
       orderedTurns.map((turn, index) => withStableProjectedTurnId(turn, index)),
-      state
+      state,
+      retainedTurnIds
     );
   }
 
@@ -2744,7 +2803,7 @@ function boundedDesktopLiveTurns(
   const selectedTurns = Array.from(selectedIndexes)
     .sort((left, right) => left - right)
     .map((index) => withStableProjectedTurnId(orderedTurns[index], index));
-  return normalizeBoundedTurnsForRuntime(selectedTurns, state);
+  return normalizeBoundedTurnsForRuntime(selectedTurns, state, retainedTurnIds);
 }
 
 function boundedIndexedDesktopLiveTurns(state, index, nowValue, retainedTurnIds) {
@@ -2791,7 +2850,7 @@ function boundedIndexedDesktopLiveTurns(state, index, nowValue, retainedTurnIds)
       return turnIdOf(turn) ? turn : { ...turn, id: entry.id };
     })
     .filter(Boolean);
-  return normalizeBoundedTurnsForRuntime(selectedTurns, state);
+  return normalizeBoundedTurnsForRuntime(selectedTurns, state, retainedTurnIds);
 }
 
 function resolveIndexedTurn(state, entry) {
@@ -2868,12 +2927,12 @@ function notificationWithTurnIdentityContinuity(notification) {
   };
 }
 
-function normalizeBoundedTurnsForRuntime(turns, state) {
+function normalizeBoundedTurnsForRuntime(turns, state, retainedTurnIds = new Set()) {
   if (!isExplicitlyIdleDesktopRuntime(state)) {
     return turns;
   }
   return turns.map((turn) => (
-    isActiveRawTurn(turn)
+    isActiveRawTurn(turn) && !retainedTurnIds.has(turnIdOf(turn))
       ? { ...turn, status: "completed" }
       : turn
   ));

@@ -249,6 +249,9 @@ extension CodexService {
         threadsNeedingCanonicalHistoryReconcile.remove(threadId)
         pendingCanonicalSourceReplacementThreadIDs.remove(threadId)
         pendingReconnectRunContinuityThreadIDs.remove(threadId)
+        displacedActiveTurnIDsByThread.removeValue(forKey: threadId)
+        supersededTurnIDsByIDLessRunByThread.removeValue(forKey: threadId)
+        provisionalIDLessTurnIDByThread.removeValue(forKey: threadId)
         runStartGenerationByThread.removeValue(forKey: threadId)
         lastRunStartTurnIDByThread.removeValue(forKey: threadId)
         provisionalPaginatedHistoryThreadIDs.remove(threadId)
@@ -288,6 +291,9 @@ extension CodexService {
         pendingCanonicalSourceReplacementThreadIDs.removeAll()
         if !preserveRunLifecycle {
             pendingReconnectRunContinuityThreadIDs.removeAll()
+            displacedActiveTurnIDsByThread.removeAll()
+            supersededTurnIDsByIDLessRunByThread.removeAll()
+            provisionalIDLessTurnIDByThread.removeAll()
             runStartGenerationByThread.removeAll()
             lastRunStartTurnIDByThread.removeAll()
         }
@@ -574,6 +580,9 @@ extension CodexService {
         runningThreadIDs.remove(threadId)
         protectedRunningFallbackThreadIDs.remove(threadId)
         pendingReconnectRunContinuityThreadIDs.remove(threadId)
+        displacedActiveTurnIDsByThread.removeValue(forKey: threadId)
+        supersededTurnIDsByIDLessRunByThread.removeValue(forKey: threadId)
+        provisionalIDLessTurnIDByThread.removeValue(forKey: threadId)
         desktopMirroredRunningThreadIDs.remove(threadId)
         desktopMirroredRunningStaleSnapshotCountsByThread.removeValue(forKey: threadId)
         desktopMirroredRunningLastActivityAtByThread.removeValue(forKey: threadId)
@@ -587,6 +596,9 @@ extension CodexService {
     func clearAllRunningState() {
         runningThreadIDs.removeAll()
         protectedRunningFallbackThreadIDs.removeAll()
+        displacedActiveTurnIDsByThread.removeAll()
+        supersededTurnIDsByIDLessRunByThread.removeAll()
+        provisionalIDLessTurnIDByThread.removeAll()
         desktopMirroredRunningThreadIDs.removeAll()
         desktopMirroredRunningStaleSnapshotCountsByThread.removeAll()
         desktopMirroredRunningLastActivityAtByThread.removeAll()
@@ -4908,12 +4920,69 @@ extension CodexService {
         return replayIndices.last.map { messages[$0].id }
     }
 
-    private func knownAssistantTurnId(threadId: String, itemId: String) -> String? {
+    func knownAssistantTurnId(threadId: String, itemId: String) -> String? {
         messagesByThread[threadId]?.reversed().first(where: { message in
             message.role == .assistant
                 && message.itemId == itemId
                 && !(message.turnId ?? "").isEmpty
         })?.turnId
+    }
+
+    // Supplies a stable, non-actionable identity while the runtime has not yet
+    // attached a canonical turn id. This lets turn-less item deltas share one
+    // timeline row without making Stop send a synthetic id to app-server.
+    func provisionalIDLessTurnID(for threadId: String, startsNewRun: Bool) -> String {
+        if !startsNewRun, let existing = provisionalIDLessTurnIDByThread[threadId] {
+            return existing
+        }
+        let provisionalTurnID = CodexSyntheticIdentifiers.provisionalIDLessTurnID()
+        provisionalIDLessTurnIDByThread[threadId] = provisionalTurnID
+        threadIdByTurnID[provisionalTurnID] = threadId
+        return provisionalTurnID
+    }
+
+    // Canonical lifecycle can arrive after item output. Rebind the provisional
+    // rows and volatile lookup keys before later deltas use the real identity.
+    func promoteProvisionalIDLessTurnIfNeeded(threadId: String, canonicalTurnID: String) {
+        guard let provisionalTurnID = provisionalIDLessTurnIDByThread.removeValue(forKey: threadId),
+              provisionalTurnID != canonicalTurnID else {
+            return
+        }
+
+        flushPendingAssistantDeltas(for: threadId, turnId: provisionalTurnID)
+        flushPendingSystemDeltasForTurn(threadId: threadId, turnId: provisionalTurnID)
+
+        if var threadMessages = messagesByThread[threadId] {
+            var didMutate = false
+            for index in threadMessages.indices where threadMessages[index].turnId == provisionalTurnID {
+                threadMessages[index].turnId = canonicalTurnID
+                didMutate = true
+            }
+            if didMutate {
+                messagesByThread[threadId] = threadMessages
+                persistMessages()
+                updateCurrentOutput(for: threadId)
+            }
+        }
+
+        let provisionalTurnKey = streamingMessageKey(threadId: threadId, turnId: provisionalTurnID)
+        let canonicalTurnKey = streamingMessageKey(threadId: threadId, turnId: canonicalTurnID)
+        if let messageID = streamingAssistantFallbackMessageByTurnID.removeValue(forKey: provisionalTurnKey) {
+            streamingAssistantFallbackMessageByTurnID[canonicalTurnKey] = messageID
+        }
+        let provisionalItemPrefix = "\(provisionalTurnKey)|item:"
+        let provisionalItemKeys = streamingAssistantMessageByItemKey.keys.filter {
+            $0.hasPrefix(provisionalItemPrefix)
+        }
+        for provisionalKey in provisionalItemKeys {
+            guard let messageID = streamingAssistantMessageByItemKey.removeValue(forKey: provisionalKey) else {
+                continue
+            }
+            let itemSuffix = provisionalKey.dropFirst(provisionalTurnKey.count)
+            streamingAssistantMessageByItemKey[canonicalTurnKey + itemSuffix] = messageID
+        }
+        threadIdByTurnID.removeValue(forKey: provisionalTurnID)
+        threadIdByTurnID[canonicalTurnID] = threadId
     }
 
     func markMessageDeliveryState(
@@ -5016,17 +5085,25 @@ extension CodexService {
 
     // Marks streaming assistant state complete once turn/completed arrives.
     func markTurnCompleted(threadId: String, turnId: String?) {
+        let resolvedTurnId = turnId
+            ?? activeTurnIdByThread[threadId]
+            ?? provisionalIDLessTurnIDByThread[threadId]
+        promoteDisplacedActiveTurnIfNeeded(
+            threadId: threadId,
+            completedTurnId: resolvedTurnId
+        )
         let currentActiveTurnId = activeTurnIdByThread[threadId]
-        let resolvedTurnId = turnId ?? currentActiveTurnId
         flushPendingAssistantDeltas(for: threadId, turnId: resolvedTurnId)
         flushPendingSystemDeltasForTurn(threadId: threadId, turnId: resolvedTurnId)
 
         // Desktop can report a late terminal event for turn A after turn B has
         // already become the thread's active turn. Completing A must not clear
         // B's running badge and then wait for a later state probe to restore it.
-        let completesCurrentThreadRun = resolvedTurnId == nil
-            || currentActiveTurnId == nil
-            || resolvedTurnId == currentActiveTurnId
+        let completesCurrentThreadRun = turnCompletionMatchesCurrentThreadRun(
+            threadId: threadId,
+            completedTurnId: resolvedTurnId,
+            currentActiveTurnId: currentActiveTurnId
+        )
         if completesCurrentThreadRun {
             clearRunningState(for: threadId)
             clearRunningThreadWatch(threadId)
@@ -5199,13 +5276,75 @@ extension CodexService {
         updateCurrentOutput(for: threadId)
     }
 
+    // Promotes an older overlapping run when the newest identified turn finishes.
+    // The snapshot refresh remains authoritative, but this prevents the running UI
+    // and Stop control from dropping during the recovery round trip.
+    @discardableResult
+    func promoteDisplacedActiveTurnIfNeeded(threadId: String, completedTurnId: String?) -> Bool {
+        guard let completedTurnId else {
+            return false
+        }
+
+        displacedActiveTurnIDsByThread[threadId]?.remove(completedTurnId)
+        guard activeTurnIdByThread[threadId] == completedTurnId,
+              let promotedTurnId = displacedActiveTurnIDsByThread[threadId]?.popFirst() else {
+            if displacedActiveTurnIDsByThread[threadId]?.isEmpty == true {
+                displacedActiveTurnIDsByThread.removeValue(forKey: threadId)
+            }
+            return false
+        }
+
+        if displacedActiveTurnIDsByThread[threadId]?.isEmpty == true {
+            displacedActiveTurnIDsByThread.removeValue(forKey: threadId)
+        }
+        setActiveTurnID(promotedTurnId, for: threadId)
+        threadIdByTurnID[promotedTurnId] = threadId
+        markThreadAsRunning(threadId)
+        setProtectedRunningFallback(false, for: threadId)
+        if activeTurnId == completedTurnId {
+            activeTurnId = promotedTurnId
+        }
+        return true
+    }
+
+    // An identified completion displaced by a newer id-less start belongs to the
+    // older run even though there is temporarily no current active turn id.
+    func turnCompletionMatchesCurrentThreadRun(
+        threadId: String,
+        completedTurnId: String?,
+        currentActiveTurnId: String?
+    ) -> Bool {
+        guard let completedTurnId else {
+            return true
+        }
+        if let currentActiveTurnId {
+            return completedTurnId == currentActiveTurnId
+        }
+        if supersededTurnIDsByIDLessRunByThread[threadId]?.contains(completedTurnId) == true,
+           (protectedRunningFallbackThreadIDs.contains(threadId)
+                || pendingReconnectRunContinuityThreadIDs.contains(threadId)) {
+            return false
+        }
+        return true
+    }
+
     // Converts all pending streaming bubbles to completed state after transport failures.
-    func finalizeAllStreamingState() {
+    func finalizeAllStreamingState(preserveRunLifecycle: Bool = false) {
         flushAllPendingStreamingDeltas()
         var didMutate = false
 
+        let preservedThreadIDs: Set<String> = preserveRunLifecycle
+            ? runningThreadIDs
+                .union(protectedRunningFallbackThreadIDs)
+                .union(activeTurnIdByThread.keys)
+            : []
+
         for threadId in messagesByThread.keys {
             guard var threadMessages = messagesByThread[threadId] else { continue }
+
+            if preservedThreadIDs.contains(threadId) {
+                continue
+            }
 
             var localChanged = false
             for index in threadMessages.indices where threadMessages[index].isStreaming {
@@ -5232,19 +5371,41 @@ extension CodexService {
         pendingReconnectRunContinuityThreadIDs.formUnion(protectedRunningFallbackThreadIDs)
         pendingReconnectRunContinuityThreadIDs.formUnion(activeTurnIdByThread.keys)
 
-        activeTurnId = nil
-        activeTurnIdByThread.removeAll()
-        threadsPendingCompletionHaptic.removeAll()
-        clearAllRunningState()
-        streamingAssistantFallbackMessageByTurnID.removeAll()
-        streamingAssistantMessageByItemKey.removeAll()
-        streamingSystemMessageByItemID.removeAll()
+        if !preserveRunLifecycle {
+            activeTurnId = nil
+            activeTurnIdByThread.removeAll()
+            threadsPendingCompletionHaptic.removeAll()
+            clearAllRunningState()
+            displacedActiveTurnIDsByThread.removeAll()
+            supersededTurnIDsByIDLessRunByThread.removeAll()
+            provisionalIDLessTurnIDByThread.removeAll()
+        }
+        if preserveRunLifecycle {
+            let preservedMessageIDs = Set(preservedThreadIDs.flatMap { threadID in
+                (messagesByThread[threadID] ?? []).filter(\.isStreaming).map(\.id)
+            })
+            streamingAssistantFallbackMessageByTurnID = streamingAssistantFallbackMessageByTurnID.filter {
+                preservedMessageIDs.contains($0.value)
+            }
+            streamingAssistantMessageByItemKey = streamingAssistantMessageByItemKey.filter {
+                preservedMessageIDs.contains($0.value)
+            }
+            streamingSystemMessageByItemID = streamingSystemMessageByItemID.filter {
+                preservedMessageIDs.contains($0.value)
+            }
+        } else {
+            streamingAssistantFallbackMessageByTurnID.removeAll()
+            streamingAssistantMessageByItemKey.removeAll()
+            streamingSystemMessageByItemID.removeAll()
+        }
         pendingAssistantDeltaByStreamID.removeAll()
         pendingAssistantDeltaContextByStreamID.removeAll()
         pendingAssistantDeltaStreamOrder.removeAll()
         pendingAssistantDeltaFlushTask?.cancel()
         pendingAssistantDeltaFlushTask = nil
-        threadIdByTurnID.removeAll()
+        if !preserveRunLifecycle {
+            threadIdByTurnID.removeAll()
+        }
 
         if didMutate {
             persistCurrentMacMessages()

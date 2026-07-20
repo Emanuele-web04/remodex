@@ -208,7 +208,11 @@ struct SystemMessageContentView: View {
     @ViewBuilder
     private var autoApprovalReviewSystemView: some View {
         if let review = message.autoApprovalReview {
-            AutoApprovalReviewRow(threadId: message.threadId, review: review)
+            AutoApprovalReviewRow(
+                threadId: message.threadId,
+                review: review,
+                actionSummary: text
+            )
         } else {
             defaultSystemView(text: text)
         }

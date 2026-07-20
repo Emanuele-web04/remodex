@@ -87,17 +87,16 @@ enum TurnTimelineReducer {
             }
 
             let turnMessages = indices.map { result[$0] }
+            let chronologicalTurnMessages = turnMessages.sorted { $0.orderIndex < $1.orderIndex }
 
             let sorted: [CodexMessage]
-            if hasInterleavedUserFlow(turnMessages) {
+            if hasInterleavedUserFlow(chronologicalTurnMessages) {
                 // Steer can append a later user row into the still-active turn before the
                 // assistant emits another distinct item. Preserve chronology so that user
                 // prompt stays visible near the tail instead of jumping to the turn start.
-                sorted = movingFileChangesToTurnTail(
-                    in: turnMessages.sorted { $0.orderIndex < $1.orderIndex }
-                )
-            } else if hasInterleavedAssistantActivityFlow(turnMessages)
-                        || hasInterleavedCommandTraceFlow(turnMessages) {
+                sorted = movingFileChangesToTurnTail(in: chronologicalTurnMessages)
+            } else if hasInterleavedAssistantActivityFlow(chronologicalTurnMessages)
+                        || hasInterleavedCommandTraceFlow(chronologicalTurnMessages) {
                 // Interleaved assistant or command-trace flow: keep streamed chronology.
                 // If the turn has only one user prompt, we can still float that original
                 // opener forward. A second user row is an in-turn steer and stays in place.
@@ -107,17 +106,15 @@ enum TurnTimelineReducer {
                     }
                 }
                 let openingUserID = userCount == 1
-                    ? turnMessages
-                        .filter { $0.role == .user }
-                        .min(by: { $0.orderIndex < $1.orderIndex })?
-                        .id
+                    ? chronologicalTurnMessages.first(where: { $0.role == .user })?.id
                     : nil
 
-                let chronological = turnMessages.sorted { a, b in
-                    let aIsOpeningUser = openingUserID != nil && a.id == openingUserID
-                    let bIsOpeningUser = openingUserID != nil && b.id == openingUserID
-                    if aIsOpeningUser != bIsOpeningUser { return aIsOpeningUser }
-                    return a.orderIndex < b.orderIndex
+                var chronological = chronologicalTurnMessages
+                if let openingUserID,
+                   let openingUserIndex = chronological.firstIndex(where: { $0.id == openingUserID }),
+                   openingUserIndex != chronological.startIndex {
+                    let openingUser = chronological.remove(at: openingUserIndex)
+                    chronological.insert(openingUser, at: chronological.startIndex)
                 }
                 sorted = movingFileChangesToTurnTail(in: chronological)
             } else {
@@ -153,10 +150,9 @@ enum TurnTimelineReducer {
             return false
         }
 
-        let ordered = turnMessages.sorted { $0.orderIndex < $1.orderIndex }
         var seenNonUser = false
 
-        for message in ordered {
+        for message in turnMessages {
             if message.role == .user {
                 if seenNonUser {
                     return true
@@ -197,11 +193,10 @@ enum TurnTimelineReducer {
 
         // Check for activity after an already-visible assistant row. Preserving command/tool
         // chronology avoids a second jump when the assistant flips from streaming to complete.
-        let ordered = turnMessages.sorted { $0.orderIndex < $1.orderIndex }
         var hasActivityBeforeAssistant = false
         var seenAssistant = false
         var seenStreamingAssistant = false
-        for message in ordered {
+        for message in turnMessages {
             if message.role == .assistant {
                 seenAssistant = true
                 if message.isStreaming {
@@ -226,10 +221,9 @@ enum TurnTimelineReducer {
     // sorting would move the trace ahead of its command and break the disclosure,
     // even when no later command follows it.
     private static func hasInterleavedCommandTraceFlow(_ turnMessages: [CodexMessage]) -> Bool {
-        let ordered = turnMessages.sorted { $0.orderIndex < $1.orderIndex }
         var seenCommand = false
 
-        for message in ordered {
+        for message in turnMessages {
             if message.role == .system, message.kind == .commandExecution {
                 seenCommand = true
             } else if seenCommand,

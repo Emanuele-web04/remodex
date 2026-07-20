@@ -83,6 +83,13 @@ nonisolated enum CodexSyntheticIdentifiers {
         turnId.hasPrefix("ipc-turn-")
     }
 
+    /// Mints an in-memory turn identity for runtimes that announce a running
+    /// turn before they expose its canonical id. The `ipc-turn-` family keeps
+    /// history reconciliation and terminal-state persistence provisional.
+    static func provisionalIDLessTurnID() -> String {
+        "ipc-turn-idless-\(UUID().uuidString.lowercased())"
+    }
+
     /// True for the Desktop projector's synthetic user prompt item ids.
     static func isProjectedDesktopUserItemID(_ itemId: String) -> Bool {
         itemId.hasSuffix(":input")

@@ -727,25 +727,54 @@ extension CodexService {
             }
         }
 
+        var preservesReconnectRun = false
         if let threadId, !isReplayedEvent {
-            let preservesReconnectRun = pendingReconnectRunContinuityThreadIDs
-                .remove(threadId) != nil
+            // Keep continuity until a turn snapshot confirms a live/terminal turn.
+            // A reconnect start can race an empty stale snapshot from the bridge.
+            preservesReconnectRun = pendingReconnectRunContinuityThreadIDs.contains(threadId)
+        }
+        if let threadId, !isReplayedEvent {
             let previousStartedTurnID = lastRunStartTurnIDByThread[threadId]
             let previousKnownTurnID = previousStartedTurnID ?? previousActiveTurnID
             let repeatsKnownTurn = turnID != nil && turnID == previousKnownTurnID
             let startsDistinctIdentifiedTurn = turnID != nil
                 && previousKnownTurnID != nil
                 && turnID != previousKnownTurnID
+            let startsDistinctIDLessTurn = turnID == nil
+                && previousActiveTurnID != nil
+                && !preservesRunningSourceEpoch
+                && !preservesReconnectRun
             if !preservesRunningSourceEpoch
                 && !repeatsKnownTurn
                 && !(preservesReconnectRun && !startsDistinctIdentifiedTurn)
-                && (!wasThreadRunning || startsDistinctIdentifiedTurn) {
+                && (!wasThreadRunning || startsDistinctIdentifiedTurn || startsDistinctIDLessTurn) {
                 runStartGenerationByThread[threadId, default: 0] += 1
             }
             if let turnID {
+                promoteProvisionalIDLessTurnIfNeeded(
+                    threadId: threadId,
+                    canonicalTurnID: turnID
+                )
                 lastRunStartTurnIDByThread[threadId] = turnID
+            } else if startsDistinctIDLessTurn {
+                if let previousActiveTurnID {
+                    var supersededTurnIDs = displacedActiveTurnIDsByThread.removeValue(forKey: threadId) ?? []
+                    supersededTurnIDs.insert(previousActiveTurnID)
+                    supersededTurnIDsByIDLessRunByThread[threadId] = supersededTurnIDs
+                    setActiveTurnID(nil, for: threadId)
+                    if activeTurnId == previousActiveTurnID {
+                        activeTurnId = nil
+                    }
+                }
+                lastRunStartTurnIDByThread.removeValue(forKey: threadId)
             } else if !wasThreadRunning && !preservesReconnectRun {
                 lastRunStartTurnIDByThread.removeValue(forKey: threadId)
+            }
+            if turnID == nil {
+                _ = provisionalIDLessTurnID(
+                    for: threadId,
+                    startsNewRun: !wasThreadRunning || startsDistinctIDLessTurn
+                )
             }
             markThreadAsRunning(threadId)
             if isDesktopMirroredTurn {
@@ -755,6 +784,13 @@ extension CodexService {
         }
 
         if let threadId, let turnID {
+            if let previousActiveTurnID,
+               previousActiveTurnID != turnID,
+               !preservesRunningSourceEpoch,
+               !isReplayedEvent {
+                displacedActiveTurnIDsByThread[threadId, default: []].insert(previousActiveTurnID)
+            }
+            supersededTurnIDsByIDLessRunByThread.removeValue(forKey: threadId)
             threadIdByTurnID[turnID] = threadId
             confirmLatestPendingUserMessage(threadId: threadId, turnId: turnID)
             if !isReplayedEvent {
@@ -792,13 +828,25 @@ extension CodexService {
         if let threadId = resolveThreadID(from: paramsObject, turnIdHint: completedTurnID) {
             let shouldRemainLifecycleOnly = isBackgroundDiscoveryTurn && threadId != activeThreadId
             if let completedTurnID {
+                promoteProvisionalIDLessTurnIfNeeded(
+                    threadId: threadId,
+                    canonicalTurnID: completedTurnID
+                )
                 confirmLatestPendingUserMessage(threadId: threadId, turnId: completedTurnID)
             }
-            let resolvedTurnID = completedTurnID ?? activeTurnIdByThread[threadId]
+            let resolvedTurnID = completedTurnID
+                ?? activeTurnIdByThread[threadId]
+                ?? provisionalIDLessTurnIDByThread[threadId]
+            let didPromoteDisplacedTurn = promoteDisplacedActiveTurnIfNeeded(
+                threadId: threadId,
+                completedTurnId: resolvedTurnID
+            )
             let currentActiveTurnID = activeTurnIdByThread[threadId]
-            let completesCurrentThreadRun = resolvedTurnID == nil
-                || currentActiveTurnID == nil
-                || resolvedTurnID == currentActiveTurnID
+            let completesCurrentThreadRun = turnCompletionMatchesCurrentThreadRun(
+                threadId: threadId,
+                completedTurnId: resolvedTurnID,
+                currentActiveTurnId: currentActiveTurnID
+            )
             let terminalState = parseTurnTerminalState(
                 from: paramsObject,
                 turnFailureMessage: turnFailureMessage
@@ -835,6 +883,10 @@ extension CodexService {
             if completesCurrentThreadRun && !shouldRemainLifecycleOnly {
                 requestImmediateSync(threadId: threadId)
                 requestThreadHistoryReconcile(threadId: threadId)
+            } else if didPromoteDisplacedTurn && !shouldRemainLifecycleOnly {
+                // Confirm that the promoted sibling is truly still running. If
+                // its completion was lost, the fresh snapshot clears the fallback.
+                requestImmediateSync(threadId: threadId)
             }
             if completesCurrentThreadRun, terminalState == .completed, !shouldRemainLifecycleOnly {
                 scheduleAppReviewPromptAfterSuccessfulRun(threadId: threadId, turnId: resolvedTurnID)

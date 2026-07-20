@@ -2600,7 +2600,6 @@ test("desktop IPC follower settles an announced background turn after reconnect"
       outbound.push(JSON.parse(message));
     },
     requestTimeoutMs: 500,
-    backgroundDisconnectGraceMs: 250,
   });
   t.after(() => follower.stopAll());
 
@@ -2640,7 +2639,7 @@ test("desktop IPC follower settles an announced background turn after reconnect"
   assert.equal(completions[0].params.status, "completed");
 });
 
-test("desktop IPC follower interrupts announced background turns when Litter stays disconnected", async (t) => {
+test("desktop IPC follower keeps announced background turns running through an IPC disconnect", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-background-disconnect-");
   let serverSocket = null;
   const server = net.createServer((socket) => {
@@ -2672,7 +2671,6 @@ test("desktop IPC follower interrupts announced background turns when Litter sta
       outbound.push(JSON.parse(message));
     },
     requestTimeoutMs: 500,
-    backgroundDisconnectGraceMs: 20,
   });
   t.after(() => follower.stopAll());
 
@@ -2684,17 +2682,32 @@ test("desktop IPC follower interrupts announced background turns when Litter sta
     { turnId: "turn-background-disconnect" }
   ));
   await waitFor(() => outbound.some((message) => message.method === "turn/started"));
-  serverSocket.destroy();
+  const disconnectedSocket = serverSocket;
+  disconnectedSocket.destroy();
 
+  await wait(75);
+  assert.equal(outbound.some((message) => (
+    message.method === "turn/completed"
+      && message.params?.threadId === "thread-background-disconnect"
+  )), false, "transport loss alone must not synthesize an interrupted turn");
+
+  follower.observeInbound(JSON.stringify({ method: "thread/list", params: {} }));
+  await waitFor(() => serverSocket && serverSocket !== disconnectedSocket);
+  writeFrame(serverSocket, backgroundConversationSnapshot(
+    "thread-background-disconnect",
+    "completed",
+    { turnId: "turn-background-disconnect" }
+  ));
   await waitFor(() => outbound.some((message) => (
     message.method === "turn/completed"
       && message.params?.threadId === "thread-background-disconnect"
   )));
-  const completed = outbound.find((message) => (
+  const completions = outbound.filter((message) => (
     message.method === "turn/completed"
       && message.params?.threadId === "thread-background-disconnect"
   ));
-  assert.equal(completed.params.status, "interrupted");
+  assert.equal(completions.length, 1);
+  assert.equal(completions[0].params.status, "completed");
 });
 
 test("desktop IPC follower settles a running background thread before archive", async (t) => {
@@ -2874,7 +2887,6 @@ test("desktop IPC background recovery stays lifecycle-only until open", async (t
       return structuredClone(baseline);
     },
     requestTimeoutMs: 500,
-    backgroundDisconnectGraceMs: 1_000,
   });
   t.after(() => follower.stopAll());
 
@@ -4424,7 +4436,7 @@ test("desktop IPC follower ignores Remodex-owned live owner broadcasts", async (
   assert.deepEqual(outbound, []);
 });
 
-test("desktop IPC follower yields stale active ownership and cleanly replaces it from a fresh snapshot", async (t) => {
+test("desktop IPC follower keeps connected active ownership authoritative through quiet work", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-stale-active-read-");
   let serverSocket = null;
 
@@ -4499,10 +4511,10 @@ test("desktop IPC follower yields stale active ownership and cleanly replaces it
   assert.equal(freshServed, true);
   assert.equal(outbound.some((message) => message.id === "read-fresh"), true);
 
-  // Desktop went silent while the cache still claims an active turn. Cached
-  // reads yield quickly, while source ownership gets a longer quiet-turn lease.
+  // Long-running tools, subagents, approvals, and reasoning can be quiet for
+  // longer than the cache window while the Desktop IPC stream stays healthy.
   fakeNow += 21_000;
-  assert.equal(follower.hasLiveThreadState("thread-stale-active"), false);
+  assert.equal(follower.hasLiveThreadState("thread-stale-active"), true);
   assert.equal(
     follower.hasFreshLiveThreadState("thread-stale-active", {
       fallbackActivityAt: desktopSnapshotAt - 1,
@@ -4515,8 +4527,11 @@ test("desktop IPC follower yields stale active ownership and cleanly replaces it
     method: "thread/read",
     params: { threadId: "thread-stale-active" },
   }));
-  assert.equal(staleServed, false);
-  assert.equal(outbound.some((message) => message.id === "read-stale"), false);
+  assert.equal(staleServed, true);
+  assert.equal(
+    outbound.find((message) => message.id === "read-stale")?.result?.thread?.turns?.[0]?.status,
+    "inProgress"
+  );
 
   // A connected IPC client is not permanent proof that this one thread is
   // still live. Newer rollout activity lets the fallback recover it.
@@ -4524,8 +4539,8 @@ test("desktop IPC follower yields stale active ownership and cleanly replaces it
     fallbackActivityAt: fakeNow + 1,
   }), false);
 
-  // The next fresh Desktop snapshot starts a new source epoch. It must arrive as
-  // one replacement bootstrap, not as an incremental completion of stale state.
+  // The next Desktop snapshot continues the same source epoch and produces the
+  // real completion instead of a replacement/bootstrap discontinuity.
   const freshEpochStartIndex = outbound.length;
   writeFrame(serverSocket, {
     type: "broadcast",
@@ -4551,41 +4566,17 @@ test("desktop IPC follower yields stale active ownership and cleanly replaces it
       },
     },
   });
-  await waitFor(() => {
-    const messages = outbound.slice(freshEpochStartIndex);
-    return messages.some((message) => message.method === "thread/replaced")
-      && messages.some((message) => message.method === "thread/started");
-  });
+  await waitFor(() => outbound.slice(freshEpochStartIndex).some((message) => (
+    message.method === "turn/completed"
+  )));
   const freshEpochMessages = outbound.slice(freshEpochStartIndex);
-  const replacementAnnouncementIndex = freshEpochMessages.findIndex((message) => (
-    message.method === "thread/replaced"
-  ));
-  const replacementBootstrapIndex = freshEpochMessages.findIndex((message) => (
-    message.method === "thread/started"
-  ));
-  assert.ok(replacementAnnouncementIndex >= 0);
-  assert.ok(replacementAnnouncementIndex < replacementBootstrapIndex);
-  const replacementBootstrap = freshEpochMessages.find((message) => (
-    message.method === "thread/started"
-  ));
-  assert.equal(replacementBootstrap.params.threadId, "thread-stale-active");
-  assert.equal(replacementBootstrap.params.remodexDesktopMirror, true);
-  assert.deepEqual(
-    replacementBootstrap.params.thread.turns.map((turn) => ({
-      id: turn.id,
-      status: turn.status,
-      itemIDs: turn.items.map((item) => item.id),
-    })),
-    [{
-      id: "turn-stale-active",
-      status: "completed",
-      itemIDs: ["assistant-fresh-epoch"],
-    }]
-  );
   assert.equal(
-    freshEpochMessages.some((message) => message.method === "turn/completed"),
+    freshEpochMessages.some((message) => message.method === "thread/replaced"),
     false
   );
+  const completion = freshEpochMessages.find((message) => message.method === "turn/completed");
+  assert.equal(completion.params.turnId, "turn-stale-active");
+  assert.equal(completion.params.status, "completed");
   assert.equal(follower.hasLiveThreadState("thread-stale-active"), true);
 
   // Idle cached threads have no phantom-running risk: they stay servable even
@@ -4600,6 +4591,82 @@ test("desktop IPC follower yields stale active ownership and cleanly replaces it
   const idleResponse = outbound.find((message) => message.id === "read-idle");
   assert.equal(idleResponse.result.thread.turns[0].status, "completed");
   assert.equal(idleResponse.result.thread.turns[0].items[0].id, "assistant-fresh-epoch");
+});
+
+test("desktop IPC follower releases stale active ownership when the connected bus stops responding", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-stalled-active-read-");
+  let serverSocket = null;
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "router",
+          result: { clientId: "remodex-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  let fakeNow = 2_000_000;
+  const outbound = [];
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    now: () => fakeNow,
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    requestTimeoutMs: 500,
+  });
+  t.after(() => follower.stopAll());
+
+  follower.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-stalled-active" },
+  }));
+  await waitFor(() => serverSocket);
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop-live",
+    version: 6,
+    params: {
+      conversationId: "thread-stalled-active",
+      change: {
+        type: "snapshot",
+        conversationState: {
+          turns: [{
+            id: "turn-stalled-active",
+            status: "inProgress",
+            items: [],
+          }],
+          requests: [],
+        },
+      },
+    },
+  });
+  await waitFor(() => follower.hasLiveThreadState("thread-stalled-active"));
+
+  // The socket remains open, but no frame arrives for longer than the bus lease.
+  fakeNow += 5 * 60_000 + 1;
+  assert.equal(follower.hasLiveThreadState("thread-stalled-active"), false);
+  const served = follower.observeInbound(JSON.stringify({
+    id: "read-stalled",
+    method: "thread/read",
+    params: { threadId: "thread-stalled-active" },
+  }));
+  assert.equal(served, false);
+  assert.equal(outbound.some((message) => message.id === "read-stalled"), false);
 });
 
 test("desktop IPC follower yields normalized history reads while keeping its bounded live tail", async (t) => {
@@ -4991,11 +5058,12 @@ test("desktop IPC follower yields normalized history reads while keeping its bou
       },
     },
   });
-  await waitFor(() => outbound.some((message) => (
+  await wait(25);
+  assert.equal(outbound.some((message) => (
     message.method === "turn/completed"
       && message.params?.threadId === "thread-normalized-history"
       && message.params?.turnId === "turn-running"
-  )));
+  )), false, "runtime idle alone must not complete an explicitly active turn");
   assert.equal(
     outbound.some((message) => (
       message.method === "turn/started"
@@ -5003,6 +5071,29 @@ test("desktop IPC follower yields normalized history reads while keeping its bou
     )),
     false
   );
+
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop-live",
+    version: 11,
+    params: {
+      conversationId: "thread-normalized-history",
+      change: {
+        type: "patches",
+        patches: [{
+          op: "replace",
+          path: ["turns", 2, "status"],
+          value: "completed",
+        }],
+      },
+    },
+  });
+  await waitFor(() => outbound.some((message) => (
+    message.method === "turn/completed"
+      && message.params?.threadId === "thread-normalized-history"
+      && message.params?.turnId === "turn-running"
+  )));
   outbound.length = 0;
 
   assert.equal(follower.observeInbound(JSON.stringify({
@@ -5274,13 +5365,19 @@ test("desktop IPC follower completes either parallel active turn across normaliz
   });
   t.after(() => follower.stopAll());
 
+  const primaryThreadId = "thread-parallel-normalized";
   follower.observeInbound(JSON.stringify({
     method: "thread/resume",
-    params: { threadId: "thread-parallel-normalized" },
+    params: { threadId: primaryThreadId },
   }));
   await waitFor(() => serverSocket);
 
-  const sendSnapshot = (firstStatus, secondStatus, runtimeType = "active") => {
+  const sendSnapshot = (
+    firstStatus,
+    secondStatus,
+    runtimeType = "active",
+    threadId = primaryThreadId
+  ) => {
     const firstTurn = {
       turnId: "turn-parallel-a",
       turnStartedAtMs: nowValue,
@@ -5301,7 +5398,7 @@ test("desktop IPC follower completes either parallel active turn across normaliz
       sourceClientId: "desktop-live",
       version: 11,
       params: {
-        conversationId: "thread-parallel-normalized",
+        conversationId: threadId,
         change: {
           type: "snapshot",
           conversationState: {
@@ -5362,9 +5459,69 @@ test("desktop IPC follower completes either parallel active turn across normaliz
       && message.params?.turnId === "turn-parallel-b"
   )));
   assert.equal(outbound.some((message) => message.method === "turn/started"), false);
+
+  const inverseThreadId = "thread-parallel-normalized-inverse";
+  outbound.length = 0;
+  follower.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: inverseThreadId },
+  }));
+  sendSnapshot("inProgress", "inProgress", "active", inverseThreadId);
+  await waitFor(() => outbound.filter((message) => (
+    message.method === "turn/started"
+      && message.params?.threadId === inverseThreadId
+  )).length === 2);
+  outbound.length = 0;
+
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop-live",
+    version: 11,
+    params: {
+      conversationId: inverseThreadId,
+      change: {
+        type: "patches",
+        patches: [{
+          op: "replace",
+          path: [
+            "turnHistory",
+            "history",
+            "entitiesByKey",
+            "turn:turn-parallel-b",
+            "status",
+          ],
+          value: "completed",
+        }],
+      },
+    },
+  });
+  await waitFor(() => outbound.some((message) => (
+    message.method === "turn/started"
+      && message.params?.threadId === inverseThreadId
+      && message.params?.turnId === "turn-parallel-a"
+  )));
+  const inverseMessages = outbound.filter((message) => (
+    message.params?.threadId === inverseThreadId
+  ));
+  const secondCompletionIndex = inverseMessages.findIndex((message) => (
+    message.method === "turn/completed" && message.params?.turnId === "turn-parallel-b"
+  ));
+  const firstRestoreIndex = inverseMessages.findIndex((message) => (
+    message.method === "turn/started" && message.params?.turnId === "turn-parallel-a"
+  ));
+  assert.ok(secondCompletionIndex >= 0);
+  assert.ok(firstRestoreIndex > secondCompletionIndex);
+  assert.equal(inverseMessages[firstRestoreIndex].params.remodexTurnIdentityContinuity, true);
+  assert.equal(
+    inverseMessages.some((message) => (
+      message.method === "turn/completed" && message.params?.turnId === "turn-parallel-a"
+    )),
+    false
+  );
 });
 
-test("desktop IPC follower forces canonical repair after a normalized reconnect snapshot", async (t) => {
+test("desktop IPC follower bootstraps normalized active content produced during reconnect", async (t) => {
   const { socketPath, state } = await startInitializedIpcTestServer(
     t,
     "remodex-ipc-normalized-reconnect-repair-"
@@ -5435,11 +5592,22 @@ test("desktop IPC follower forces canonical repair after a normalized reconnect 
   await waitFor(() => state.connectionCount === 2 && state.socket);
   sendSnapshot("Output produced while IPC was disconnected");
 
-  await waitFor(() => outbound.some((message) => message.method === "thread/replaced"));
+  await waitFor(() => outbound.some((message) => (
+    message.method === "item/started"
+      && message.params?.itemId === "assistant-reconnect"
+  )));
+  const bootstrappedItem = outbound.find((message) => (
+    message.method === "item/started"
+      && message.params?.itemId === "assistant-reconnect"
+  ));
   assert.equal(
     outbound.some((message) => message.method === "item/agentMessage/delta"),
     false,
-    "the reconnect snapshot must force canonical reload instead of pretending outage content was streamed"
+    "reconnect content is bootstrapped as an item, not misrepresented as a streamed suffix"
+  );
+  assert.equal(
+    bootstrappedItem.params.item.text,
+    "Output produced while IPC was disconnected"
   );
 });
 
@@ -5865,19 +6033,40 @@ test("desktop IPC follower reuses its normalized history index for live content 
       change: {
         type: "patches",
         patches: [
-          {
-            op: "replace",
-            path: [
-              "turnHistory",
-              "history",
-              "entitiesByKey",
-              "turn:turn-index-live",
-              "status",
-            ],
-            value: "completed",
-          },
           { op: "replace", path: ["threadRuntimeStatus", "type"], value: "idle" },
         ],
+      },
+    },
+  });
+  await wait(25);
+  assert.equal(
+    outbound.some((message) => (
+      message.method === "turn/completed" && message.params?.turnId === "turn-index-live"
+    )),
+    false,
+    "a runtime-idle-only patch must not complete an explicitly in-progress turn"
+  );
+
+  writeFrame(state.socket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop-live",
+    version: 11,
+    params: {
+      conversationId: threadId,
+      change: {
+        type: "patches",
+        patches: [{
+          op: "replace",
+          path: [
+            "turnHistory",
+            "history",
+            "entitiesByKey",
+            "turn:turn-index-live",
+            "status",
+          ],
+          value: "completed",
+        }],
       },
     },
   });

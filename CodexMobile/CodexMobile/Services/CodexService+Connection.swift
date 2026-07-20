@@ -513,7 +513,9 @@ extension CodexService {
         }
         connectionRecoveryState = disposition.connectionRecoveryState
         lastErrorMessage = disposition.lastErrorMessage
-        finalizeAllStreamingState()
+        finalizeAllStreamingState(
+            preserveRunLifecycle: disposition.shouldAutoReconnectOnForeground
+        )
         endBackgroundRunGraceTask(reason: "receive-error")
         clearConnectionSyncState()
         // Thread resumes are transport-scoped; a fresh socket must be allowed to

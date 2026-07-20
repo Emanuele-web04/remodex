@@ -19,20 +19,20 @@ struct TurnTimelineToolBurstGroup: Identifiable, Equatable {
         self.id = "tool-burst:\(messages.first?.id ?? "unknown")"
     }
 
-    var overflowMessages: [CodexMessage] {
-        Array(messages.dropLast())
+    var overflowMessages: ArraySlice<CodexMessage> {
+        messages.dropLast()
     }
 
     var latestMessage: CodexMessage? {
         messages.last
     }
 
-    var visibleMessages: [CodexMessage] {
-        latestMessage.map { [$0] } ?? []
+    var visibleMessages: ArraySlice<CodexMessage> {
+        messages.suffix(1)
     }
 
     var hiddenCount: Int {
-        overflowMessages.count
+        max(messages.count - 1, 0)
     }
 }
 
@@ -56,10 +56,36 @@ struct TurnTimelineCommandGroup: Identifiable, Equatable {
     let id: String
     let messages: [CodexMessage]
     let orderedMessages: [CodexMessage]
+    let traceMessages: [CodexMessage]
+    let collapsedDetailMessages: [CodexMessage]
+    let failedCommandCount: Int
+    let stoppedCommandCount: Int
 
     init(messages: [CodexMessage], orderedMessages: [CodexMessage]? = nil) {
+        let resolvedOrderedMessages = orderedMessages ?? messages
         self.messages = messages
-        self.orderedMessages = orderedMessages ?? messages
+        self.orderedMessages = resolvedOrderedMessages
+        self.traceMessages = resolvedOrderedMessages.filter {
+            $0.role == .system && $0.kind == .thinking
+        }
+        self.collapsedDetailMessages = resolvedOrderedMessages.filter { message in
+            guard message.role == .system else { return false }
+            return message.kind == .thinking || message.kind == .fileChange
+        }
+        var failedCommandCount = 0
+        var stoppedCommandCount = 0
+        for message in messages {
+            switch Self.commandStatusWord(in: message) {
+            case "failed":
+                failedCommandCount += 1
+            case "stopped":
+                stoppedCommandCount += 1
+            default:
+                break
+            }
+        }
+        self.failedCommandCount = failedCommandCount
+        self.stoppedCommandCount = stoppedCommandCount
         self.id = "command-group:\(messages.first?.id ?? "unknown")"
     }
 
@@ -67,34 +93,15 @@ struct TurnTimelineCommandGroup: Identifiable, Equatable {
         messages.count
     }
 
-    var traceMessages: [CodexMessage] {
-        orderedMessages.filter { $0.role == .system && $0.kind == .thinking }
-    }
-
-    var collapsedDetailMessages: [CodexMessage] {
-        orderedMessages.filter { message in
-            guard message.role == .system else { return false }
-            return message.kind == .thinking || message.kind == .fileChange
-        }
-    }
-
     var accessoryHostMessage: CodexMessage? {
         orderedMessages.last
-    }
-
-    var failedCommandCount: Int {
-        messages.count { commandStatusWord(in: $0) == "failed" }
-    }
-
-    var stoppedCommandCount: Int {
-        messages.count { commandStatusWord(in: $0) == "stopped" }
     }
 
     var hasUnsuccessfulCommands: Bool {
         failedCommandCount > 0 || stoppedCommandCount > 0
     }
 
-    private func commandStatusWord(in message: CodexMessage) -> String? {
+    private static func commandStatusWord(in message: CodexMessage) -> String? {
         message.text
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .split(whereSeparator: \.isWhitespace)

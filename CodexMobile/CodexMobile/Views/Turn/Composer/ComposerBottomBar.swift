@@ -8,9 +8,6 @@ import SwiftUI
 
 struct ComposerBottomBar: View {
     @Environment(\.colorScheme) private var colorScheme
-    @AppStorage(UserBubbleColor.storageKey) private var userBubbleColorRawValue = UserBubbleColor.defaultStoredRawValue
-    @State private var showsAllModelsSheet = false
-    @State private var showsAccessModePopover = false
 
     // Data
     let orderedModelOptions: [CodexModelOption]
@@ -50,15 +47,17 @@ struct ComposerBottomBar: View {
     // MARK: - Constants
 
     private let metaLabelColor = Color(.secondaryLabel)
-    private var metaTextFont: Font { AppFont.subheadline() }
     private let composerCircleDiameter: CGFloat = 32
     private let composerActionIconSize: CGFloat = 14
-    private let inlineAccessControlSize: CGFloat = 32
-    private let inlineAccessControlIconSize: CGFloat = 20
     // Send stays the primary CTA, so give it a slightly larger tap target than
     // the neutral composer chrome.
     // Keep the send circle two points larger than its previous 32pt size.
     private let sendButtonDiameter: CGFloat = 34
+
+    @AppStorage(UserBubbleColor.storageKey) private var userBubbleColorRawValue = UserBubbleColor.defaultStoredRawValue
+    @State private var showsAllModelsSheet = false
+
+    private var metaTextFont: Font { AppFont.subheadline() }
 
     private var selectedUserBubbleColor: UserBubbleColor {
         UserBubbleColor(rawValue: userBubbleColorRawValue) ?? .default
@@ -99,7 +98,11 @@ struct ComposerBottomBar: View {
                 onTapTakePhoto: onTapTakePhoto
             )
             .padding(.leading, 6)
-            inlineAccessMenuLabel
+            ComposerAccessModeControl(
+                selectedAccessMode: selectedAccessMode,
+                isInteractionLocked: isComposerInteractionLocked,
+                onSelect: onSelectAccessMode
+            )
             Spacer(minLength: 0)
 
             // Ring + runtime pill travel together on the trailing side; the
@@ -193,99 +196,6 @@ struct ComposerBottomBar: View {
     }
 
     // MARK: - Menus
-
-    // Access and usage stay inline with the bottom composer controls for every
-    // thread type so rootless and project-backed chats share the same layout.
-    private var inlineAccessMenuLabel: some View {
-        Button {
-            HapticFeedback.shared.triggerImpactFeedback(style: .light)
-            showsAccessModePopover = true
-        } label: {
-            RemodexIcon.image(
-                systemName: accessModeIconSystemName(for: selectedAccessMode),
-                size: inlineAccessControlIconSize
-            )
-            .frame(width: inlineAccessControlSize, height: inlineAccessControlSize)
-            .foregroundStyle(accessModeTint)
-            .contentShape(Circle())
-        }
-        .tint(metaLabelColor)
-        .disabled(isComposerInteractionLocked)
-        .accessibilityLabel(selectedAccessMode.pickerTitle)
-        .accessibilityHint("Changes how Codex requests permission")
-        .popover(isPresented: $showsAccessModePopover, arrowEdge: .bottom) {
-            accessModePopoverContent
-        }
-    }
-
-    private var accessModePopoverContent: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            ForEach(CodexAccessMode.allCases, id: \.rawValue) { mode in
-                Button {
-                    HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                    showsAccessModePopover = false
-                    onSelectAccessMode(mode)
-                } label: {
-                    accessModeRow(mode)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(mode.pickerTitle)
-                .accessibilityHint(mode.pickerSubtitle)
-                .accessibilityAddTraits(selectedAccessMode == mode ? .isSelected : [])
-            }
-        }
-        .padding(.vertical, 10)
-        .frame(width: 312)
-        .presentationCompactAdaptation(.popover)
-    }
-
-    private func accessModeRow(_ mode: CodexAccessMode) -> some View {
-        HStack(spacing: 14) {
-            RemodexIcon.image(systemName: accessModeIconSystemName(for: mode), size: 22)
-                .frame(width: 28, height: 28)
-                .foregroundStyle(.primary)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(mode.pickerTitle)
-                    .font(AppFont.body())
-                    .foregroundStyle(.primary)
-                Text(mode.pickerSubtitle)
-                    .font(AppFont.subheadline())
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .multilineTextAlignment(.leading)
-            Spacer(minLength: 8)
-            Image(systemName: "checkmark")
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(.primary)
-                .opacity(selectedAccessMode == mode ? 1 : 0)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .contentShape(Rectangle())
-    }
-
-    private func accessModeIconSystemName(for mode: CodexAccessMode) -> String {
-        switch mode {
-        case .onRequest:
-            return "hand.raised"
-        case .autoReview:
-            return "remodex.auto-review"
-        case .fullAccess:
-            return "hand.thumbsup"
-        }
-    }
-
-    private var accessModeTint: Color {
-        switch selectedAccessMode {
-        case .onRequest:
-            return metaLabelColor
-        case .autoReview:
-            return Color(.systemBlue)
-        case .fullAccess:
-            return .orange
-        }
-    }
 
     private var runtimeMenuControl: some View {
         ComposerRuntimeMenuControl(

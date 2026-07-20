@@ -1,14 +1,5 @@
 {
-  "fill" : "system-light",
-  "fill-specializations" : [
-    {
-      "value" : "system-light"
-    },
-    {
-      "appearance" : "dark",
-      "value" : "system-dark"
-    }
-  ],
+  "fill" : "automatic",
   "groups" : [
     {
       "blur-material" : null,
@@ -21,7 +12,19 @@
       "layers" : [
         {
           "image-name" : "remodex-svg3.svg",
-          "name" : "Remodex Light"
+          "name" : "Remodex Light",
+          "position-specializations" : [
+            {
+              "idiom" : "square",
+              "value" : {
+                "scale" : 0.94,
+                "translation-in-points" : [
+                  0,
+                  0
+                ]
+              }
+            }
+          ]
         }
       ],
       "shadow" : {

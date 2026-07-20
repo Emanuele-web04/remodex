@@ -34,12 +34,17 @@ struct VoiceRecordingCapsule: View {
         .fixedSize(horizontal: false, vertical: true)
         .padding(.horizontal, 14)
         .padding(.vertical, 11)
-        // Apply glass to the capsule surface itself so waveform/text stay above
-        // the material instead of being composited behind a separate glass layer.
-        .adaptiveGlass(
-            .regular,
-            in: RoundedRectangle(cornerRadius: cardCornerRadius, style: .continuous)
-        )
+        // Glass lives on a background layer so waveform/text stay above the
+        // material while the per-frame TimelineView canvas and pulsing dot do
+        // not invalidate the glass node itself ("glassEffect() tried to update
+        // multiple times per frame").
+        .background {
+            Color.clear
+                .adaptiveGlass(
+                    .regular,
+                    in: RoundedRectangle(cornerRadius: cardCornerRadius, style: .continuous)
+                )
+        }
         .overlay {
             RoundedRectangle(cornerRadius: cardCornerRadius, style: .continuous)
                 .stroke(Color.primary.opacity(0.06), lineWidth: 1)

@@ -53,6 +53,24 @@ final class CodexAutoApprovalReviewTests: XCTestCase {
         )
     }
 
+    func testRetryableStreamingFinalizationPreservesInProgressReview() {
+        let service = makeService()
+        let threadId = "thread-review-reconnect"
+        service.runningThreadIDs.insert(threadId)
+        service.handleNotification(
+            method: "item/autoApprovalReview/started",
+            params: reviewParams(threadId: threadId, status: .inProgress)
+        )
+
+        service.finalizeAllStreamingState(preserveRunLifecycle: true)
+
+        let reviewMessage = service.messages(for: threadId).first {
+            $0.kind == .autoApprovalReview
+        }
+        XCTAssertEqual(reviewMessage?.autoApprovalReview?.status, .inProgress)
+        XCTAssertTrue(reviewMessage?.isStreaming == true)
+    }
+
     func testReviewIdentityUsesReviewIdInsteadOfTargetItemId() {
         let service = makeService()
         let threadId = "thread-1"
