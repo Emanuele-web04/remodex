@@ -167,6 +167,8 @@ struct ConnectionRecoveryCard: View {
         .frame(minWidth: 58, alignment: .trailing)
     }
 
+    // The icon stays small, but the tap target meets the 44pt HIG minimum so
+    // dismiss taps stop falling through to the card's own button underneath.
     private func dismissButton(action: @escaping () -> Void) -> some View {
         Button {
             HapticFeedback.shared.triggerImpactFeedback(style: .light)
@@ -175,12 +177,10 @@ struct ConnectionRecoveryCard: View {
             RemodexIcon.image(systemName: "xmark")
                 .font(AppFont.system(size: 10, weight: .semibold))
                 .foregroundStyle(.secondary)
-                .frame(width: 20, height: 20)
-                .contentShape(Circle())
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .padding(.top, 8)
-        .padding(.trailing, 10)
         .accessibilityLabel("Dismiss")
     }
 }

@@ -1,6 +1,6 @@
 {
   "name": "remodex",
-  "version": "2.3.3",
+  "version": "2.3.4",
   "description": "Local bridge between Codex and the Remodex mobile app. Run `remodex up` to start.",
   "main": "src/index.js",
   "bin": {

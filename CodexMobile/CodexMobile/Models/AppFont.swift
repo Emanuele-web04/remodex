@@ -10,6 +10,7 @@ import UIKit
 enum AppFont {
     enum Style: String, CaseIterable, Identifiable {
         case system
+        case systemRounded
         case geist
         case geistMono
         case jetBrainsMono
@@ -19,6 +20,7 @@ enum AppFont {
         var title: String {
             switch self {
             case .system: return "System"
+            case .systemRounded: return "SF Pro Rounded"
             case .geist: return "Geist"
             case .geistMono: return "Geist Mono"
             case .jetBrainsMono: return "JetBrains Mono"
@@ -29,6 +31,8 @@ enum AppFont {
             switch self {
             case .system:
                 return "Use the native iOS font for regular text. Code stays monospaced."
+            case .systemRounded:
+                return "Use the rounded native iOS font for regular text. Code stays monospaced."
             case .geist:
                 return "Use Geist for regular text. Code stays monospaced."
             case .geistMono:
@@ -71,7 +75,7 @@ enum AppFont {
 
     private static func candidateFaceNames(for weight: Font.Weight, style: Style) -> [String] {
         switch style {
-        case .system:
+        case .system, .systemRounded:
             return []
         case .geist:
             switch weight {
@@ -107,7 +111,7 @@ enum AppFont {
 
     private static func fontSizeAdjustment(for style: Style) -> CGFloat {
         switch style {
-        case .system, .geist, .geistMono, .jetBrainsMono:
+        case .system, .systemRounded, .geist, .geistMono, .jetBrainsMono:
             return 0
         }
     }
@@ -158,8 +162,12 @@ enum AppFont {
         let adjustedSize = max(size + fontSizeAdjustment(for: selectedStyle), 1)
         let metrics = UIFontMetrics(forTextStyle: fallbackTextStyle)
 
-        if selectedStyle == .system {
-            let systemFont = UIFont.systemFont(ofSize: adjustedSize, weight: uiKitWeight(for: weight))
+        if selectedStyle == .system || selectedStyle == .systemRounded {
+            let systemFont = systemUIFont(
+                size: adjustedSize,
+                weight: weight,
+                design: selectedStyle == .systemRounded ? .rounded : .default
+            )
             return metrics.scaledFont(for: systemFont)
         }
 
@@ -177,7 +185,7 @@ enum AppFont {
         switch currentStyle {
         case .geistMono:
             return .geistMono
-        case .jetBrainsMono, .system, .geist:
+        case .jetBrainsMono, .system, .systemRounded, .geist:
             return .jetBrainsMono
         }
     }
@@ -193,7 +201,7 @@ enum AppFont {
             default:
                 return ["GeistMono-Regular", "GeistMono-Medium"]
             }
-        case .jetBrainsMono, .system, .geist:
+        case .jetBrainsMono, .system, .systemRounded, .geist:
             break
         }
 
@@ -260,7 +268,7 @@ enum AppFont {
         switch preferredMonoStyle {
         case .geistMono:
             return "\"Geist Mono\", \"JetBrains Mono\", ui-monospace, monospace"
-        case .jetBrainsMono, .system, .geist:
+        case .jetBrainsMono, .system, .systemRounded, .geist:
             return "\"JetBrains Mono\", \"Geist Mono\", ui-monospace, monospace"
         }
     }
@@ -274,8 +282,13 @@ enum AppFont {
         let selectedStyle = currentStyle
         let adjustedSize = max(size + fontSizeAdjustment(for: selectedStyle), 1)
 
-        if selectedStyle == .system {
-            return scaledSystemFont(size: adjustedSize, weight: weight, relativeTo: style)
+        if selectedStyle == .system || selectedStyle == .systemRounded {
+            return scaledSystemFont(
+                size: adjustedSize,
+                weight: weight,
+                design: selectedStyle == .systemRounded ? .rounded : .default,
+                relativeTo: style
+            )
         }
 
         if let faceName = resolvedCustomFaceName(for: weight, style: selectedStyle, size: adjustedSize) {
@@ -288,11 +301,26 @@ enum AppFont {
     private static func scaledSystemFont(
         size: CGFloat,
         weight: Font.Weight,
+        design: UIFontDescriptor.SystemDesign = .default,
         relativeTo style: Font.TextStyle
     ) -> Font {
-        let base = UIFont.systemFont(ofSize: size, weight: uiKitWeight(for: weight))
+        let base = systemUIFont(size: size, weight: weight, design: design)
         let metrics = UIFontMetrics(forTextStyle: uiKitTextStyle(for: style))
         return Font(metrics.scaledFont(for: base))
+    }
+
+    private static func systemUIFont(
+        size: CGFloat,
+        weight: Font.Weight,
+        design: UIFontDescriptor.SystemDesign
+    ) -> UIFont {
+        let base = UIFont.systemFont(ofSize: size, weight: uiKitWeight(for: weight))
+        guard design != .default,
+              let descriptor = base.fontDescriptor.withDesign(design) else {
+            return base
+        }
+
+        return UIFont(descriptor: descriptor, size: size)
     }
 
     private static func uiKitTextStyle(for style: Font.TextStyle) -> UIFont.TextStyle {
@@ -393,6 +421,10 @@ enum AppFont {
         let selectedStyle = currentStyle
         if selectedStyle == .system {
             return .system(size: size, weight: weight)
+        }
+
+        if selectedStyle == .systemRounded {
+            return .system(size: size, weight: weight, design: .rounded)
         }
 
         let adjustedSize = max(size + fontSizeAdjustment(for: selectedStyle), 1)
