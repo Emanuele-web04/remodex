@@ -708,7 +708,7 @@ extension CodexService {
         return CanonicalHistoryReconcileRetryPolicy.delayNanoseconds(forAttempt: nextAttempt)
     }
 
-    // Marks a large chat as "local-first for now, but still needs one authoritative server merge".
+    // Marks a cached chat as needing one authoritative server merge.
     func markThreadNeedingCanonicalHistoryReconcile(
         _ threadId: String,
         requestImmediateSync: Bool = false
