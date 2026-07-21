@@ -15,6 +15,31 @@ struct TurnDiffPresentation: Identifiable, Equatable {
     let messageID: String
 }
 
+enum TurnDiffRenderingMode: Equatable {
+    case detailed
+    case summaryOnly(changedLineCount: Int)
+}
+
+// Detailed diffs are built entirely on the main actor. Keep an oversized patch out of the
+// parser and SwiftUI line renderer so opening the change sheet can never stall the app.
+enum TurnDiffRenderingPolicy {
+    static let maximumDetailedChangedLines = 2_000
+    static let maximumDetailedBytes = 256_000
+    static let maximumSummaryFileEntries = 200
+
+    static func mode(
+        entries: [TurnFileChangeSummaryEntry],
+        bodyText: String
+    ) -> TurnDiffRenderingMode {
+        let changedLineCount = entries.reduce(0) { $0 + $1.additions + $1.deletions }
+        guard changedLineCount <= maximumDetailedChangedLines,
+              bodyText.utf8.count <= maximumDetailedBytes else {
+            return .summaryOnly(changedLineCount: changedLineCount)
+        }
+        return .detailed
+    }
+}
+
 enum TurnDiffPresentationBuilder {
     // Converts a raw unified repo patch into the same sectioned shape the existing diff sheet already renders.
     static func repositoryPresentation(from rawPatch: String, title: String = "Repository Changes") -> TurnDiffPresentation? {
@@ -205,7 +230,31 @@ struct TurnDiffSheet: View {
         return all.filter { FileChangePathIdentity.representsSameFile($0.path, restrictToPath) }
     }
 
-    private var totals: (additions: Int, deletions: Int) {
+    private var visibleEntries: [TurnFileChangeSummaryEntry] {
+        guard let restrictToPath else { return entries }
+        return entries.filter { FileChangePathIdentity.representsSameFile($0.path, restrictToPath) }
+    }
+
+    private var renderingMode: TurnDiffRenderingMode {
+        TurnDiffRenderingPolicy.mode(entries: visibleEntries, bodyText: bodyText)
+    }
+
+    private var entryTotals: (additions: Int, deletions: Int) {
+        visibleEntries.reduce(into: (0, 0)) { totals, entry in
+            totals.0 += entry.additions
+            totals.1 += entry.deletions
+        }
+    }
+
+    private var summaryEntries: ArraySlice<TurnFileChangeSummaryEntry> {
+        visibleEntries.prefix(TurnDiffRenderingPolicy.maximumSummaryFileEntries)
+    }
+
+    private var hiddenSummaryEntryCount: Int {
+        visibleEntries.count - summaryEntries.count
+    }
+
+    private func totals(for chunks: [PerFileDiffChunk]) -> (additions: Int, deletions: Int) {
         chunks.reduce(into: (0, 0)) { totals, chunk in
             totals.0 += chunk.additions
             totals.1 += chunk.deletions
@@ -219,16 +268,7 @@ struct TurnDiffSheet: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    summaryHeader
-
-                    ForEach(chunks) { chunk in
-                        TurnDiffFileCard(
-                            chunk: chunk,
-                            collapseAllHunks: allHunksCollapsed
-                        )
-                    }
-                }
+                sheetContent
                 .padding(.vertical)
                 .padding(.horizontal, 12)
             }
@@ -244,11 +284,97 @@ struct TurnDiffSheet: View {
         .presentationDetents([.medium, .large], selection: $presentationDetent)
     }
 
-    private var summaryHeader: some View {
-        let totals = totals
+    @ViewBuilder
+    private var sheetContent: some View {
+        switch renderingMode {
+        case .detailed:
+            detailedContent
+        case .summaryOnly(let changedLineCount):
+            summaryOnlyContent(changedLineCount: changedLineCount)
+        }
+    }
+
+    private var detailedContent: some View {
+        let chunks = chunks
+        return LazyVStack(alignment: .leading, spacing: 12) {
+            summaryHeader(
+                fileCount: chunks.count,
+                totals: totals(for: chunks),
+                showsCollapseControl: !chunks.isEmpty
+            )
+
+            ForEach(chunks) { chunk in
+                TurnDiffFileCard(
+                    chunk: chunk,
+                    collapseAllHunks: allHunksCollapsed
+                )
+            }
+        }
+    }
+
+    private func summaryOnlyContent(changedLineCount: Int) -> some View {
+        LazyVStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Large diff")
+                    .font(AppFont.subheadline(weight: .semibold))
+                    .foregroundStyle(.primary)
+
+                Text(
+                    "\(changedLineCount) changed lines. Full patch rendering is disabled to keep Remodex responsive."
+                )
+                .font(AppFont.footnote())
+                .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(12)
+            .background(Color(.secondarySystemBackground))
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+            summaryHeader(
+                fileCount: visibleEntries.count,
+                totals: entryTotals,
+                showsCollapseControl: false
+            )
+
+            ForEach(summaryEntries) { entry in
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(entry.compactPath)
+                        .font(AppFont.subheadline(weight: .medium))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .foregroundStyle(.primary)
+
+                    Spacer(minLength: 8)
+
+                    if entry.additions > 0 || entry.deletions > 0 {
+                        DiffCountsLabel(additions: entry.additions, deletions: entry.deletions)
+                            .font(AppFont.mono(.caption))
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(Color(.secondarySystemBackground))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+
+            if hiddenSummaryEntryCount > 0 {
+                Text("Showing the first \(summaryEntries.count) files; \(hiddenSummaryEntryCount) more are omitted.")
+                    .font(AppFont.footnote())
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
+    private func summaryHeader(
+        fileCount: Int,
+        totals: (additions: Int, deletions: Int),
+        showsCollapseControl: Bool
+    ) -> some View {
         return HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("\(chunks.count) file\(chunks.count == 1 ? "" : "s") changed")
+                Text("\(fileCount) file\(fileCount == 1 ? "" : "s") changed")
                     .font(AppFont.subheadline(weight: .semibold))
                     .foregroundStyle(.primary)
 
@@ -260,7 +386,7 @@ struct TurnDiffSheet: View {
 
             Spacer(minLength: 8)
 
-            if !chunks.isEmpty {
+            if showsCollapseControl {
                 Button {
                     withAnimation(.easeInOut(duration: 0.18)) {
                         allHunksCollapsed.toggle()

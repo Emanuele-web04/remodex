@@ -308,6 +308,57 @@ final class TurnMessageCachesTests: XCTestCase {
         XCTAssertFalse(second.fileChangeState?.detailBodyText.contains("FIRST-DETAIL") == true)
     }
 
+    func testTurnDiffRenderingPolicyUsesSummaryForLargeChangeCount() {
+        let entries = [
+            TurnFileChangeSummaryEntry(
+                path: "Tests/test_execution_summary.py",
+                additions: 34_477,
+                deletions: 0,
+                action: .edited
+            ),
+        ]
+
+        XCTAssertEqual(
+            TurnDiffRenderingPolicy.mode(entries: entries, bodyText: "small detail body"),
+            .summaryOnly(changedLineCount: 34_477)
+        )
+    }
+
+    func testTurnDiffRenderingPolicyUsesSummaryForLargeDetailBody() {
+        let entries = [
+            TurnFileChangeSummaryEntry(
+                path: "Sources/App.swift",
+                additions: 1,
+                deletions: 0,
+                action: .edited
+            ),
+        ]
+
+        XCTAssertEqual(
+            TurnDiffRenderingPolicy.mode(
+                entries: entries,
+                bodyText: String(repeating: "x", count: TurnDiffRenderingPolicy.maximumDetailedBytes + 1)
+            ),
+            .summaryOnly(changedLineCount: 1)
+        )
+    }
+
+    func testTurnDiffRenderingPolicyKeepsSmallDiffDetailed() {
+        let entries = [
+            TurnFileChangeSummaryEntry(
+                path: "Sources/App.swift",
+                additions: 12,
+                deletions: 3,
+                action: .edited
+            ),
+        ]
+
+        XCTAssertEqual(
+            TurnDiffRenderingPolicy.mode(entries: entries, bodyText: "@@ -1 +1 @@\n+let value = true"),
+            .detailed
+        )
+    }
+
     func testCommandOutputImageReferenceParserCombinesLsDirectoryAndOutputFile() {
         let reference = CommandOutputImageReferenceParser.firstReference(
             command: "/bin/zsh -lc 'ls -1 /Users/example/.codex/generated_images/turn-123'",
