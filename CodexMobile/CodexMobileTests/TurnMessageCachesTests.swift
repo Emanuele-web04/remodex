@@ -359,6 +359,75 @@ final class TurnMessageCachesTests: XCTestCase {
         )
     }
 
+    func testTurnDiffRenderingPolicyUsesSummaryWhenDiffBodyExceedsInlineTotals() {
+        let entries = [
+            TurnFileChangeSummaryEntry(
+                path: "Sources/App.swift",
+                additions: 1,
+                deletions: 0,
+                action: .edited
+            ),
+        ]
+        let changedLines = String(repeating: "+let value = true\n", count: 2_001)
+        let bodyText = """
+        Path: Sources/App.swift
+        Totals: +1 -0
+
+        ```diff
+        \(changedLines)```
+        """
+
+        XCTAssertEqual(
+            TurnDiffRenderingPolicy.mode(entries: entries, bodyText: bodyText),
+            .summaryOnly(changedLineCount: 2_001)
+        )
+    }
+
+    func testTurnDiffRenderingPolicyUsesSummaryForOversizedDiffLine() {
+        let entries = [
+            TurnFileChangeSummaryEntry(
+                path: "Sources/App.swift",
+                additions: 1,
+                deletions: 0,
+                action: .edited
+            ),
+        ]
+        let bodyText = "+" + String(
+            repeating: "x",
+            count: TurnDiffRenderingPolicy.maximumDetailedLineBytes + 1
+        )
+
+        XCTAssertEqual(
+            TurnDiffRenderingPolicy.mode(entries: entries, bodyText: bodyText),
+            .summaryOnly(changedLineCount: 1)
+        )
+    }
+
+    func testTurnDiffBodyTextScopeExtractsSelectedFileWithoutParsingOtherSections() {
+        let bodyText = """
+        Path: Sources/Large.swift
+        Totals: +3000 -0
+
+        ```diff
+        +large change
+        ```
+
+        ---
+
+        Path: Sources/Small.swift
+        Totals: +1 -0
+
+        ```diff
+        +small change
+        ```
+        """
+
+        let scoped = TurnDiffBodyTextScope.bodyText(for: "Sources/Small.swift", in: bodyText)
+
+        XCTAssertTrue(scoped.contains("+small change"))
+        XCTAssertFalse(scoped.contains("+large change"))
+    }
+
     func testCommandOutputImageReferenceParserCombinesLsDirectoryAndOutputFile() {
         let reference = CommandOutputImageReferenceParser.firstReference(
             command: "/bin/zsh -lc 'ls -1 /Users/example/.codex/generated_images/turn-123'",

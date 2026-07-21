@@ -25,18 +25,92 @@ enum TurnDiffRenderingMode: Equatable {
 enum TurnDiffRenderingPolicy {
     static let maximumDetailedChangedLines = 2_000
     static let maximumDetailedBytes = 256_000
+    static let maximumDetailedLineBytes = 16_000
     static let maximumSummaryFileEntries = 200
 
     static func mode(
         entries: [TurnFileChangeSummaryEntry],
         bodyText: String
     ) -> TurnDiffRenderingMode {
-        let changedLineCount = entries.reduce(0) { $0 + $1.additions + $1.deletions }
+        let entryChangedLineCount = entries.reduce(0) { $0 + $1.additions + $1.deletions }
+        guard bodyText.utf8.count <= maximumDetailedBytes else {
+            return .summaryOnly(changedLineCount: entryChangedLineCount)
+        }
+
+        let bodyMetrics = diffBodyMetrics(in: bodyText)
+        let changedLineCount = max(entryChangedLineCount, bodyMetrics.changedLineCount)
         guard changedLineCount <= maximumDetailedChangedLines,
-              bodyText.utf8.count <= maximumDetailedBytes else {
+              bodyMetrics.longestLineByteCount <= maximumDetailedLineBytes else {
             return .summaryOnly(changedLineCount: changedLineCount)
         }
         return .detailed
+    }
+
+    private static func diffBodyMetrics(in bodyText: String) -> (
+        changedLineCount: Int,
+        longestLineByteCount: Int
+    ) {
+        var changedLineCount = 0
+        var longestLineByteCount = 0
+
+        bodyText.enumerateSubstrings(
+            in: bodyText.startIndex..<bodyText.endIndex,
+            options: .byLines
+        ) { line, _, _, stop in
+            guard let line else { return }
+            let lineByteCount = line.utf8.count
+            longestLineByteCount = max(longestLineByteCount, lineByteCount)
+
+            if (line.hasPrefix("+") && !line.hasPrefix("+++"))
+                || (line.hasPrefix("-") && !line.hasPrefix("---")) {
+                changedLineCount += 1
+            }
+
+            if changedLineCount > maximumDetailedChangedLines
+                || longestLineByteCount > maximumDetailedLineBytes {
+                stop = true
+            }
+        }
+
+        return (changedLineCount, longestLineByteCount)
+    }
+}
+
+// A file row can be opened from a multi-file recap. Extract its section away from the
+// main actor before the diff parser runs so one small file remains inspectable even when
+// the aggregate turn exceeds the detailed-rendering limit.
+enum TurnDiffBodyTextScope {
+    static func bodyText(for path: String, in bodyText: String) -> String {
+        let separator = "\n\n---\n\n"
+        var sectionStart = bodyText.startIndex
+
+        while sectionStart < bodyText.endIndex {
+            let sectionEnd = bodyText.range(
+                of: separator,
+                range: sectionStart..<bodyText.endIndex
+            )?.lowerBound ?? bodyText.endIndex
+            let section = bodyText[sectionStart..<sectionEnd]
+            if let lineEnd = section.firstIndex(of: "\n") {
+                let firstLine = section[..<lineEnd]
+                if firstLine.hasPrefix("Path:") {
+                    let candidatePath = String(firstLine.dropFirst("Path:".count))
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    if FileChangePathIdentity.representsSameFile(candidatePath, path) {
+                        return String(section)
+                    }
+                }
+            }
+
+            guard let separatorRange = bodyText.range(
+                of: separator,
+                range: sectionStart..<bodyText.endIndex
+            ) else {
+                break
+            }
+            sectionStart = separatorRange.upperBound
+        }
+
+        return bodyText
     }
 }
 
@@ -209,6 +283,7 @@ struct TurnDiffSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var allHunksCollapsed = false
     @State private var presentationDetent: PresentationDetent = .large
+    @State private var restrictedBodyText: String?
 
     init(
         title: String,
@@ -225,9 +300,22 @@ struct TurnDiffSheet: View {
     }
 
     private var chunks: [PerFileDiffChunk] {
-        let all = PerFileDiffChunkCache.chunks(messageID: messageID, bodyText: bodyText, entries: entries)
+        let all = PerFileDiffChunkCache.chunks(
+            messageID: scopedMessageID,
+            bodyText: scopedBodyText,
+            entries: visibleEntries
+        )
         guard let restrictToPath else { return all }
         return all.filter { FileChangePathIdentity.representsSameFile($0.path, restrictToPath) }
+    }
+
+    private var scopedMessageID: String {
+        guard let restrictToPath else { return messageID }
+        return "\(messageID)|\(restrictToPath)"
+    }
+
+    private var scopedBodyText: String {
+        restrictToPath == nil ? bodyText : (restrictedBodyText ?? "")
     }
 
     private var visibleEntries: [TurnFileChangeSummaryEntry] {
@@ -236,7 +324,7 @@ struct TurnDiffSheet: View {
     }
 
     private var renderingMode: TurnDiffRenderingMode {
-        TurnDiffRenderingPolicy.mode(entries: visibleEntries, bodyText: bodyText)
+        TurnDiffRenderingPolicy.mode(entries: visibleEntries, bodyText: scopedBodyText)
     }
 
     private var entryTotals: (additions: Int, deletions: Int) {
@@ -282,15 +370,29 @@ struct TurnDiffSheet: View {
             }
         }
         .presentationDetents([.medium, .large], selection: $presentationDetent)
+        .task(id: scopedMessageID) {
+            guard let restrictToPath else { return }
+            let scopedText = await Task.detached(priority: .userInitiated) {
+                TurnDiffBodyTextScope.bodyText(for: restrictToPath, in: bodyText)
+            }
+            .value
+            guard !Task.isCancelled else { return }
+            restrictedBodyText = scopedText
+        }
     }
 
     @ViewBuilder
     private var sheetContent: some View {
-        switch renderingMode {
-        case .detailed:
-            detailedContent
-        case .summaryOnly(let changedLineCount):
-            summaryOnlyContent(changedLineCount: changedLineCount)
+        if restrictToPath != nil, restrictedBodyText == nil {
+            ProgressView()
+                .frame(maxWidth: .infinity, minHeight: 120)
+        } else {
+            switch renderingMode {
+            case .detailed:
+                detailedContent
+            case .summaryOnly(let changedLineCount):
+                summaryOnlyContent(changedLineCount: changedLineCount)
+            }
         }
     }
 
