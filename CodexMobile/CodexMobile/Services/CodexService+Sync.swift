@@ -107,7 +107,9 @@ extension CodexService {
                 startSyncLoop()
                 // A suspended app can miss terminal Desktop IPC deltas while its cached
                 // closed thread still looks hydrated. Reconcile the visible thread once.
-                if let activeThreadId, !threadHasActiveOrRunningTurn(activeThreadId) {
+                if let activeThreadId,
+                   !threadHasActiveOrRunningTurn(activeThreadId),
+                   !shouldShowImmediateEmptyPlaceholder(threadId: activeThreadId) {
                     markThreadNeedingCanonicalHistoryReconcile(activeThreadId)
                 }
                 requestImmediateSync(threadId: activeThreadId)

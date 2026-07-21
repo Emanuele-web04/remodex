@@ -578,7 +578,7 @@ extension CodexService {
                         .first(where: { $0.role == .assistant && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })?
                         .text ?? ""
                 }
-            } else {
+            } else if !shouldShowImmediateEmptyPlaceholder(threadId: threadId) {
                 // A bridge reconnect can miss terminal Desktop IPC deltas even when the
                 // cached closed thread is already hydrated. One canonical page makes the
                 // selected timeline converge without adding closed-chat polling.

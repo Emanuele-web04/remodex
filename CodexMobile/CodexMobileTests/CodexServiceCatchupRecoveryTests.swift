@@ -818,12 +818,60 @@ final class CodexServiceCatchupRecoveryTests: XCTestCase {
         }
 
         await service.performPostConnectSyncPass(preferredThreadId: threadID)
-        for _ in 0..<100 where canonicalHistoryReadCount == 0 {
-            await Task.yield()
+        for _ in 0..<100 where service.messages(for: threadID).last?.text != "Recovered after reconnect" {
+            try? await Task.sleep(nanoseconds: 10_000_000)
         }
 
         XCTAssertEqual(canonicalHistoryReadCount, 1)
         XCTAssertEqual(service.messages(for: threadID).last?.text, "Recovered after reconnect")
+        XCTAssertFalse(service.threadsNeedingCanonicalHistoryReconcile.contains(threadID))
+    }
+
+    func testPostConnectSkipsCanonicalReconcileForNewEmptyActiveThread() async {
+        let service = makeService()
+        let threadID = "thread-post-connect-empty"
+        service.isConnected = true
+        service.isInitialized = true
+        service.supportsTurnPagination = true
+        service.activeThreadId = threadID
+        service.upsertThread(CodexThread(id: threadID))
+
+        var canonicalHistoryReadCount = 0
+        service.requestTransportOverride = { method, params in
+            switch method {
+            case "thread/list":
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([
+                        "threads": .array([
+                            .object([
+                                "id": .string(threadID),
+                                "title": .string(CodexThread.defaultDisplayTitle),
+                            ]),
+                        ]),
+                    ]),
+                    includeJSONRPC: false
+                )
+            case "thread/turns/list":
+                canonicalHistoryReadCount += 1
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object(["data": .array([]), "nextCursor": .null]),
+                    includeJSONRPC: false
+                )
+            default:
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([:]),
+                    includeJSONRPC: false
+                )
+            }
+        }
+
+        await service.performPostConnectSyncPass(preferredThreadId: threadID)
+        await Task.yield()
+
+        XCTAssertEqual(canonicalHistoryReadCount, 0)
         XCTAssertFalse(service.threadsNeedingCanonicalHistoryReconcile.contains(threadID))
     }
 
