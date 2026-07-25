@@ -66,7 +66,7 @@ struct TerminalConnectionHelpSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     Text("SSH is the secure tunnel Remodex uses to reach your Mac or PC. You need an address, a username, SSH enabled, and a private key.")
-                        .font(.system(size: 14))
+                        .font(AppFont.system(size: 14))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
 
@@ -119,11 +119,11 @@ private struct TerminalWindowsConnectionGuide: View {
         VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Connect to Windows with SSH")
-                    .font(.system(size: 22, weight: .bold))
+                    .font(AppFont.system(size: 22, weight: .bold))
                     .foregroundStyle(.primary)
 
                 Text("Run these in an Administrator PowerShell on the Windows PC, then create a terminal profile in Remodex.")
-                    .font(.system(size: 15))
+                    .font(AppFont.system(size: 15))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -136,7 +136,7 @@ private struct TerminalWindowsConnectionGuide: View {
             }
 
             Text("Recommended private-key format: OpenSSH Ed25519 with a passphrase, created by ssh-keygen above. Remodex also accepts encrypted PKCS#8 and encrypted legacy PEM keys; unencrypted keys work only if you explicitly enable that option on the profile. In Remodex, use the Windows username, PC IPv4 address, port 22, and the matching private key. Administrator accounts use C:\\ProgramData\\ssh\\administrators_authorized_keys instead.")
-                .font(.system(size: 14))
+                .font(AppFont.system(size: 14))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(14)
@@ -155,7 +155,7 @@ private struct TerminalWindowsConnectionStep: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("\(step.number). \(step.title)")
-                .font(.system(size: 16, weight: .semibold))
+                .font(AppFont.system(size: 16, weight: .semibold))
                 .foregroundStyle(.primary)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -165,7 +165,7 @@ private struct TerminalWindowsConnectionStep: View {
 
             if !step.body.isEmpty {
                 Text(step.body)
-                    .font(.system(size: 13))
+                    .font(AppFont.system(size: 13))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -219,11 +219,11 @@ private struct TerminalConnectionHelpPromptRow: View {
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Need help?")
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(AppFont.system(size: 15, weight: .semibold))
                     .foregroundStyle(.primary)
 
                 Text("Copy a ready-made prompt and paste it into any AI.")
-                    .font(.system(size: 13))
+                    .font(AppFont.system(size: 13))
                     .foregroundStyle(.secondary)
             }
 
@@ -275,7 +275,7 @@ private struct TerminalConnectionHelpStepRow: View {
                         .frame(width: 26, height: 26)
 
                     Text("\(step.number)")
-                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                        .font(AppFont.system(size: 12, weight: .bold, design: .rounded))
                         .foregroundStyle(.primary)
                 }
 
@@ -296,12 +296,12 @@ private struct TerminalConnectionHelpStepRow: View {
                         .foregroundStyle(.secondary)
 
                     Text(step.title)
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(AppFont.system(size: 15, weight: .semibold))
                         .foregroundStyle(.primary)
                 }
 
                 Text(step.body)
-                    .font(.system(size: 13))
+                    .font(AppFont.system(size: 13))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }

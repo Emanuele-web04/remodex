@@ -8,6 +8,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   isContextualUserText,
+  isThreadTurnStateProbeRequest,
   responseItemMessageText,
   sanitizeUserInputEntries,
   sanitizeUserRoleItem,
@@ -53,6 +54,51 @@ test("filters AGENTS.md instructions concatenated with registered context fragme
     assert.equal(isContextualUserText(text), true, suffix);
     assert.equal(visibleUserPromptText(text), "", suffix);
   }
+});
+
+test("filters a desktop opener that chains several injected fragments", () => {
+  // Verbatim shape of the first user item Codex Desktop writes for a new
+  // thread: the blob opens with one fragment kind and closes with another, so
+  // a single start/end pair check leaves the whole preamble visible.
+  const text = [
+    "<recommended_plugins>",
+    "Here is a list of plugins that are available but not installed.",
+    "",
+    "- Figma (figma@openai-curated-remote)",
+    "- Slack (slack@openai-curated-remote)",
+    "</recommended_plugins>",
+    "# AGENTS.md instructions for /Users/me/proj",
+    "",
+    "<INSTRUCTIONS>",
+    "## Goal Mode",
+    "</INSTRUCTIONS>",
+    "<environment_context>",
+    "  <cwd>/Users/me/proj</cwd>",
+    "</environment_context>",
+  ].join("\n");
+
+  assert.equal(isContextualUserText(text), true);
+  assert.equal(visibleUserPromptText(text), "");
+});
+
+test("keeps the real request that trails an injected preamble", () => {
+  const preamble = "<recommended_plugins>\n- Figma (figma@openai-curated-remote)\n</recommended_plugins>\n"
+    + "<environment_context>\n  <cwd>/Users/me/proj</cwd>\n</environment_context>\n\n";
+
+  assert.equal(isContextualUserText(`${preamble}check the 0.6.1 release`), false);
+  assert.equal(visibleUserPromptText(`${preamble}check the 0.6.1 release`), "check the 0.6.1 release");
+  assert.equal(
+    visibleUserPromptText("<skill>\n<name>release-check</name>\n</skill>\nrun it for 0.6.1"),
+    "run it for 0.6.1"
+  );
+});
+
+test("leaves an unterminated reserved marker visible instead of swallowing the message", () => {
+  // Only bounded fragments are runtime-owned. A prompt that merely opens with
+  // reserved markup is still the user's text.
+  const text = "<environment_context> is this tag reserved? I want to use it in my docs";
+  assert.equal(isContextualUserText(text), false);
+  assert.equal(visibleUserPromptText(text), text);
 });
 
 test("does not expose a request delimiter that appears inside hidden context", () => {
@@ -264,4 +310,39 @@ test("drops fully contextual user items but preserves attachment-only items", ()
   assert.deepEqual(sanitizeUserRoleItem(attachment)?.content, [
     { type: "input_image", image_url: "data:image/png;base64,AAAA" },
   ]);
+});
+
+test("turn-state probe detection matches the marker and the legacy probe shape only", () => {
+  const probe = (params) => isThreadTurnStateProbeRequest({ method: "thread/turns/list", params });
+  assert.equal(probe({ threadId: "t", remodexTurnStateOnly: true }), true);
+  assert.equal(probe({ threadId: "t", limit: 8, sortDirection: "desc" }), true);
+  assert.equal(probe({ threadId: "t", limit: 8 }), true);
+  assert.equal(probe({ threadId: "t", limit: 5, sortDirection: "desc" }), false);
+  assert.equal(probe({ threadId: "t", limit: 8, sortDirection: "asc" }), false);
+  assert.equal(probe({ threadId: "t", limit: 8, sortDirection: "desc", cursor: "page-2" }), false);
+  assert.equal(probe({ threadId: "t", limit: 8, remodexRequireCanonical: true }), false);
+  // History pages and other methods never look like the probe.
+  assert.equal(
+    isThreadTurnStateProbeRequest({ method: "thread/read", params: { threadId: "t", limit: 8 } }),
+    false
+  );
+});
+
+test("filters an AGENTS.md header carrying several instruction blocks", () => {
+  // Nested AGENTS.md files chain one <INSTRUCTIONS> block per file under a
+  // single header; stopping at the first close leaked the rest into the bubble.
+  const preamble = [
+    "# AGENTS.md instructions for /Users/me/proj",
+    "",
+    "<INSTRUCTIONS>",
+    "root rules",
+    "</INSTRUCTIONS>",
+    "<INSTRUCTIONS>",
+    "nested package rules",
+    "</INSTRUCTIONS>",
+  ].join("\n");
+
+  assert.equal(isContextualUserText(preamble), true);
+  assert.equal(visibleUserPromptText(preamble), "");
+  assert.equal(visibleUserPromptText(`${preamble}\n\nship 0.6.1`), "ship 0.6.1");
 });

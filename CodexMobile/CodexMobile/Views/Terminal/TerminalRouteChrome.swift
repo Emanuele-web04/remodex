@@ -16,7 +16,7 @@ struct TerminalRouteTitle: View {
     var body: some View {
         VStack(spacing: 1) {
             Text(topLine)
-                .font(.system(size: 13, weight: .bold))
+                .font(AppFont.system(size: 13, weight: .bold))
                 .foregroundStyle(Color(hexString: theme.foreground))
                 .lineLimit(1)
 
@@ -565,17 +565,17 @@ struct TerminalRouteUnavailableView: View {
                 .foregroundStyle(Color(hexString: theme.foreground))
 
             Text(title)
-                .font(.system(size: 15, weight: .bold))
+                .font(AppFont.system(size: 15, weight: .bold))
                 .foregroundStyle(Color(hexString: theme.foreground))
 
             Text(detail)
-                .font(.system(size: 12))
+                .font(AppFont.system(size: 12))
                 .foregroundStyle(Color(hexString: theme.mutedForeground))
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 28)
 
             Button("SSH connection", action: action)
-                .font(.system(size: 12, weight: .bold))
+                .font(AppFont.system(size: 12, weight: .bold))
                 .buttonStyle(.borderedProminent)
                 .padding(.top, 4)
         }

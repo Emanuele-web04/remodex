@@ -322,7 +322,7 @@ private struct VoiceRecordingCapsulePreview: View {
                             .frame(width: 22, height: 22)
 
                         Text("GPT-5.3-Codex")
-                            .font(.subheadline)
+                            .font(AppFont.subheadline())
                             .foregroundStyle(.secondary)
 
                         Spacer()

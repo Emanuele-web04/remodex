@@ -309,6 +309,108 @@ test("bounded JSONL history rejects a tail that does not contain a complete turn
   assert.equal(page, null);
 });
 
+test("parseSessionJsonlTurns hides the injected preamble Codex Desktop writes before the prompt", () => {
+  // Regression: the desktop opener packs several injected fragments into one
+  // user response item, so the whole preamble became the thread's first bubble
+  // and pushed the real prompt down.
+  const content = [
+    JSON.stringify({
+      timestamp: "2026-07-25T00:39:28.000Z",
+      type: "event_msg",
+      payload: { type: "task_started", turn_id: "turn-opener" },
+    }),
+    JSON.stringify({
+      timestamp: "2026-07-25T00:39:30.000Z",
+      type: "response_item",
+      payload: {
+        id: "injected-preamble",
+        type: "message",
+        role: "user",
+        content: [
+          {
+            type: "input_text",
+            text: "<recommended_plugins>\n- Figma (figma@openai-curated-remote)\n</recommended_plugins>",
+          },
+          {
+            type: "input_text",
+            text: "# AGENTS.md instructions for /Users/me/proj\n\n<INSTRUCTIONS>\nrules\n</INSTRUCTIONS>",
+          },
+          {
+            type: "input_text",
+            text: "<environment_context>\n  <cwd>/Users/me/proj</cwd>\n</environment_context>",
+          },
+        ],
+        internal_chat_message_metadata_passthrough: { turn_id: "turn-opener" },
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-07-25T00:39:30.100Z",
+      type: "response_item",
+      payload: {
+        id: "real-prompt",
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "check the 0.6.1 release" }],
+        internal_chat_message_metadata_passthrough: { turn_id: "turn-opener" },
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-07-25T00:41:00.000Z",
+      type: "event_msg",
+      payload: { type: "task_complete", turn_id: "turn-opener" },
+    }),
+  ].join("\n");
+
+  const turns = parseSessionJsonlTurns(content, { threadId: "thread-opener" });
+  const serialized = JSON.stringify(turns);
+
+  assert.equal(serialized.includes("recommended_plugins"), false);
+  assert.equal(serialized.includes("AGENTS.md instructions"), false);
+  assert.equal(serialized.includes("environment_context"), false);
+  const userItems = turns[0].items.filter((item) => item.role === "user");
+  assert.equal(userItems.length, 1);
+  assert.equal(userItems[0].content[0].text, "check the 0.6.1 release");
+});
+
+test("parseSessionJsonlTurns keeps the real request when it shares an item with injected context", () => {
+  const content = [
+    JSON.stringify({
+      timestamp: "2026-07-25T00:39:28.000Z",
+      type: "event_msg",
+      payload: { type: "task_started", turn_id: "turn-mixed" },
+    }),
+    JSON.stringify({
+      timestamp: "2026-07-25T00:39:30.000Z",
+      type: "response_item",
+      payload: {
+        id: "mixed-opener",
+        type: "message",
+        role: "user",
+        content: [
+          {
+            type: "input_text",
+            text: "<recommended_plugins>\n- Figma (figma@openai-curated-remote)\n</recommended_plugins>",
+          },
+          { type: "input_text", text: "check the 0.6.1 release" },
+        ],
+        internal_chat_message_metadata_passthrough: { turn_id: "turn-mixed" },
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-07-25T00:41:00.000Z",
+      type: "event_msg",
+      payload: { type: "task_complete", turn_id: "turn-mixed" },
+    }),
+  ].join("\n");
+
+  const turns = parseSessionJsonlTurns(content, { threadId: "thread-mixed" });
+  const userItems = turns[0].items.filter((item) => item.role === "user");
+
+  assert.equal(JSON.stringify(turns).includes("recommended_plugins"), false);
+  assert.equal(userItems.length, 1);
+  assert.deepEqual(userItems[0].content, [{ type: "input_text", text: "check the 0.6.1 release" }]);
+});
+
 test("parseSessionJsonlTurns keeps the active turn when a parallel sibling turn completes", () => {
   // Regression: a sibling task_complete used to clear activeTurnId, so later
   // turn-less items spawned synthetic running "turn-line-N" turns that pinned

@@ -10,6 +10,7 @@ const {
   isContextualUserText,
   isUserRoleItem,
   responseItemMessageText: sharedResponseItemMessageText,
+  sanitizeUserRoleItem,
   visibleUserPromptText,
 } = require("./desktop-ipc-shared");
 
@@ -862,7 +863,10 @@ function normalizeResponseItemForHistory(payload, lineNumber, { cwd = "", toolCa
     item.role = "assistant";
   }
 
-  return item;
+  // A single user item can carry injected context next to the real request.
+  // Sanitize here so history readers (including the thread/read JSONL merge,
+  // which runs after the relay sanitizer) never rebuild the hidden fragments.
+  return isUserRoleItem(item) ? sanitizeUserRoleItem(item) : item;
 }
 
 function applyHistoryAssistantSourceAlias(item, turnId, occurrencesByBaseKey = new Map()) {

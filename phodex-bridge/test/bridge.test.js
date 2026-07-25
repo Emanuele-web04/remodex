@@ -10,6 +10,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const {
+  annotateTurnStateProbeWithMirrorActiveTurn,
   buildThreadTurnsListRelaySanitizeContext,
   buildHeartbeatBridgeStatus,
   canonicalThreadTurnsListRequest,
@@ -285,6 +286,44 @@ test("thread turns-list fast page returns JSONL once and reuses the late canonic
     },
   }, resolveOptions);
   assert.equal(canonicalFetches, 2);
+});
+
+test("turn-state probe responses carry the mirror's active turn without mutating cached pages", () => {
+  const request = {
+    id: "req-probe",
+    method: "thread/turns/list",
+    params: { threadId: "thread-mirrored", limit: 8, sortDirection: "desc" },
+  };
+  const cachedResponse = {
+    id: "req-probe",
+    result: { data: [{ id: "turn-old", status: "completed" }], nextCursor: null },
+  };
+
+  const annotated = annotateTurnStateProbeWithMirrorActiveTurn(
+    request,
+    cachedResponse,
+    (threadId) => (threadId === "thread-mirrored" ? "turn-live" : null)
+  );
+  assert.equal(annotated.result.remodexMirrorActiveTurnId, "turn-live");
+  assert.equal(annotated.result.data[0].id, "turn-old");
+  // The cached object the coordinator may replay stays untouched.
+  assert.equal(cachedResponse.result.remodexMirrorActiveTurnId, undefined);
+
+  // No active mirror turn, error responses, and history pages pass through as-is.
+  assert.equal(
+    annotateTurnStateProbeWithMirrorActiveTurn(request, cachedResponse, () => null),
+    cachedResponse
+  );
+  const errorResponse = { id: "req-probe", error: { code: -32000, message: "boom" } };
+  assert.equal(
+    annotateTurnStateProbeWithMirrorActiveTurn(request, errorResponse, () => "turn-live"),
+    errorResponse
+  );
+  const historyRequest = { ...request, params: { threadId: "thread-mirrored", limit: 5 } };
+  assert.equal(
+    annotateTurnStateProbeWithMirrorActiveTurn(historyRequest, cachedResponse, () => "turn-live"),
+    cachedResponse
+  );
 });
 
 test("thread turns-list first-page singleflight isolates request shapes and rebinds response ids", async () => {

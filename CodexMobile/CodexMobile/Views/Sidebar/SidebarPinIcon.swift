@@ -45,7 +45,7 @@ private extension SidebarPinIcon.Style {
     VStack(alignment: .leading, spacing: 16) {
         HStack(spacing: 8) {
             SidebarPinIcon(style: .header)
-            Text("Pinned").font(.body.weight(.medium))
+            Text("Pinned").font(AppFont.body(weight: .medium))
         }
         HStack(spacing: 6) {
             SidebarPinIcon(style: .rowBadge)

@@ -186,7 +186,7 @@ private struct SidebarContentScopePickerPreviewHost: View {
     ) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title)
-                .font(.caption.weight(.semibold))
+                .font(AppFont.caption(weight: .semibold))
                 .foregroundStyle(.secondary)
             content()
         }

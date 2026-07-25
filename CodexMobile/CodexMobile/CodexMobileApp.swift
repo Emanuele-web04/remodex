@@ -11,6 +11,7 @@ import SwiftUI
 struct CodexMobileApp: App {
     @Environment(\.scenePhase) private var scenePhase
     @UIApplicationDelegateAdaptor(CodexMobileAppDelegate.self) private var appDelegate
+    @AppStorage(AppFont.storageKey) private var appFontStyleRawValue = AppFont.defaultStoredStyleRawValue
     @State private var codexService: CodexService
     @State private var petCompanionStore: PetCompanionStore
     @State private var petCompanionStatusStore: PetCompanionStatusStore
@@ -18,6 +19,7 @@ struct CodexMobileApp: App {
 
     init() {
         Self.configureRevenueCatIfAvailable()
+        AppTypographyController.apply()
         let service = CodexService()
         service.configureNotifications()
         _codexService = State(initialValue: service)
@@ -29,6 +31,7 @@ struct CodexMobileApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .font(activeBodyFont)
                 .environment(codexService)
                 .environment(petCompanionStore)
                 .environment(petCompanionStatusStore)
@@ -58,7 +61,22 @@ struct CodexMobileApp: App {
                     guard newPhase == .background else { return }
                     TurnCacheManager.resetAll()
                 }
+                // App init already set the appearance proxies before the first
+                // window was built, so only live style changes need a re-apply
+                // (which also walks existing windows to restyle mounted chrome).
+                // Timeline caches hold text styled with the previous face, so drop them too.
+                .onChange(of: appFontStyleRawValue) { _, _ in
+                    AppTypographyController.apply()
+                    TurnCacheManager.resetAll()
+                }
         }
+    }
+
+    private var activeBodyFont: Font {
+        // Reading AppStorage here invalidates the root font environment as soon
+        // as Settings changes the stored style, without rebuilding ContentView.
+        _ = appFontStyleRawValue
+        return AppFont.body()
     }
 
     @discardableResult

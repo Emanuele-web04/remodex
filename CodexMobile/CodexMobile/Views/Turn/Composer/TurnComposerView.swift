@@ -148,8 +148,26 @@ struct TurnComposerView: View {
 
     // ─── ENTRY POINT ─────────────────────────────────────────────
     var body: some View {
-        AdaptiveGlassContainer(spacing: 6) {
-            composerStack
+        VStack(spacing: 6) {
+            // The capsule stays outside the glass container: its glass lives on
+            // a `Color.clear` background layer (see VoiceRecordingCapsule), so
+            // inside a `GlassEffectContainer` the waveform/timer would be
+            // plain sibling content that the container renders beneath the
+            // promoted glass surface — i.e. blurred out. Standalone glass
+            // draws behind the capsule content like a normal background and
+            // never merges with the composer card's glass.
+            if accessoryState.showsVoiceRecordingCapsule {
+                VoiceRecordingCapsule(
+                    audioLevels: accessoryState.voiceAudioLevels,
+                    duration: accessoryState.voiceRecordingDuration,
+                    onCancel: onCancelVoiceRecording
+                )
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
+            }
+
+            AdaptiveGlassContainer(spacing: 6) {
+                composerStack
+            }
         }
         .padding(.horizontal, 12)
         .padding(.top, 4)
@@ -182,15 +200,6 @@ struct TurnComposerView: View {
 
     private var composerStack: some View {
         VStack(spacing: 6) {
-            if accessoryState.showsVoiceRecordingCapsule {
-                VoiceRecordingCapsule(
-                    audioLevels: accessoryState.voiceAudioLevels,
-                    duration: accessoryState.voiceRecordingDuration,
-                    onCancel: onCancelVoiceRecording
-                )
-                .transition(.opacity.combined(with: .move(edge: .bottom)))
-            }
-
             // Gated here (not inside the bar) so the VStack never keeps an
             // empty child whose spacing could leave a stray gap above the
             // input. The row stays visible while the composer rests as a

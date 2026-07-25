@@ -63,8 +63,10 @@ const LEGACY_CONTEXT_WARNING_PREFIXES = [
 const LEGACY_APPLY_PATCH_WARNING_PREFIX = "Warning: apply_patch was requested via ";
 const LEGACY_APPLY_PATCH_WARNING_SUFFIX = "Use the apply_patch tool instead of exec_command.";
 const AGENTS_INSTRUCTIONS_PREFIX = "# AGENTS.md instructions";
-const INTERNAL_CONTEXT_PATTERN = /^<codex_internal_context\s+source=(?:"[a-z][a-z0-9_]*"|'[a-z][a-z0-9_]*')>[\s\S]*<\/codex_internal_context>$/;
-const EXTERNAL_CONTEXT_PATTERN = /^<external_([a-z0-9_-]+)>[\s\S]*<\/external_\1>$/;
+const AGENTS_INSTRUCTIONS_BEGIN = "<instructions>";
+const AGENTS_INSTRUCTIONS_END = "</instructions>";
+const INTERNAL_CONTEXT_PREFIX_PATTERN = /^<codex_internal_context\s+source=(?:"[a-z][a-z0-9_]*"|'[a-z][a-z0-9_]*')>[\s\S]*?<\/codex_internal_context>/;
+const EXTERNAL_CONTEXT_PREFIX_PATTERN = /^<external_([a-z0-9_-]+)>[\s\S]*?<\/external_\1>/;
 const PROMPT_REQUEST_BEGIN = "## My request for Codex:";
 const REVIEW_PROMPT_PREFIX = "## Code review guidelines:";
 
@@ -91,38 +93,116 @@ function stripImagePlaceholders(text) {
   return IMAGE_PLACEHOLDER_TOKEN.test(withoutPairs.trim()) ? "" : withoutPairs;
 }
 
+// Review envelopes contain a real request after the delimiter and are never
+// wholly contextual, even when that request itself contains reserved markup.
+function isReviewEnvelopeText(trimmed) {
+  return trimmed.startsWith(REVIEW_PROMPT_PREFIX) && trimmed.includes(PROMPT_REQUEST_BEGIN);
+}
+
+// Consumes one runtime-owned fragment anchored at the start of `text` and
+// returns what follows it, or null when the text does not open with one.
+// Codex packs several fragments into a single user item, so the opening and
+// closing markers routinely belong to different fragments (a desktop opener
+// reads "<recommended_plugins>...</recommended_plugins>" + AGENTS.md
+// instructions + "<environment_context>...</environment_context>"). Matching
+// the blob as a whole classifies that item as visible and turns the entire
+// injected preamble into the thread's first user bubble.
+function consumeLeadingContextFragment(text) {
+  const lower = text.toLowerCase();
+
+  for (const [start, end] of CONTEXT_MARKER_PAIRS) {
+    if (!lower.startsWith(start)) {
+      continue;
+    }
+    const closeIndex = lower.indexOf(end, start.length);
+    // An unterminated marker is not a fragment we can bound. Leave it visible
+    // rather than swallow a message that merely opens with reserved markup.
+    return closeIndex === -1 ? null : text.slice(closeIndex + end.length);
+  }
+
+  const internal = INTERNAL_CONTEXT_PREFIX_PATTERN.exec(text);
+  if (internal) {
+    return text.slice(internal[0].length);
+  }
+  const external = EXTERNAL_CONTEXT_PREFIX_PATTERN.exec(text);
+  if (external) {
+    return text.slice(external[0].length);
+  }
+
+  if (lower.startsWith(AGENTS_INSTRUCTIONS_PREFIX.toLowerCase())) {
+    return consumeAgentsInstructionsFragment(text, lower);
+  }
+
+  // Unlike the marked fragments above, runtime warnings carry no closing marker
+  // and trail free-form runtime lines ("Shell cwd was reset to ..."), so there is
+  // no boundary to peel at. They are emitted as whole items that never contain a
+  // user request, hence consuming the remainder rather than bounding it.
+  if (LEGACY_CONTEXT_WARNING_PREFIXES.some((prefix) => text.startsWith(prefix))) {
+    return "";
+  }
+  return text.startsWith(LEGACY_APPLY_PATCH_WARNING_PREFIX)
+    && text.endsWith(LEGACY_APPLY_PATCH_WARNING_SUFFIX)
+    ? ""
+    : null;
+}
+
+function consumeAgentsInstructionsFragment(text, lower) {
+  const closeIndex = lower.indexOf(AGENTS_INSTRUCTIONS_END);
+  if (closeIndex >= 0) {
+    return consumeChainedInstructionsBlocks(text.slice(closeIndex + AGENTS_INSTRUCTIONS_END.length));
+  }
+  // Older runtimes emit the AGENTS.md body unwrapped and then append another
+  // registered fragment; that next marker is the only reliable boundary.
+  const nextMarkerIndex = CONTEXT_MARKER_PAIRS
+    .map(([start]) => lower.indexOf(start, 1))
+    .filter((index) => index > 0)
+    .sort((left, right) => left - right)[0];
+  return nextMarkerIndex === undefined ? null : text.slice(nextMarkerIndex);
+}
+
+// A single "# AGENTS.md instructions" header can carry one <INSTRUCTIONS> block
+// per nested AGENTS.md file. Stopping at the first close would leave the rest of
+// the preamble in front of the real request, where no registered marker matches
+// and the peeler gives up, turning the leftover into the first user bubble.
+function consumeChainedInstructionsBlocks(text) {
+  let rest = text;
+  for (;;) {
+    const trimmed = rest.trimStart();
+    const lower = trimmed.toLowerCase();
+    if (!lower.startsWith(AGENTS_INSTRUCTIONS_BEGIN)) {
+      return rest;
+    }
+    const closeIndex = lower.indexOf(AGENTS_INSTRUCTIONS_END, AGENTS_INSTRUCTIONS_BEGIN.length);
+    // Unterminated: same rule as everywhere else, leave it visible rather than
+    // guess where the injected block ends.
+    if (closeIndex === -1) {
+      return rest;
+    }
+    rest = trimmed.slice(closeIndex + AGENTS_INSTRUCTIONS_END.length);
+  }
+}
+
+// Peels every injected fragment off the front of an already trimmed message and
+// returns the text the user actually typed (empty when nothing else remains).
+function stripLeadingContextFragments(trimmed) {
+  let rest = trimmed;
+  while (rest) {
+    const remainder = consumeLeadingContextFragment(rest);
+    if (remainder === null) {
+      break;
+    }
+    rest = remainder.trim();
+  }
+  return rest;
+}
+
 function isContextualUserText(text) {
   const raw = typeof text === "string" ? text : "";
   const trimmed = stripImagePlaceholders(raw).trim();
-  if (!trimmed) {
+  if (!trimmed || isReviewEnvelopeText(trimmed)) {
     return false;
   }
-  // Review envelopes contain a real request after the delimiter and are never
-  // wholly contextual, even when that request itself contains reserved markup.
-  if (trimmed.startsWith(REVIEW_PROMPT_PREFIX) && trimmed.includes(PROMPT_REQUEST_BEGIN)) {
-    return false;
-  }
-  const normalized = trimmed.toLowerCase();
-  if (normalized.startsWith(AGENTS_INSTRUCTIONS_PREFIX.toLowerCase())) {
-    // Runtime context can concatenate AGENTS.md with any registered hidden
-    // fragment. Only classify the whole item as hidden when its final fragment
-    // is also runtime-owned; a following real user request must stay visible.
-    return normalized.endsWith("</instructions>")
-      || CONTEXT_MARKER_PAIRS.some(([, end]) => normalized.endsWith(end));
-  }
-  if (CONTEXT_MARKER_PAIRS.some(([start, end]) => (
-    normalized.startsWith(start) && normalized.endsWith(end)
-  ))) {
-    return true;
-  }
-  if (INTERNAL_CONTEXT_PATTERN.test(trimmed) || EXTERNAL_CONTEXT_PATTERN.test(trimmed)) {
-    return true;
-  }
-  if (LEGACY_CONTEXT_WARNING_PREFIXES.some((prefix) => trimmed.startsWith(prefix))) {
-    return true;
-  }
-  return trimmed.startsWith(LEGACY_APPLY_PATCH_WARNING_PREFIX)
-    && trimmed.endsWith(LEGACY_APPLY_PATCH_WARNING_SUFFIX);
+  return stripLeadingContextFragments(trimmed) === "";
 }
 
 function decodeXmlText(text) {
@@ -173,14 +253,25 @@ function visibleUserPromptText(text) {
     return "";
   }
   const cleaned = stripImagePlaceholders(text);
-  // Context bodies can contain the request delimiter as ordinary text. Classify
-  // the complete fragment first so the delimiter cannot reveal hidden content.
-  if (isContextualUserText(cleaned)) {
+  const trimmed = cleaned.trim();
+  if (!trimmed) {
     return "";
   }
-  const requestIndex = cleaned.lastIndexOf(PROMPT_REQUEST_BEGIN);
+  // Context bodies can contain the request delimiter as ordinary text. Peel the
+  // injected fragments off first so the delimiter cannot reveal hidden content,
+  // and so a real request that trails them survives instead of the whole blob.
+  const stripped = isReviewEnvelopeText(trimmed)
+    ? trimmed
+    : stripLeadingContextFragments(trimmed);
+  if (!stripped) {
+    return "";
+  }
+  // Untouched prompts keep their original spacing so callers can still detect
+  // "nothing changed" by identity and skip cloning the item.
+  const body = stripped === trimmed ? cleaned : stripped;
+  const requestIndex = body.lastIndexOf(PROMPT_REQUEST_BEGIN);
   if (requestIndex >= 0) {
-    const request = cleaned.slice(requestIndex + PROMPT_REQUEST_BEGIN.length).trim();
+    const request = body.slice(requestIndex + PROMPT_REQUEST_BEGIN.length).trim();
     // A few IDE/review exports end with the delimiter but omit its request
     // suffix. They still contain a real visible prompt before that marker;
     // returning an empty string made live mirroring erase the opener while
@@ -191,14 +282,14 @@ function visibleUserPromptText(text) {
     if (request) {
       return request;
     }
-    const body = cleaned.slice(0, requestIndex).trimEnd();
-    return isContextualUserText(body) ? "" : body;
+    const precedingBody = body.slice(0, requestIndex).trimEnd();
+    return isContextualUserText(precedingBody) ? "" : precedingBody;
   }
-  const envelopeText = extractVisibleRuntimeEnvelope(cleaned);
+  const envelopeText = extractVisibleRuntimeEnvelope(body);
   if (envelopeText != null) {
     return envelopeText;
   }
-  return cleaned;
+  return body;
 }
 
 // Sanitizes text fragments independently so a hidden fragment cannot cause a
@@ -325,6 +416,24 @@ function normalizeToken(value) {
   return typeof value === "string"
     ? value.toLowerCase().replace(/[_-\s]+/g, "")
     : "";
+}
+
+// The phone's running-state probe, as opposed to a history page: the explicit
+// marker on current clients, or the probe's unique legacy shape (Remodex iPhone
+// 2.1 predates the marker, and real history pages use limits 1 and 5). Every
+// live source answers this request, so they must all recognize it identically.
+function isThreadTurnStateProbeRequest(message) {
+  const params = message?.params;
+  if (readString(message?.method) !== "thread/turns/list"
+    || readString(params?.cursor)
+    || params?.remodexRequireCanonical === true) {
+    return false;
+  }
+  if (params?.remodexTurnStateOnly === true) {
+    return true;
+  }
+  return Number(params?.limit) === 8
+    && normalizeToken(readString(params?.sortDirection) || "desc") === "desc";
 }
 
 function cloneJSON(value) {
@@ -456,6 +565,7 @@ module.exports = {
   hasVisiblePlanUpdate,
   isContextualUserText,
   isPlainJSONObject,
+  isThreadTurnStateProbeRequest,
   isUserRoleItem,
   normalizeToken,
   readString,

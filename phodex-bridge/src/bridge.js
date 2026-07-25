@@ -55,6 +55,7 @@ const { createBridgeSecureTransport } = require("./secure-transport");
 const { createRolloutLiveMirrorController } = require("./rollout-live-mirror");
 const {
   isContextualUserText,
+  isThreadTurnStateProbeRequest,
   isUserRoleItem,
   readUserItemText,
   sanitizeUserRoleItem,
@@ -551,6 +552,33 @@ function threadTurnsListHandoffDescriptor(cursor) {
     return null;
   }
   return { anchorTurnId, token };
+}
+
+// The bounded canonical page can read a busy mirrored run as closed for a
+// beat, which used to flap the phone's running state. When the rollout mirror
+// is actively tailing a real turn, ride its id along on the turn-state probe
+// as an advisory field; history pages stay untouched.
+function annotateTurnStateProbeWithMirrorActiveTurn(request, response, getMirrorActiveTurnId) {
+  if (!isThreadTurnStateProbeRequest(request)) {
+    return response;
+  }
+  const params = request?.params || {};
+  const threadId = normalizeNonEmptyString(params.threadId)
+    || normalizeNonEmptyString(params.thread_id);
+  const mirrorActiveTurnId = threadId ? getMirrorActiveTurnId?.(threadId) : null;
+  const result = response?.result;
+  if (!mirrorActiveTurnId || !result || typeof result !== "object" || Array.isArray(result)) {
+    return response;
+  }
+  // Page responses can come from the fast-page cache: never mutate a shared
+  // object, or the annotation would outlive the mirror on later replays.
+  return {
+    ...response,
+    result: {
+      ...result,
+      remodexMirrorActiveTurnId: mirrorActiveTurnId,
+    },
+  };
 }
 
 function canonicalThreadTurnsListRequest(request) {
@@ -1382,6 +1410,11 @@ function startBridge({
   function sendBridgeManagedThreadTurnsListResponse(request, response, sendResponse, {
     skipJsonlArtifactAugmentation = false,
   } = {}) {
+    response = annotateTurnStateProbeWithMirrorActiveTurn(
+      request,
+      response,
+      (threadId) => rolloutLiveMirror?.getActiveTurnId(threadId) || null
+    );
     const finalSanitizeContext = buildThreadTurnsListRelaySanitizeContext(request, {
       skipJsonlArtifactAugmentation,
     });
@@ -5031,6 +5064,7 @@ function shouldSuppressRolloutMirrorForThread(
 }
 
 module.exports = {
+  annotateTurnStateProbeWithMirrorActiveTurn,
   buildThreadTurnsListRelaySanitizeContext,
   buildHeartbeatBridgeStatus,
   canonicalThreadTurnsListRequest,

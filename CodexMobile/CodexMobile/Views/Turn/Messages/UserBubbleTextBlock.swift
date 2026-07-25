@@ -48,7 +48,7 @@ struct UserBubbleTextBlock<Content: View>: View {
     // Follows Dynamic Type so the height-capped collapse shows roughly the same
     // amount of content as the lineLimit-based one.
     private static var collapsedContentMaxHeight: CGFloat {
-        UIFont.preferredFont(forTextStyle: .body).lineHeight * CGFloat(collapseLineLimit)
+        AppFont.bodyUIFont().lineHeight * CGFloat(collapseLineLimit)
     }
 
     var body: some View {

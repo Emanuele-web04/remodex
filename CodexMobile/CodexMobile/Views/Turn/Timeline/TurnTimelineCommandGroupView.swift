@@ -27,6 +27,9 @@ struct TurnTimelineCommandGroupView: View {
 
     private var title: String {
         var parts = [group.commandCount == 1 ? "Ran 1 command" : "Ran \(group.commandCount) commands"]
+        if group.toolCallCount > 0 {
+            parts.append(group.toolCallCount == 1 ? "1 tool call" : "\(group.toolCallCount) tool calls")
+        }
         if group.failedCommandCount > 0 {
             parts.append("\(group.failedCommandCount) failed")
         }

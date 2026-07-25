@@ -21,6 +21,7 @@ enum TurnCacheManager {
         MarkdownParseCacheReset.reset()
         MarkdownRenderableTextCache.reset()
         UserBubbleRenderModelCache.reset()
+        UserBubbleInlineMarkdownRenderer.reset()
         UserBubbleCollapsedMarkdownPreview.reset()
         MessageRowRenderModelCache.reset()
         CommandExecutionStatusCache.reset()

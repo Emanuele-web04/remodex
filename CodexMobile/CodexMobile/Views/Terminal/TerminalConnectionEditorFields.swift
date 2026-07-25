@@ -14,7 +14,7 @@ struct TerminalEditorSection<Content: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(title)
-                .font(.system(size: 18, weight: .bold))
+                .font(AppFont.system(size: 18, weight: .bold))
                 .foregroundStyle(.primary)
             content
         }
@@ -31,11 +31,11 @@ struct TerminalConnectionStringField: View {
                 RemodexIcon.image(systemName: "chevron.up.chevron.down")
                     .font(.system(size: 13, weight: .semibold))
             }
-            .font(.system(size: 15, weight: .medium))
+            .font(AppFont.system(size: 15, weight: .medium))
             .foregroundStyle(.secondary)
 
             TextField("user@hostname", text: $connection)
-                .font(.system(size: 15, weight: .medium))
+                .font(AppFont.system(size: 15, weight: .medium))
                 .keyboardType(.URL)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
@@ -52,7 +52,7 @@ struct TerminalRoundedTextField: View {
 
     var body: some View {
         TextField(placeholder, text: $text)
-            .font(.system(size: 15, weight: .medium))
+            .font(AppFont.system(size: 15, weight: .medium))
             .textInputAutocapitalization(.words)
             .autocorrectionDisabled()
             .padding(.horizontal, 22)
@@ -69,11 +69,11 @@ struct TerminalEditorRow: View {
     var body: some View {
         HStack(spacing: 12) {
             Text(title)
-                .font(.system(size: 15))
+                .font(AppFont.system(size: 15))
                 .foregroundStyle(.primary)
             Spacer(minLength: 8)
             Text(value)
-                .font(.system(size: 15))
+                .font(AppFont.system(size: 15))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
             if showsChevron {
@@ -95,11 +95,11 @@ struct TerminalPrivateKeyEditor: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Text("Private key")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(AppFont.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
                 Spacer(minLength: 0)
                 Button(isShowingKey ? "Hide" : "Paste/Edit", action: toggleKeyVisibility)
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(AppFont.system(size: 11, weight: .semibold))
                     .buttonStyle(.plain)
             }
 
@@ -139,7 +139,7 @@ private struct TerminalPrivateKeySavedRow: View {
             RemodexIcon.image(systemName: "checkmark.seal.fill")
                 .foregroundStyle(.green)
             Text("Private key saved")
-                .font(.system(size: 11))
+                .font(AppFont.system(size: 11))
                 .foregroundStyle(.secondary)
             Spacer(minLength: 0)
         }
@@ -158,7 +158,7 @@ struct TerminalTextField: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title)
-                .font(.system(size: 11, weight: .semibold))
+                .font(AppFont.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
             TextField(placeholder.isEmpty ? title : placeholder, text: $text)
                 .font(.system(size: 11, design: .monospaced))

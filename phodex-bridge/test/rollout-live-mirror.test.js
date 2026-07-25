@@ -314,9 +314,12 @@ test("suppression lift re-bootstraps the muted tail so a running thread recovers
     },
   }));
 
-  // The muted tail consumes the whole rollout without mirroring anything.
+  // The muted tail consumes the whole rollout without mirroring anything, and
+  // must not leak its parsed turn through the turn-state probe either: that is
+  // the very state the bridge decided another live source owns.
   await wait(30);
   assert.deepEqual(outbound, []);
+  assert.equal(controller.getActiveTurnId("thread-unmute"), null);
 
   // The other live source went stale: the mirror must re-run its bootstrap
   // catch-up so the phone backfills the gap and sees the run as active again,
@@ -332,6 +335,7 @@ test("suppression lift re-bootstraps the muted tail so a running thread recovers
   );
   assert.ok(bootstrapComplete, "expected a bootstrap-complete activity marker after unmute");
   assert.equal(bootstrapComplete.params.turnId, "turn-unmute");
+  assert.equal(controller.getActiveTurnId("thread-unmute"), "turn-unmute");
 });
 
 test("desktop-origin bootstrap emits terminal catch-up for completed runs", async (t) => {
@@ -2397,8 +2401,8 @@ test("desktop-origin bootstrap represents an image-only response user opener", a
   assert.equal(outbound.find((m) => m.method === "codex/event/user_message")?.params.message, "Image attachment");
 });
 
-test("capped bootstrap suppresses orphan deltas and recovers from a new appended boundary", async (t) => {
-  const threadId = "thread-capped-awaiting";
+test("capped bootstrap attaches mid-turn growth under a synthetic turn without replaying the tail", async (t) => {
+  const threadId = "thread-capped-attach";
   const { homeDir, rolloutPath } = createTemporaryRolloutHome({
     threadId, originator: "Codex Desktop", source: "desktop",
     lines: [taskStarted("turn-old"), userMessage("Old opener")],
@@ -2415,16 +2419,60 @@ test("capped bootstrap suppresses orphan deltas and recovers from a new appended
   t.after(() => controller.stopAll());
   controller.observeInbound(JSON.stringify({ method: "thread/resume", params: { threadId } }));
   await wait(80);
+  // The unreachable tail is never replayed, but the attach announces the run
+  // as live under a synthetic turn immediately.
   assert.equal(outbound.some((m) => m.params?.message === "OLD ORPHAN"), false);
+  const attachActivity = outbound.find((m) => m.method === "turn/activity");
+  assert.ok(attachActivity?.params.turnId.startsWith("rollout-turn:"), "attach must announce a synthetic live turn");
+  // Synthetic ids are not actionable app-server turn ids: the probe
+  // annotation must not advertise them.
+  assert.equal(controller.getActiveTurnId(threadId), null);
   const afterBootstrap = bytesRead;
-  appendRolloutLines(rolloutPath, [agentMessage("ignored orphan delta")]);
+  appendRolloutLines(rolloutPath, [agentMessage("mid-turn delta after attach")]);
   await wait(30);
-  assert.ok(bytesRead - afterBootstrap < 16 * 1024, "awaiting mode reads only the appended delta");
-  assert.equal(outbound.some((m) => m.params?.message === "ignored orphan delta"), false);
+  assert.ok(bytesRead - afterBootstrap < 16 * 1024, "attached mode reads only the appended delta");
+  const midTurnDelta = outbound.find((m) => m.params?.message === "mid-turn delta after attach");
+  assert.ok(midTurnDelta, "growth after the attach point must mirror live");
+  assert.ok(midTurnDelta.params.turnId.startsWith("rollout-turn:"));
   appendRolloutLines(rolloutPath, [userMessage("Recovered opener"), taskStarted("turn-recovered"), agentMessage("Recovered assistant")]);
   await wait(50);
   const methods = outbound.filter((m) => m.method === "codex/event/user_message" || m.method === "codex/event/agent_message");
-  assert.deepEqual(methods.map((m) => m.params.message), ["Recovered opener", "Recovered assistant"]);
+  assert.deepEqual(methods.map((m) => m.params.message), ["mid-turn delta after attach", "Recovered opener", "Recovered assistant"]);
+  assert.equal(methods[2].params.turnId, "turn-recovered");
+});
+
+test("capped bootstrap attaches to an openerless active turn visible inside the window", async (t) => {
+  const threadId = "thread-capped-attach-real-turn";
+  const { homeDir, rolloutPath } = createTemporaryRolloutHome({
+    threadId, originator: "Codex Desktop", source: "desktop",
+    lines: [userMessage("Old opener"), taskStarted("turn-old"), taskComplete("turn-old")],
+  });
+  fs.appendFileSync(rolloutPath, `${"x".repeat((65 * 1024 * 1024) + 128)}\n${taskStarted("turn-live")}\n${agentMessage("pre-attach output")}\n`);
+  const previousCodexHome = process.env.CODEX_HOME; process.env.CODEX_HOME = homeDir;
+  t.after(() => { restoreCodexHome(previousCodexHome); fs.rmSync(homeDir, { recursive: true, force: true }); });
+  const outbound = [];
+  const controller = createRolloutLiveMirrorController({ sendApplicationResponse: (m) => outbound.push(JSON.parse(m)), pollIntervalMs: 5, idleTimeoutMs: 200 });
+  t.after(() => controller.stopAll());
+  controller.observeInbound(JSON.stringify({ method: "thread/resume", params: { threadId } }));
+  await wait(80);
+  // Content before the attach point stays canonical-history territory, but the
+  // hydrated run keeps its real turn id for everything that follows.
+  assert.equal(outbound.some((m) => m.params?.message === "pre-attach output"), false);
+  const attachActivity = outbound.find((m) => m.method === "turn/activity");
+  assert.equal(attachActivity?.params.turnId, "turn-live");
+  // A real hydrated turn id is advertised for the turn-state probe annotation.
+  assert.equal(controller.getActiveTurnId(threadId), "turn-live");
+  appendRolloutLines(rolloutPath, [agentMessage("post-attach output")]);
+  await wait(30);
+  const postAttach = outbound.find((m) => m.params?.message === "post-attach output");
+  assert.ok(postAttach, "growth after the attach point must mirror live");
+  assert.equal(postAttach.params.turnId, "turn-live");
+  appendRolloutLines(rolloutPath, [taskComplete("turn-live")]);
+  await wait(30);
+  const completed = outbound.find((m) => m.method === "turn/completed");
+  assert.equal(completed?.params.turnId, "turn-live");
+  // Once the run closes the probe annotation goes quiet again.
+  assert.equal(controller.getActiveTurnId(threadId), null);
 });
 
 function createTemporaryRolloutHome({ threadId, originator, source, lines }) {

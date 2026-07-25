@@ -151,7 +151,7 @@ struct TurnComposerInputTextView: UIViewRepresentable {
     private func composerUIFont() -> UIFont {
         // Read the SwiftUI environment so UIKit gets refreshed when Dynamic Type changes.
         let _ = dynamicTypeSize
-        return AppFont.uiFont(size: 15, textStyle: .body)
+        return AppFont.bodyUIFont()
     }
 
     private var skillTintColor: UIColor {
@@ -359,7 +359,7 @@ struct TurnComposerInputTextView: UIViewRepresentable {
 
         private func baseTypingAttributes(for textView: UITextView) -> [NSAttributedString.Key: Any] {
             [
-                .font: textView.font ?? UIFont.preferredFont(forTextStyle: .body),
+                .font: textView.font ?? AppFont.bodyUIFont(),
                 .foregroundColor: UIColor.label,
             ]
         }
@@ -405,7 +405,7 @@ struct TurnComposerInputTextView: UIViewRepresentable {
             if let textLayoutManager = textView.textLayoutManager {
                 textLayoutManager.ensureLayout(for: textLayoutManager.documentRange)
             }
-            let lineHeight = (textView.font ?? UIFont.preferredFont(forTextStyle: .body)).lineHeight
+            let lineHeight = (textView.font ?? AppFont.bodyUIFont()).lineHeight
             let verticalInset = textView.textContainerInset.top + textView.textContainerInset.bottom
             let minHeight = ceil(lineHeight * minVisibleLines + verticalInset)
             let maxHeight = ceil(lineHeight * maxVisibleLines + verticalInset)
@@ -432,7 +432,7 @@ struct TurnComposerInputTextView: UIViewRepresentable {
 
         // Avoids recalculating UITextView layout when only the streaming transcript invalidated SwiftUI.
         private func heightMeasurementSignature(for textView: UITextView) -> HeightMeasurementSignature {
-            let font = textView.font ?? UIFont.preferredFont(forTextStyle: .body)
+            let font = textView.font ?? AppFont.bodyUIFont()
             let width = max(textView.bounds.width, textView.textContainer.size.width, 1)
             let verticalInset = textView.textContainerInset.top + textView.textContainerInset.bottom
             return HeightMeasurementSignature(

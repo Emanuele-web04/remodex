@@ -99,28 +99,28 @@ struct GoalStatusSheet: View {
                 Image(systemName: goal.status.symbolName)
                     .foregroundStyle(statusColor(goal.status))
                 Text(goal.status.displayLabel)
-                    .font(.headline)
+                    .font(AppFont.headline())
                     .foregroundStyle(statusColor(goal.status))
                 Spacer()
                 Text(goal.usageSummary)
-                    .font(.subheadline.monospacedDigit())
+                    .font(AppFont.subheadline().monospacedDigit())
                     .foregroundStyle(.secondary)
             }
 
             Text(goal.objective)
-                .font(.body)
+                .font(AppFont.body())
                 .frame(maxWidth: .infinity, alignment: .leading)
 
             if let tokenBudget = goal.tokenBudget {
                 let remaining = goal.remainingTokens ?? 0
                 Text("Budget \(CodexThreadGoal.formatTokenCount(tokenBudget)) tokens · \(CodexThreadGoal.formatTokenCount(remaining)) remaining")
-                    .font(.footnote)
+                    .font(AppFont.footnote())
                     .foregroundStyle(.secondary)
             }
 
             if goal.status == .active {
                 Text("Codex keeps working toward this goal whenever the chat is idle, until it is complete, paused, or out of budget.")
-                    .font(.footnote)
+                    .font(AppFont.footnote())
                     .foregroundStyle(.secondary)
             }
         }
@@ -175,10 +175,10 @@ struct GoalStatusSheet: View {
     private var objectiveEditorCard: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(editorMode == .editExisting ? "Edit Goal" : "New Goal")
-                .font(.headline)
+                .font(AppFont.headline())
 
             Text("Describe the outcome, how to verify it, and what must not regress. Codex keeps working toward it across turns.")
-                .font(.footnote)
+                .font(AppFont.footnote())
                 .foregroundStyle(.secondary)
 
             TextEditor(text: $objectiveDraft)
@@ -228,7 +228,7 @@ struct GoalStatusSheet: View {
 
     private func errorCard(_ message: String) -> some View {
         Label(message, systemImage: "exclamationmark.triangle")
-            .font(.footnote)
+            .font(AppFont.footnote())
             .foregroundStyle(.red)
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)

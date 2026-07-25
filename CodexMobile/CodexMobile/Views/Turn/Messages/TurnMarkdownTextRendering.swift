@@ -67,6 +67,50 @@ struct PreparsedMarkdown {
     let revision: String
 }
 
+// RemodexTextKit derives its code font from the ambient prose font with SwiftUI's
+// `.monospaced()`, which only swaps in a fixed-width face when the base family has one.
+// SF Pro Rounded and Geist do not, so a selected rounded/serif app font leaked into code
+// blocks. Publishing the app mono face into the block's environment keeps code monospaced
+// in every app-font mode while the default style still owns layout, scaling and actions.
+private struct MonospacedCodeBlockStyle: StructuredText.CodeBlockStyle {
+    let base: StructuredText.DefaultCodeBlockStyle
+
+    func makeBody(configuration: Configuration) -> some View {
+        base.makeBody(configuration: configuration)
+            .font(AppFont.mono(.body))
+    }
+}
+
+// The app mono face is pinned explicitly (see `MonospacedCodeBlockStyle`), which
+// makes the code font absolute. Headings render by scaling the ambient font, and
+// the framework's derived code font followed that scale for free, so keep the
+// pinned face in sync by re-publishing it at the heading's own scale.
+private enum MarkdownCodeInlineStyle {
+    static func applying(codeFont: Font, to style: InlineStyle) -> InlineStyle {
+        style.code(
+            .font(codeFont),
+            .fontScale(0.94),
+            .tracking(-0.2),
+            .foregroundColor(Color.secondary)
+        )
+    }
+}
+
+private struct ScaledCodeHeadingStyle: StructuredText.HeadingStyle {
+    // Mirrors StructuredText.DefaultHeadingStyle's per-level font scales.
+    private static let fontScales: [CGFloat] = [2.353, 1.882, 1.647, 1.412, 1.294, 1]
+
+    let base: StructuredText.DefaultHeadingStyle
+    let inlineStyle: InlineStyle
+
+    func makeBody(configuration: Configuration) -> some View {
+        let level = min(max(configuration.headingLevel, 1), Self.fontScales.count)
+        let codeFont = AppFont.mono(size: AppFont.bodyPointSize * Self.fontScales[level - 1])
+        base.makeBody(configuration: configuration)
+            .remodex.inlineStyle(MarkdownCodeInlineStyle.applying(codeFont: codeFont, to: inlineStyle))
+    }
+}
+
 struct MarkdownTextView: View {
     var text: String = ""
     // When set, renders this pre-parsed AttributedString instead of parsing `text`.
@@ -107,21 +151,26 @@ struct MarkdownTextView: View {
         let baseView = StructuredText(resolved.markup, parser: resolved.parser)
             .font(AppFont.body())
             .remodex.codeBlockStyle(
-                .default(
-                    actionIcons: .init(
-                        copy: .custom {
-                            Image("copy", bundle: .main)
-                                .renderingMode(.template)
-                                .resizable()
-                                .scaledToFit()
-                        },
-                        copied: .custom {
-                            RemodexIcon.image(systemName: "checkmark")
-                        }
+                MonospacedCodeBlockStyle(
+                    base: StructuredText.DefaultCodeBlockStyle(
+                        actionIcons: .init(
+                            copy: .custom {
+                                Image("copy", bundle: .main)
+                                    .renderingMode(.template)
+                                    .resizable()
+                                    .scaledToFit()
+                            },
+                            copied: .custom {
+                                RemodexIcon.image(systemName: "checkmark")
+                            }
+                        )
                     )
                 )
             )
             .remodex.inlineStyle(markdownInlineStyle)
+            .remodex.headingStyle(
+                ScaledCodeHeadingStyle(base: .default, inlineStyle: markdownBaseInlineStyle)
+            )
             .remodex.structuredTextStyle(.default)
             .remodex.overflowMode(usesScrollableCodeBlocks ? .scroll : .wrap)
 
@@ -147,11 +196,19 @@ struct MarkdownTextView: View {
     }
 
     // Match markdown links to the app-wide accent palette the user picks for primary actions.
+    // Inline code keeps RemodexTextKit's default metrics but takes the app mono face explicitly
+    // (see `MonospacedCodeBlockStyle` for why the derived `.monospaced()` font is not enough).
     private var markdownInlineStyle: InlineStyle {
-        .default.link(
-            .foregroundColor(markdownLinkColor),
-            .underlineStyle(.init(pattern: .dot))
-        )
+        MarkdownCodeInlineStyle.applying(codeFont: AppFont.mono(.body), to: markdownBaseInlineStyle)
+    }
+
+    // Everything except the code font, so headings can restate it at their own scale.
+    private var markdownBaseInlineStyle: InlineStyle {
+        .default
+            .link(
+                .foregroundColor(markdownLinkColor),
+                .underlineStyle(.init(pattern: .dot))
+            )
     }
 
     private var markdownLinkColor: Color {

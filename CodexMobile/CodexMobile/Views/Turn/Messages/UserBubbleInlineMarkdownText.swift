@@ -73,7 +73,7 @@ struct UserBubbleInlineSkillText: View {
     }
 
     private var skillIconBaselineOffset: CGFloat {
-        let bodyFont = AppFont.uiFont(size: 15, textStyle: .body)
+        let bodyFont = AppFont.bodyUIFont()
         return (bodyFont.ascender + bodyFont.descender - skillIconSide) / 2
     }
 
@@ -285,6 +285,8 @@ enum UserBubbleInlineMarkdownRenderer {
         options.interpretedSyntax = .inlineOnlyPreservingWhitespace
         var parsed = (try? AttributedString(markdown: preparedText, options: options)) ?? AttributedString(rawText)
         underlineLinks(in: &parsed)
+        // Bubbles render at `AppFont.body()`, so code spans take the matching mono size.
+        AppFont.monospaceCodeSpans(in: &parsed)
         return parsed
     }
 

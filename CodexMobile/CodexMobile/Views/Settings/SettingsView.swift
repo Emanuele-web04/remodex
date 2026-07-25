@@ -520,7 +520,7 @@ private struct SettingsPetCompanionSection: View {
                 HStack(spacing: 8) {
                     Text("Companion Pet")
                     Text("BETA")
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(AppFont.caption2(weight: .semibold))
                         .tracking(0.5)
                         .foregroundStyle(settingsAccentColor)
                         .padding(.horizontal, 6)

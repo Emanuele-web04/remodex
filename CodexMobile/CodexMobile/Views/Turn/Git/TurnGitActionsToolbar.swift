@@ -387,7 +387,7 @@ private struct UIKitGitActionsMenuButton: UIViewRepresentable {
         }
 
         private func coloredChangesTitle(totals: GitDiffTotals) -> NSAttributedString {
-            let font = UIFont.preferredFont(forTextStyle: .body)
+            let font = AppFont.uiFont(size: 17, textStyle: .body)
             let attributed = NSMutableAttributedString()
             attributed.append(NSAttributedString(
                 string: "+\(totals.additions)",

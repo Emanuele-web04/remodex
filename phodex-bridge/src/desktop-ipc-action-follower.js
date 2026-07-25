@@ -19,6 +19,7 @@ const {
   FRAME_HEADER_BYTES,
   MAX_FRAME_BYTES,
   cloneJSON,
+  isThreadTurnStateProbeRequest,
   normalizeToken,
   readString,
   requestIdKey,
@@ -1076,7 +1077,7 @@ function createDesktopIpcActionFollower({
       canonicalHistoryThreadIds.add(threadId);
     }
     if (canonicalHistoryThreadIds.has(threadId)) {
-      if (isDesktopLiveTurnStateSnapshotRequest(message)) {
+      if (isThreadTurnStateProbeRequest(message)) {
         const liveState = boundedDesktopLiveStateForThread(threadId, rawState);
         sendApplicationResponse(JSON.stringify({
           id: message.id,
@@ -1129,21 +1130,6 @@ function createDesktopIpcActionFollower({
       },
     }));
     return true;
-  }
-
-  function isDesktopLiveTurnStateSnapshotRequest(message) {
-    if (readString(message?.method) !== "thread/turns/list"
-      || readString(message?.params?.cursor)
-      || message?.params?.remodexRequireCanonical === true) {
-      return false;
-    }
-    if (message?.params?.remodexTurnStateOnly === true) {
-      return true;
-    }
-    // Remodex iPhone 2.1 predates the explicit marker. Its running-state probe
-    // has this unique request shape; actual history pages use limits 1 and 5.
-    return Number(message?.params?.limit) === 8
-      && normalizeToken(readString(message?.params?.sortDirection) || "desc") === "desc";
   }
 
   function buildDesktopLiveTurnStateResult(turns) {

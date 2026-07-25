@@ -46,6 +46,11 @@ private enum MessageTextProcessingPolicy {
 private enum DesktopMirroredRunningPolicy {
     static let staleSnapshotGraceCount = 3
     static let recentActivityGraceInterval: TimeInterval = 20
+    // A snapshot that positively closes the tracked turn outranks the stale
+    // budget: only genuinely fresh mirror traffic may override it. Mirror
+    // heartbeats arrive every ~5s while a run streams, so two missed beats
+    // mean the run really ended and a lost turn/completed stops lingering.
+    static let closingSnapshotActivityGraceInterval: TimeInterval = 10
 }
 
 private extension Array where Element == CodexMessage {
@@ -555,16 +560,28 @@ extension CodexService {
         desktopMirroredRunningLastActivityAtByThread[threadId] = Date()
     }
 
-    func shouldPreserveDesktopMirroredRunningAfterStaleSnapshot(for threadId: String) -> Bool {
+    func shouldPreserveDesktopMirroredRunningAfterStaleSnapshot(
+        for threadId: String,
+        snapshotClosesTrackedTurn: Bool = false
+    ) -> Bool {
         guard desktopMirroredRunningThreadIDs.contains(threadId) else {
             return false
         }
 
         let staleCount = desktopMirroredRunningStaleSnapshotCountsByThread[threadId] ?? 0
         let lastActivityAt = desktopMirroredRunningLastActivityAtByThread[threadId] ?? Date()
-        let hasRecentMirrorActivity = Date().timeIntervalSince(lastActivityAt)
-            <= DesktopMirroredRunningPolicy.recentActivityGraceInterval
-        guard staleCount < DesktopMirroredRunningPolicy.staleSnapshotGraceCount || hasRecentMirrorActivity else {
+        let sinceLastActivity = Date().timeIntervalSince(lastActivityAt)
+        let preserves: Bool
+        if snapshotClosesTrackedTurn {
+            // Positive closure evidence gets only the short activity grace, so
+            // a missed turn/completed lingers for seconds, not the full window.
+            preserves = sinceLastActivity
+                <= DesktopMirroredRunningPolicy.closingSnapshotActivityGraceInterval
+        } else {
+            preserves = staleCount < DesktopMirroredRunningPolicy.staleSnapshotGraceCount
+                || sinceLastActivity <= DesktopMirroredRunningPolicy.recentActivityGraceInterval
+        }
+        guard preserves else {
             desktopMirroredRunningThreadIDs.remove(threadId)
             desktopMirroredRunningStaleSnapshotCountsByThread.removeValue(forKey: threadId)
             desktopMirroredRunningLastActivityAtByThread.removeValue(forKey: threadId)
@@ -2492,8 +2509,7 @@ extension CodexService {
             let existingText = threadMessages[targetIndex].text
             let mergedText = mergeToolActivityText(
                 existing: existingText,
-                incoming: trimmedLine,
-                isStreaming: isTurnActive
+                incoming: trimmedLine
             )
             guard mergedText != existingText else {
                 return
@@ -2753,8 +2769,7 @@ extension CodexService {
                 } else if kind == .toolActivity {
                     messagesByThread[threadId]?[index].text = mergeToolActivityText(
                         existing: existing,
-                        incoming: incoming,
-                        isStreaming: effectiveIsStreaming
+                        incoming: incoming
                     )
                 } else {
                     if isStreamingPlaceholder(incomingTrimmed, for: kind)
@@ -3186,7 +3201,7 @@ extension CodexService {
     }
 
     // Coalesces generic tool activity lines so the timeline keeps one stable row per tool item.
-    func mergeToolActivityText(existing: String, incoming: String, isStreaming: Bool) -> String {
+    func mergeToolActivityText(existing: String, incoming: String) -> String {
         let existingTrimmed = existing.trimmingCharacters(in: .whitespacesAndNewlines)
         let incomingTrimmed = incoming.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -3213,11 +3228,13 @@ extension CodexService {
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
 
+        // A later line for the same tool descriptor supersedes the earlier one,
+        // so a live row shows "Wrote to terminal" instead of stacking the start
+        // line and its completion as two separate entries.
         for line in incomingLines where !mergedLines.contains(where: {
             $0.caseInsensitiveCompare(line) == .orderedSame
         }) {
-            if !isStreaming,
-               let existingIndex = mergedLines.firstIndex(where: { candidate in
+            if let existingIndex = mergedLines.firstIndex(where: { candidate in
                    let existingTokens = candidate.split(whereSeparator: \.isWhitespace)
                    let incomingTokens = line.split(whereSeparator: \.isWhitespace)
                    guard existingTokens.count >= 2, incomingTokens.count >= 2 else {

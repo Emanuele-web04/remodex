@@ -79,7 +79,7 @@ private struct TerminalFallbackBuffer: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(statusLabel)
-                .font(.system(size: 11))
+                .font(AppFont.system(size: 11))
                 .foregroundStyle(Color(hexString: theme.mutedForeground))
 
             ScrollView(.vertical, showsIndicators: false) {
@@ -117,7 +117,7 @@ private struct TerminalFallbackInputBar: View {
                 .onSubmit(onSubmit)
 
             Button("Ctrl-C", action: onInterrupt)
-                .font(.system(size: 11, weight: .bold))
+                .font(AppFont.system(size: 11, weight: .bold))
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
                 .background(Color(hexString: theme.border), in: RoundedRectangle(cornerRadius: 8))

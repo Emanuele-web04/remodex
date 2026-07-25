@@ -100,7 +100,7 @@ struct TerminalConnectionEditorSheet: View {
                     .accessibilityLabel("SSH setup guide")
 
                     Button("Connect", action: onSave)
-                        .font(.system(size: 15, weight: .bold))
+                        .font(AppFont.system(size: 15, weight: .bold))
                         .disabled(!canSave)
                 }
             }
