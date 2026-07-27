@@ -67,6 +67,9 @@ const {
 } = require("./desktop-ipc-action-follower");
 const { createDesktopIpcLiveOwner } = require("./desktop-ipc-live-owner");
 const { createThreadRuntimeSettingsStore } = require("./thread-runtime-settings-store");
+const { createThreadListProvenanceEnricher } = require("./thread-list-provenance");
+const { createWorktreeOriginEnricher } = require("./worktree-origin");
+const { forEachThreadRowInResponse } = require("./thread-row-enrichment");
 const { version: bridgePackageVersion = "" } = require("../package.json");
 const {
   MINIMUM_SUPPORTED_IOS_APP_VERSION,
@@ -802,6 +805,8 @@ function startBridge({
   const jsonlTurnsListRolloutMissCacheByThread = new Map();
   const threadTurnsListFastPageCoordinator = createThreadTurnsListFastPageCoordinator();
   const threadRuntimeSettingsStore = createThreadRuntimeSettingsStore();
+  const threadListProvenanceEnricher = createThreadListProvenanceEnricher();
+  const worktreeOriginEnricher = createWorktreeOriginEnricher();
   const trackedForwardedRequestMethods = new Set([
     "account/login/start",
     "account/login/cancel",
@@ -1733,7 +1738,12 @@ function startBridge({
     if (trackedRequest.method === "thread/list"
       || trackedRequest.method === "thread/read"
       || trackedRequest.method === "thread/resume") {
-      threadRuntimeSettingsStore.enrichResponse(trackedRequest.method, parsed);
+      // One walk over the rows for both enrichers instead of one traversal each.
+      forEachThreadRowInResponse(trackedRequest.method, parsed, (thread) => {
+        threadRuntimeSettingsStore.attachToThread(thread);
+        threadListProvenanceEnricher.attachToThread(thread);
+        worktreeOriginEnricher.attachToThread(thread);
+      });
       normalizedMessage = JSON.stringify(parsed);
     }
 

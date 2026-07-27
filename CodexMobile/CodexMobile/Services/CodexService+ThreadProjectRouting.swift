@@ -78,7 +78,7 @@ extension CodexService {
             threadId: normalizedThreadId,
             projectPath: normalizedProjectPath
         )
-        if CodexThread.projectIconSystemName(for: normalizedProjectPath) == "arrow.triangle.branch" {
+        if CodexThread.isManagedWorktreePath(normalizedProjectPath) {
             rememberAssociatedManagedWorktreePath(normalizedProjectPath, for: normalizedThreadId)
         }
 
@@ -156,6 +156,23 @@ extension CodexService {
         persistAssociatedManagedWorktreePaths()
     }
 
+    // The bridge resolves worktree ownership on the next thread list, but the chat that just moved
+    // into a fresh worktree is on screen now: record the checkout it came from so the sidebar keeps
+    // it under that project immediately instead of flashing a separate worktree project row.
+    func rememberWorktreeOriginPath(_ originPath: String?, forThreadId threadId: String) {
+        guard let normalizedThreadId = normalizedInterruptIdentifier(threadId) ?? normalizedThreadIdValue(threadId),
+              let normalizedOriginPath = normalizedStoredProjectPath(originPath),
+              !CodexThread.isManagedWorktreePath(normalizedOriginPath),
+              var currentThread = thread(for: normalizedThreadId),
+              currentThread.isManagedWorktreeProject,
+              currentThread.worktreeOriginPath != normalizedOriginPath else {
+            return
+        }
+
+        currentThread.worktreeOriginPath = normalizedOriginPath
+        upsertThread(currentThread)
+    }
+
     func currentAuthoritativeProjectPath(for threadId: String?) -> String? {
         guard let normalizedThreadId = normalizedInterruptIdentifier(threadId) ?? normalizedThreadIdValue(threadId) else {
             return nil
@@ -216,7 +233,7 @@ extension CodexService {
         let canonicalCurrentPath = canonicalRepoIdentifier(for: currentProjectPath) ?? currentProjectPath
         let canonicalObservedPath = canonicalRepoIdentifier(for: observedProjectPath) ?? observedProjectPath
         guard canonicalCurrentPath == canonicalObservedPath,
-              CodexThread.projectIconSystemName(for: canonicalObservedPath) == "arrow.triangle.branch" else {
+              CodexThread.isManagedWorktreePath(canonicalObservedPath) else {
             return false
         }
 

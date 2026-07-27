@@ -190,16 +190,22 @@ enum SidebarThreadGrouping {
         ).map(\.id)
     }
 
-    private static func makeProjectGroup(projectKey: String, threads: [CodexThread]) -> SidebarThreadGroup {
+    // The group speaks for the project, not for whichever chat happens to sort first: a worktree
+    // chat at the top must still show the source project's name, icon, and new-chat target.
+    private static func makeProjectGroup(
+        projectKey: String,
+        projectPath: String?,
+        threads: [CodexThread]
+    ) -> SidebarThreadGroup {
         let sortedThreads = sortThreadsByRecentActivity(threads)
         let representativeThread = sortedThreads.first
         let sortDate = representativeThread?.updatedAt ?? representativeThread?.createdAt ?? .distantPast
         return SidebarThreadGroup(
             id: "project:\(projectKey)",
-            label: representativeThread?.projectDisplayName ?? CodexThread.noProjectDisplayName,
+            label: CodexThread.projectDisplayLabel(for: projectPath),
             kind: .project,
             sortDate: sortDate,
-            projectPath: representativeThread?.normalizedProjectPath,
+            projectPath: projectPath,
             threads: sortedThreads
         )
     }
@@ -322,16 +328,24 @@ enum SidebarThreadGrouping {
         excludingPinnedThreadIDs pinnedThreadIDs: Set<String> = []
     ) -> [SidebarThreadGroup] {
         var liveThreadsByProject: [String: [CodexThread]] = [:]
+        var projectPathByGroupKey: [String: String] = [:]
 
         for thread in threads where thread.syncState != .archivedLocal {
             guard !pinnedThreadIDs.contains(thread.id) else {
                 continue
             }
-            liveThreadsByProject[thread.projectKey, default: []].append(thread)
+            liveThreadsByProject[thread.projectGroupKey, default: []].append(thread)
+            if let projectGroupPath = thread.projectGroupPath {
+                projectPathByGroupKey[thread.projectGroupKey] = projectGroupPath
+            }
         }
 
         return liveThreadsByProject.map { projectKey, projectThreads in
-            makeProjectGroup(projectKey: projectKey, threads: projectThreads)
+            makeProjectGroup(
+                projectKey: projectKey,
+                projectPath: projectPathByGroupKey[projectKey],
+                threads: projectThreads
+            )
         }
         .sorted { lhs, rhs in
             if lhs.sortDate != rhs.sortDate {
@@ -412,6 +426,6 @@ enum SidebarThreadGrouping {
     }
 
     private static func projectGroupID(for thread: CodexThread) -> String {
-        "project:\(thread.projectKey)"
+        "project:\(thread.projectGroupKey)"
     }
 }

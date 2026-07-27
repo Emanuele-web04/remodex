@@ -224,7 +224,7 @@ extension CodexService {
                     )
                 }
                 if let normalizedProjectPath = thread.normalizedProjectPath,
-                   CodexThread.projectIconSystemName(for: normalizedProjectPath) == "arrow.triangle.branch" {
+                   CodexThread.isManagedWorktreePath(normalizedProjectPath) {
                     rememberAssociatedManagedWorktreePath(normalizedProjectPath, for: thread.id)
                 }
                 activeThreadId = thread.id

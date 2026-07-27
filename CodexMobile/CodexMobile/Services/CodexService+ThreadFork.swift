@@ -165,7 +165,7 @@ private extension CodexService {
             )
         }
         if let normalizedProjectPath = decodedThread.normalizedProjectPath,
-           CodexThread.projectIconSystemName(for: normalizedProjectPath) == "arrow.triangle.branch" {
+           CodexThread.isManagedWorktreePath(normalizedProjectPath) {
             rememberAssociatedManagedWorktreePath(normalizedProjectPath, for: decodedThread.id)
         }
         inheritThreadRuntimeOverrides(from: sourceThreadId, to: decodedThread.id)
@@ -271,7 +271,7 @@ private extension CodexService {
         if didPatch {
             upsertThread(thread)
             if let normalizedProjectPath = thread.normalizedProjectPath,
-               CodexThread.projectIconSystemName(for: normalizedProjectPath) == "arrow.triangle.branch" {
+               CodexThread.isManagedWorktreePath(normalizedProjectPath) {
                 rememberAssociatedManagedWorktreePath(normalizedProjectPath, for: thread.id)
             }
         }

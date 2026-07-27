@@ -269,7 +269,9 @@ final class SidebarThreadGroupingTests: XCTestCase {
         XCTAssertEqual(groups.last?.threads.map(\.id), ["sibling-thread"])
     }
 
-    func testMakeGroupsMarksCodexManagedWorktreesInLabelAndIcon() throws {
+    // Without a resolved origin (older bridge, or a worktree gone from disk) the chat still needs a
+    // home, so it keeps a standalone group that names the worktree instead of hiding under the repo.
+    func testMakeGroupsMarksCodexManagedWorktreesInLabelAndIconWhenOriginIsUnknown() throws {
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         let threads = [
             makeThread(id: "main-thread", updatedAt: now, cwd: "/Users/me/work/Remodex"),
@@ -290,6 +292,52 @@ final class SidebarThreadGroupingTests: XCTestCase {
         XCTAssertEqual(mainGroup.iconSystemName, "folder")
         XCTAssertEqual(worktreeGroup.label, "Remodex 15")
         XCTAssertEqual(worktreeGroup.iconSystemName, "remodex.worktree")
+    }
+
+    func testMakeGroupsKeepsWorktreeChatsInsideTheProjectTheyWereCutFrom() throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let threads = [
+            makeThread(id: "main-thread", updatedAt: now.addingTimeInterval(-60), cwd: "/Users/me/work/Remodex"),
+            makeThread(
+                id: "worktree-thread",
+                updatedAt: now,
+                cwd: "/Users/me/.codex/worktrees/ce15/Remodex",
+                worktreeOriginPath: "/Users/me/work/Remodex"
+            ),
+        ]
+
+        let groups = SidebarThreadGrouping.makeGroups(from: threads, now: now)
+        let projectGroup = try XCTUnwrap(groups.first(where: { $0.kind == .project }))
+
+        XCTAssertEqual(groups.count, 1)
+        XCTAssertEqual(projectGroup.id, "project:/Users/me/work/Remodex")
+        // The worktree chat sorts first, but the group still speaks for the source project.
+        XCTAssertEqual(projectGroup.threads.map(\.id), ["worktree-thread", "main-thread"])
+        XCTAssertEqual(projectGroup.label, "Remodex")
+        XCTAssertEqual(projectGroup.iconSystemName, "folder")
+        XCTAssertEqual(projectGroup.projectPath, "/Users/me/work/Remodex")
+        XCTAssertEqual(
+            SidebarThreadGrouping.liveThreadIDsForProjectGroup(projectGroup, in: threads),
+            ["worktree-thread", "main-thread"]
+        )
+    }
+
+    func testMakeGroupsKeepsPackageScopedWorktreeChatsWithTheirPackageGroup() {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let threads = [
+            makeThread(id: "package-thread", updatedAt: now, cwd: "/Users/me/work/Remodex/packages/app"),
+            makeThread(
+                id: "package-worktree-thread",
+                updatedAt: now.addingTimeInterval(-60),
+                cwd: "/Users/me/.codex/worktrees/ce15/Remodex/packages/app",
+                worktreeOriginPath: "/Users/me/work/Remodex/packages/app"
+            ),
+        ]
+
+        let groups = SidebarThreadGrouping.makeGroups(from: threads, now: now)
+
+        XCTAssertEqual(groups.map(\.id), ["project:/Users/me/work/Remodex/packages/app"])
+        XCTAssertEqual(groups[0].threads.map(\.id), ["package-thread", "package-worktree-thread"])
     }
 
     func testMakeProjectChoicesReusesLiveProjectBucketsAndSkipsNoProject() {
@@ -329,7 +377,7 @@ final class SidebarThreadGroupingTests: XCTestCase {
         XCTAssertEqual(choices.map(\.projectPath), ["/Users/me/work/app"])
     }
 
-    func testMakeProjectChoicesKeepWorktreeSelectionCompactWithoutShowingPathInLabel() {
+    func testMakeProjectChoicesKeepUnresolvedWorktreeSelectionCompactWithoutShowingPathInLabel() {
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         let threads = [
             makeThread(id: "main-thread", updatedAt: now, cwd: "/Users/me/work/Remodex"),
@@ -653,6 +701,7 @@ final class SidebarThreadGroupingTests: XCTestCase {
         id: String,
         updatedAt: Date,
         cwd: String?,
+        worktreeOriginPath: String? = nil,
         syncState: CodexThreadSyncState = .live,
         parentThreadId: String? = nil,
         forkedFromThreadId: String? = nil
@@ -662,6 +711,7 @@ final class SidebarThreadGroupingTests: XCTestCase {
             title: id,
             updatedAt: updatedAt,
             cwd: cwd,
+            worktreeOriginPath: worktreeOriginPath,
             forkedFromThreadId: forkedFromThreadId,
             parentThreadId: parentThreadId,
             syncState: syncState

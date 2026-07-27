@@ -128,6 +128,8 @@ struct SidebarThreadRowView: View {
 
             expansionToggleButton
 
+            SidebarThreadSourceLabel(thread: thread)
+
             SidebarThreadStatusIcon(thread: thread, pointSize: 17)
 
             if let pinnedProjectLabel, !pinnedProjectLabel.isEmpty {
@@ -167,6 +169,8 @@ struct SidebarThreadRowView: View {
     private var subagentTrailingMeta: some View {
         HStack(spacing: 4) {
             expansionToggleButton
+
+            SidebarThreadSourceLabel(thread: thread)
 
             SidebarThreadStatusIcon(thread: thread, pointSize: 17)
         }

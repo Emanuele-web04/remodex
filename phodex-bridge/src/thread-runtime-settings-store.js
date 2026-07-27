@@ -2,11 +2,12 @@
 // Purpose: Persists the last accepted model, reasoning effort, and service tier for each local thread.
 // Layer: CLI helper
 // Exports: createThreadRuntimeSettingsStore, runtimeSettingsFromTurnParams
-// Depends on: fs, os, path
+// Depends on: fs, os, path, ./thread-row-enrichment
 
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const { forEachThreadRowInResponse } = require("./thread-row-enrichment");
 
 const STORE_VERSION = 1;
 const DEFAULT_MAX_THREADS = 500;
@@ -110,26 +111,7 @@ function createThreadRuntimeSettingsStore({
   }
 
   function enrichResponse(method, envelope) {
-    if (!envelope || typeof envelope !== "object" || envelope.error) {
-      return envelope;
-    }
-    const result = envelope.result;
-    if (!result || typeof result !== "object") {
-      return envelope;
-    }
-    if (method === "thread/read" || method === "thread/resume") {
-      if (result.thread && typeof result.thread === "object") {
-        attachToThread(result.thread);
-      }
-      return envelope;
-    }
-    if (method === "thread/list") {
-      const key = ["data", "items", "threads"].find((candidate) => Array.isArray(result[candidate]));
-      for (const thread of key ? result[key] : []) {
-        attachToThread(thread);
-      }
-    }
-    return envelope;
+    return forEachThreadRowInResponse(method, envelope, attachToThread);
   }
 
   function attachToThread(thread) {

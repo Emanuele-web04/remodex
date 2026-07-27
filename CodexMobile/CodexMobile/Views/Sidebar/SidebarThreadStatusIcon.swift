@@ -21,9 +21,16 @@ struct SidebarThreadStatusIcon: View {
         .frame(width: pointSize + 2, alignment: .center)
     }
 
+    // Subagent sessions are forked from the thread that spawned them, so the fork
+    // glyph would be true but useless there: it would say "spawned by its parent"
+    // on every nested row and hide the worktree scope that actually varies.
+    private var showsForkBadge: Bool {
+        thread.isForkedThread && !thread.isSubagent
+    }
+
     @ViewBuilder
     private var icon: some View {
-        if thread.isForkedThread {
+        if showsForkBadge {
             CodexForkIcon(pointSize: pointSize)
                 .foregroundStyle(.secondary)
         } else if thread.isManagedWorktreeProject {
@@ -35,7 +42,7 @@ struct SidebarThreadStatusIcon: View {
     // Stable identity so SwiftUI replaces the view when the underlying badge
     // category changes instead of trying to morph between unrelated shapes.
     private var identity: String {
-        if thread.isForkedThread {
+        if showsForkBadge {
             return "fork"
         }
         if thread.isManagedWorktreeProject {

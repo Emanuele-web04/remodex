@@ -60,7 +60,9 @@ enum WorktreeFlowCoordinator {
         )
 
         do {
-            return try await codex.startThreadIfReady(preferredProjectPath: result.worktreePath)
+            let thread = try await codex.startThreadIfReady(preferredProjectPath: result.worktreePath)
+            codex.rememberWorktreeOriginPath(normalizedPreferredProjectPath, forThreadId: thread.id)
+            return thread
         } catch {
             let cleanupResult = await cleanupResultForFailedNewWorktreeChat(result, error: error, codex: codex)
             throw WorktreeFlowError(
@@ -254,10 +256,12 @@ enum WorktreeFlowCoordinator {
         }
 
         do {
-            return try await codex.forkThread(
+            let forkedThread = try await codex.forkThread(
                 from: sourceThreadId,
                 target: .projectPath(result.worktreePath)
             )
+            codex.rememberWorktreeOriginPath(normalizedSourceProjectPath, forThreadId: forkedThread.id)
+            return forkedThread
         } catch {
             let cleanupResult = await cleanupResultForFailedWorktreeFork(result, error: error, codex: codex)
             throw WorktreeFlowError(
@@ -333,6 +337,7 @@ private extension WorktreeFlowCoordinator {
                 threadId: threadID,
                 projectPath: resolvedProjectPath
             )
+            codex.rememberWorktreeOriginPath(sourceProjectPath, forThreadId: movedThread.id)
             return .moved(
                 WorktreeFlowHandoffMove(
                     thread: movedThread,

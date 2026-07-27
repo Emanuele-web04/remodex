@@ -37,6 +37,8 @@ test("parseSessionJsonlMetadata reads desktop thread cwd", () => {
   assert.deepEqual(parseSessionJsonlMetadata(content), {
     threadId: "thread-jsonl-meta",
     cwd: "/Users/test/Project",
+    forkedFromId: "",
+    threadSource: "",
   });
 });
 

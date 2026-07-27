@@ -166,7 +166,7 @@ function readSessionJsonlMetadataFromFile(filePath, {
   metadataHeadBytes = DEFAULT_SESSION_JSONL_METADATA_HEAD_BYTES,
 } = {}) {
   if (!filePath) {
-    return { threadId: "", cwd: "" };
+    return emptySessionJsonlMetadata();
   }
   if (!supportsBoundedSessionJsonlReads(fsModule)) {
     return parseSessionJsonlMetadata(fsModule.readFileSync(filePath, "utf8"));
@@ -175,7 +175,7 @@ function readSessionJsonlMetadataFromFile(filePath, {
   const stat = fsModule.statSync(filePath);
   const snapshotSize = Math.max(0, Number(stat?.size) || 0);
   if (snapshotSize === 0) {
-    return { threadId: "", cwd: "" };
+    return emptySessionJsonlMetadata();
   }
   const fileHandle = fsModule.openSync(filePath, "r");
   try {
@@ -186,10 +186,21 @@ function readSessionJsonlMetadataFromFile(filePath, {
       fsModule
     );
     const metadata = parseSessionJsonlInitialMetadata(head.toString("utf8"));
-    return { threadId: metadata.threadId, cwd: metadata.cwd };
+    return {
+      threadId: metadata.threadId,
+      cwd: metadata.cwd,
+      forkedFromId: metadata.forkedFromId,
+      threadSource: metadata.threadSource,
+    };
   } finally {
     fsModule.closeSync(fileHandle);
   }
+}
+
+// Every exit path of readSessionJsonlMetadataFromFile returns this shape so callers
+// can read provenance without knowing which branch produced the result.
+function emptySessionJsonlMetadata() {
+  return { threadId: "", cwd: "", forkedFromId: "", threadSource: "" };
 }
 
 function supportsBoundedSessionJsonlReads(fsModule) {
@@ -287,6 +298,11 @@ function parseSessionJsonlInitialMetadata(content) {
   let threadId = "";
   let cwd = "";
   let timeZone = "";
+  // Provenance app-server keeps in the rollout but leaves null on thread/list
+  // rows: without it a forked automation thread is indistinguishable from the
+  // origin it copied its name and preview from.
+  let forkedFromId = "";
+  let threadSource = "";
   const raw = String(content || "");
   let lineStart = 0;
   while (lineStart < raw.length) {
@@ -314,18 +330,24 @@ function parseSessionJsonlInitialMetadata(content) {
       timeZone = normalizeString(payload?.timezone)
         || normalizeString(payload?.timeZone)
         || normalizeString(payload?.time_zone);
+      forkedFromId = normalizeString(payload?.forked_from_id)
+        || normalizeString(payload?.forkedFromId);
+      threadSource = normalizeString(payload?.thread_source)
+        || normalizeString(payload?.threadSource);
       break;
     } catch {
       // Metadata is expected at the head; an incomplete oversized line is not trusted.
     }
   }
-  return { threadId, cwd, timeZone };
+  return { threadId, cwd, timeZone, forkedFromId, threadSource };
 }
 
 // Extracts thread-level context that app-server history can omit for desktop-origin runs.
 function parseSessionJsonlMetadata(content) {
   let threadId = "";
   let cwd = "";
+  let forkedFromId = "";
+  let threadSource = "";
 
   const raw = String(content || "");
   let lineStart = 0;
@@ -358,13 +380,17 @@ function parseSessionJsonlMetadata(content) {
     cwd ||= normalizeString(payload?.cwd)
       || normalizeString(payload?.current_working_directory)
       || normalizeString(payload?.working_directory);
+    forkedFromId ||= normalizeString(payload?.forked_from_id)
+      || normalizeString(payload?.forkedFromId);
+    threadSource ||= normalizeString(payload?.thread_source)
+      || normalizeString(payload?.threadSource);
 
     if (threadId && cwd) {
       break;
     }
   }
 
-  return { threadId, cwd };
+  return { threadId, cwd, forkedFromId, threadSource };
 }
 
 function parseSessionJsonlTurns(content, {
