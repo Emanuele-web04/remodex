@@ -84,6 +84,9 @@ enum RemodexIcon {
         "qrcode": "central-qr-code",
         "qrcode.viewfinder": "central-scan-code",
         "remodex.agent": "central-robot",
+        // Same glyph Synara puts on scheduled automations, so a chat an automation
+        // started reads the same on both surfaces.
+        "remodex.automation": "central-clock",
         "remodex.auto-review": "central-shield-check-3",
         "remodex.branch": "central-branch",
         "remodex.changes": "changes",

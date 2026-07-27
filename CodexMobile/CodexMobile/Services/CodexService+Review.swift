@@ -155,11 +155,20 @@ extension CodexService {
         threadId: String,
         accessConfiguration: RuntimeAccessConfiguration
     ) async throws {
-        _ = try await ensureThreadResumed(
-            threadId: threadId,
-            force: true,
-            accessConfigurationOverride: accessConfiguration
-        )
+        do {
+            _ = try await ensureThreadResumed(
+                threadId: threadId,
+                force: true,
+                accessConfigurationOverride: accessConfiguration
+            )
+        } catch {
+            // Reviewing is a valid first action in a brand-new chat, and such a chat has
+            // no rollout to resume yet: it still runs under the access configuration
+            // thread/start applied. Failing here would block the review outright.
+            guard isMissingRolloutError(error) else {
+                throw error
+            }
+        }
     }
 
     // Sends `review/start` with the same optimistic row + runtime compatibility behavior as a chat send.

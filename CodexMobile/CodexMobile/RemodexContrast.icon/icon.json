@@ -2,7 +2,15 @@
   "fill" : "automatic",
   "groups" : [
     {
-      "blur-material" : null,
+      "blur-material-specializations" : [
+        {
+          "value" : null
+        },
+        {
+          "appearance" : "dark",
+          "value" : null
+        }
+      ],
       "hidden-specializations" : [
         {
           "appearance" : "dark",
@@ -11,8 +19,76 @@
       ],
       "layers" : [
         {
-          "image-name" : "remodex-svg3.svg",
+          "image-name" : "Subtract.png",
           "name" : "Remodex Light",
+          "position-specializations" : [
+            {
+              "value" : {
+                "scale" : 1,
+                "translation-in-points" : [
+                  0,
+                  0
+                ]
+              }
+            },
+            {
+              "idiom" : "square",
+              "value" : {
+                "scale" : 0.94,
+                "translation-in-points" : [
+                  0,
+                  0
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "lighting" : "individual",
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "specular" : true,
+      "translucency-specializations" : [
+        {
+          "value" : {
+            "enabled" : false,
+            "value" : 0.01
+          }
+        },
+        {
+          "appearance" : "dark",
+          "value" : {
+            "enabled" : true,
+            "value" : 0.1
+          }
+        }
+      ]
+    },
+    {
+      "blur-material-specializations" : [
+        {
+          "value" : null
+        },
+        {
+          "appearance" : "dark",
+          "value" : null
+        }
+      ],
+      "hidden-specializations" : [
+        {
+          "value" : true
+        },
+        {
+          "appearance" : "dark",
+          "value" : false
+        }
+      ],
+      "layers" : [
+        {
+          "image-name" : "remdark.svg",
+          "name" : "Remodex Dark",
           "position-specializations" : [
             {
               "idiom" : "square",
@@ -27,42 +103,27 @@
           ]
         }
       ],
+      "lighting" : "individual",
       "shadow" : {
         "kind" : "neutral",
         "opacity" : 0.5
       },
       "specular" : true,
-      "translucency" : {
-        "enabled" : true,
-        "value" : 0
-      }
-    },
-    {
-      "blur-material" : null,
-      "hidden-specializations" : [
+      "translucency-specializations" : [
         {
-          "value" : true
+          "value" : {
+            "enabled" : false,
+            "value" : 0.01
+          }
         },
         {
           "appearance" : "dark",
-          "value" : false
+          "value" : {
+            "enabled" : true,
+            "value" : 0.1
+          }
         }
-      ],
-      "layers" : [
-        {
-          "image-name" : "Subtract5.svg",
-          "name" : "Remodex Dark"
-        }
-      ],
-      "shadow" : {
-        "kind" : "neutral",
-        "opacity" : 0.5
-      },
-      "specular" : true,
-      "translucency" : {
-        "enabled" : true,
-        "value" : 0.1
-      }
+      ]
     }
   ],
   "supported-platforms" : {

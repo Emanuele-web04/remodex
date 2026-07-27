@@ -31,12 +31,14 @@ final class CodexThreadProvenanceTests: XCTestCase {
         XCTAssertEqual(decoded.threadSource, "pull_request_fix_automation")
     }
 
-    func testAutomationSourceLabelOnlyNamesAutomationSessions() throws {
-        XCTAssertEqual(CodexThread(id: "t6", threadSource: "pull_request_fix_automation").automationSourceLabel, "PR fix")
-        XCTAssertEqual(CodexThread(id: "t7", threadSource: "automation").automationSourceLabel, "Automation")
-        XCTAssertNil(CodexThread(id: "t8", threadSource: "user").automationSourceLabel)
-        XCTAssertNil(CodexThread(id: "t9", threadSource: "realtime_voice").automationSourceLabel)
-        XCTAssertNil(CodexThread(id: "t10").automationSourceLabel)
+    func testAutomationSourceOnlyMarksAutomationSessions() throws {
+        XCTAssertEqual(CodexThread(id: "t6", threadSource: "pull_request_fix_automation").automationSource, .pullRequestFix)
+        // Scheduled runs render as the clock glyph, so only the accessible spelling is text.
+        XCTAssertEqual(CodexThread(id: "t7", threadSource: "automation").automationSource, .scheduled)
+        XCTAssertEqual(CodexThreadAutomationSource.scheduled.accessibilityDescription, "Started by automation")
+        XCTAssertNil(CodexThread(id: "t8", threadSource: "user").automationSource)
+        XCTAssertNil(CodexThread(id: "t9", threadSource: "realtime_voice").automationSource)
+        XCTAssertNil(CodexThread(id: "t10").automationSource)
     }
 
     private func decodeThread(_ json: String) throws -> CodexThread {

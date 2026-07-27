@@ -101,7 +101,7 @@ extension CodexService {
                 projectPath: resumedThread?.normalizedProjectPath
             )
         } catch {
-            if shouldAllowProjectRebindWithoutResume(error) {
+            if isMissingRolloutError(error) {
                 // Keep the local worktree switch even if the runtime has not materialized a rollout yet.
                 // The immediate sync is safe because thread/read and thread/resume server merges
                 // are both wrapped by applyingAuthoritativeProjectPath(...) until the runtime
@@ -253,20 +253,6 @@ extension CodexService {
         return true
     }
 
-    // Some local runtimes reject the immediate worktree rebind until a rollout exists
-    // for the new cwd. Keep the local project switch instead of bouncing the user back.
-    func shouldAllowProjectRebindWithoutResume(_ error: Error) -> Bool {
-        let message: String
-        if let serviceError = error as? CodexServiceError,
-           case .rpcError(let rpcError) = serviceError {
-            message = rpcError.message.lowercased()
-        } else {
-            message = error.localizedDescription.lowercased()
-        }
-
-        return message.contains("no rollout found")
-            || message.contains("no rollout file found")
-    }
 }
 
 private extension CodexService {

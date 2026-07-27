@@ -128,7 +128,7 @@ struct SidebarThreadRowView: View {
 
             expansionToggleButton
 
-            SidebarThreadSourceLabel(thread: thread)
+            SidebarThreadSourceLabel(thread: thread, pointSize: 17)
 
             SidebarThreadStatusIcon(thread: thread, pointSize: 17)
 
@@ -170,7 +170,7 @@ struct SidebarThreadRowView: View {
         HStack(spacing: 4) {
             expansionToggleButton
 
-            SidebarThreadSourceLabel(thread: thread)
+            SidebarThreadSourceLabel(thread: thread, pointSize: 17)
 
             SidebarThreadStatusIcon(thread: thread, pointSize: 17)
         }

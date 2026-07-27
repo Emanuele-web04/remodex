@@ -871,6 +871,23 @@ extension CodexService {
         return message.contains("thread not found") || message.contains("unknown thread")
     }
 
+    // The runtime writes a thread's rollout file with its first turn, so `thread/resume`
+    // fails this way for a chat that exists but has never run one — and for a chat that
+    // just moved to a new cwd. The thread itself is fine; there is simply nothing to
+    // restore yet, so callers keep going instead of surfacing an error.
+    func isMissingRolloutError(_ error: Error) -> Bool {
+        let message: String
+        if let serviceError = error as? CodexServiceError,
+           case .rpcError(let rpcError) = serviceError {
+            message = rpcError.message.lowercased()
+        } else {
+            message = error.localizedDescription.lowercased()
+        }
+
+        return message.contains("no rollout found")
+            || message.contains("no rollout file found")
+    }
+
     // Preserves locally derived metadata keys (for example repo context) when server payload is sparse.
     func mergedThreadMetadata(
         serverMetadata: [String: JSONValue]?,

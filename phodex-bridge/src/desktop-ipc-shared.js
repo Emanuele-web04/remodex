@@ -1,9 +1,10 @@
 // FILE: desktop-ipc-shared.js
-// Purpose: Shared primitives for the Codex Desktop IPC modules (framing, socket path, JSON helpers).
+// Purpose: Shared primitives for the Codex Desktop IPC modules (framing, socket path, envelopes, JSON helpers).
 // Layer: CLI helper
-// Exports: FRAME_HEADER_BYTES, MAX_FRAME_BYTES, cloneJSON, normalizeToken, readString, readText, requestIdKey, resolveDefaultIpcSocketPath, safeParseJSON, writeFrame
-// Depends on: os, path
+// Exports: CLIENT_STATUS_CHANGED, DESKTOP_IPC_METHOD_VERSIONS, FRAME_HEADER_BYTES, MAX_FRAME_BYTES, buildIpcRequestEnvelope, createFrameReader, resolveDefaultIpcSocketPath, resolveIpcSocketPathCandidates, toSocketPathResolver, writeFrame, plus JSON/text helpers
+// Depends on: crypto, fs, os, path
 
+const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { createHash } = require("crypto");
@@ -517,13 +518,111 @@ function writeFrame(socket, payload, callback) {
   socket.write(Buffer.concat([header, body]), callback);
 }
 
-function resolveDefaultIpcSocketPath() {
+// Codex moved its IPC bus into the Codex home directory; older desktop and CLI
+// builds still expose it under the temp directory. Both are in the wild, so the
+// bus is looked up in that order instead of being pinned to one location.
+// Every participant on the bus — both clients and the fallback router's per-peer
+// sockets — reads the same length-prefixed framing; only the dispatch differs.
+// `onOverflow` owns the connection, so it decides how to drop a bogus peer.
+function createFrameReader({ onFrame, onOverflow }) {
+  let buffer = Buffer.alloc(0);
+
+  return {
+    push(chunk) {
+      buffer = Buffer.concat([buffer, chunk]);
+      while (buffer.length >= FRAME_HEADER_BYTES) {
+        const frameLength = buffer.readUInt32LE(0);
+        if (frameLength > MAX_FRAME_BYTES) {
+          buffer = Buffer.alloc(0);
+          onOverflow?.();
+          return;
+        }
+        if (buffer.length < FRAME_HEADER_BYTES + frameLength) {
+          return;
+        }
+
+        const payload = buffer
+          .slice(FRAME_HEADER_BYTES, FRAME_HEADER_BYTES + frameLength)
+          .toString("utf8");
+        buffer = buffer.slice(FRAME_HEADER_BYTES + frameLength);
+        const envelope = safeParseJSON(payload);
+        if (envelope) {
+          onFrame(envelope);
+        }
+      }
+    },
+    reset() {
+      buffer = Buffer.alloc(0);
+    },
+  };
+}
+
+// Desktop validates the method version and refuses requests from an unknown
+// sender, so both clients must build this envelope the same way.
+function buildIpcRequestEnvelope({ requestId, method, params, clientId, initializing = false }) {
+  return {
+    type: "request",
+    requestId,
+    sourceClientId: initializing ? "initializing-client" : clientId || "remodex-bridge",
+    version: DESKTOP_IPC_METHOD_VERSIONS.get(method) || 1,
+    method,
+    params: params || {},
+  };
+}
+
+function resolveIpcSocketPathCandidates() {
   if (process.platform === "win32") {
-    return "\\\\.\\pipe\\codex-ipc";
+    return ["\\\\.\\pipe\\codex-ipc"];
   }
 
+  const configuredCodexHome = readString(process.env.CODEX_HOME);
+  const codexHome = configuredCodexHome
+    ? path.resolve(configuredCodexHome)
+    : path.join(os.homedir(), ".codex");
   const uid = typeof process.getuid === "function" ? process.getuid() : 0;
-  return path.join(os.tmpdir(), "codex-ipc", `ipc-${uid}.sock`);
+  return [
+    path.join(codexHome, "ipc", "ipc.sock"),
+    path.join(os.tmpdir(), "codex-ipc", `ipc-${uid}.sock`),
+  ];
+}
+
+// Compatibility helper for callers that need one path synchronously. Transports
+// use resolveIpcSocketPathCandidates instead because only a connection attempt
+// can distinguish a live listener from a stale socket inode.
+function resolveDefaultIpcSocketPath() {
+  const candidates = resolveIpcSocketPathCandidates();
+  for (const candidate of candidates) {
+    try {
+      if (fs.statSync(candidate).isSocket()) {
+        return candidate;
+      }
+    } catch {
+      // Missing or unreadable candidate: keep looking.
+    }
+  }
+  return candidates[0];
+}
+
+// The bus location is only known at connect time, so transports accept either a
+// fixed path or a resolver and always ask again before reconnecting.
+function toSocketPathResolver(socketPath) {
+  return typeof socketPath === "function" ? socketPath : () => socketPath;
+}
+
+// A socket inode can outlive its listener. Clients therefore need the full
+// ordered candidate list so they can try the legacy bus after a refused current
+// socket instead of mistaking file existence for liveness.
+function toSocketPathCandidatesResolver(socketPath) {
+  const resolveSocketPath = toSocketPathResolver(socketPath);
+  return () => {
+    const resolved = resolveSocketPath();
+    const candidates = Array.isArray(resolved) ? resolved : [resolved];
+    return candidates.filter((candidate, index) => (
+      typeof candidate === "string"
+      && candidate.length > 0
+      && candidates.indexOf(candidate) === index
+    ));
+  };
 }
 
 // A source-neutral alias joins the same assistant prose when rollout events
@@ -556,7 +655,9 @@ function responseItemMessageText(payload) {
 
 module.exports = {
   CLIENT_STATUS_CHANGED,
+  buildIpcRequestEnvelope,
   buildRemodexSourceItemKey,
+  createFrameReader,
   DESKTOP_IPC_METHOD_VERSIONS,
   FRAME_HEADER_BYTES,
   MAX_FRAME_BYTES,
@@ -574,9 +675,12 @@ module.exports = {
   responseItemMessageText,
   requestIdKey,
   resolveDefaultIpcSocketPath,
+  resolveIpcSocketPathCandidates,
   safeParseJSON,
   sanitizeUserInputEntries,
   sanitizeUserRoleItem,
+  toSocketPathCandidatesResolver,
+  toSocketPathResolver,
   visibleUserPromptText,
   visibleUserPromptFromInputEntries,
   writeFrame,

@@ -67,6 +67,30 @@ enum CodexThreadSyncState: String, Codable, Hashable, Sendable {
     case archivedLocal
 }
 
+// Who created the session, when it was not the user. Scheduled runs are the common case
+// and carry no extra meaning worth a word in a sidebar row, so they render as the clock
+// glyph Synara already uses for automations; named kinds keep their short text.
+enum CodexThreadAutomationSource: Hashable, Sendable {
+    case scheduled
+    case pullRequestFix
+
+    var label: String {
+        switch self {
+        case .scheduled: return "Automation"
+        case .pullRequestFix: return "PR fix"
+        }
+    }
+
+    // Spoken form for rows that show a glyph or a clipped capsule instead of the
+    // full label.
+    var accessibilityDescription: String {
+        switch self {
+        case .scheduled: return "Started by automation"
+        case .pullRequestFix: return "Started by PR fix automation"
+        }
+    }
+}
+
 struct CodexThread: Identifiable, Codable, Hashable, Sendable {
     let id: String
     var title: String?
@@ -378,12 +402,12 @@ extension CodexThread {
     }
 
     // Desktop automations fork a thread and inherit its name, so the sidebar would
-    // otherwise show two rows with identical titles. A short source label next to the
-    // fork badge tells them apart; user-started sessions stay unlabeled.
-    var automationSourceLabel: String? {
+    // otherwise show two rows with identical titles. The source next to the fork badge
+    // tells them apart; user-started sessions stay unmarked.
+    var automationSource: CodexThreadAutomationSource? {
         switch threadSource?.lowercased() {
-        case "pull_request_fix_automation": return "PR fix"
-        case "automation": return "Automation"
+        case "pull_request_fix_automation": return .pullRequestFix
+        case "automation": return .scheduled
         default: return nil
         }
     }

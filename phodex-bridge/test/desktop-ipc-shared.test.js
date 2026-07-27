@@ -1,14 +1,20 @@
 // FILE: desktop-ipc-shared.test.js
-// Purpose: Unit tests for the shared injected-context filters applied to mirrored user items.
+// Purpose: Unit tests for the shared desktop IPC primitives (injected-context filters, socket path resolution).
 // Layer: Unit test
 // Exports: node:test suite
-// Depends on: node:test, ../src/desktop-ipc-shared
+// Depends on: node:test, node:fs, node:net, node:os, node:path, ../src/desktop-ipc-shared
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const net = require("node:net");
+const os = require("node:os");
+const path = require("node:path");
 const {
   isContextualUserText,
   isThreadTurnStateProbeRequest,
+  resolveDefaultIpcSocketPath,
+  resolveIpcSocketPathCandidates,
   responseItemMessageText,
   sanitizeUserInputEntries,
   sanitizeUserRoleItem,
@@ -345,4 +351,65 @@ test("filters an AGENTS.md header carrying several instruction blocks", () => {
   assert.equal(isContextualUserText(preamble), true);
   assert.equal(visibleUserPromptText(preamble), "");
   assert.equal(visibleUserPromptText(`${preamble}\n\nship 0.6.1`), "ship 0.6.1");
+});
+
+// The Codex bus moved from the temp directory into the Codex home directory,
+// and both locations are still in the wild.
+function withIsolatedIpcEnvironment(t) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-ipc-env-"));
+  const codexHome = path.join(root, "codex-home");
+  const tempDir = path.join(root, "tmp");
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(tempDir, { recursive: true });
+
+  const previous = { CODEX_HOME: process.env.CODEX_HOME, TMPDIR: process.env.TMPDIR };
+  process.env.CODEX_HOME = codexHome;
+  process.env.TMPDIR = tempDir;
+  t.after(() => {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  const [codexHomeSocket, legacySocket] = resolveIpcSocketPathCandidates();
+  return { codexHomeSocket, legacySocket };
+}
+
+async function listenOnSocket(t, socketPath) {
+  fs.mkdirSync(path.dirname(socketPath), { recursive: true });
+  const server = net.createServer();
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+}
+
+test("resolves the Codex home socket before the legacy temp socket", { skip: process.platform === "win32" }, (t) => {
+  const { codexHomeSocket, legacySocket } = withIsolatedIpcEnvironment(t);
+
+  assert.equal(codexHomeSocket, path.join(process.env.CODEX_HOME, "ipc", "ipc.sock"));
+  assert.equal(legacySocket, path.join(os.tmpdir(), "codex-ipc", `ipc-${process.getuid()}.sock`));
+  // With no bus running, the fallback router listens on the current location so
+  // a desktop starting later finds it.
+  assert.equal(resolveDefaultIpcSocketPath(), codexHomeSocket);
+});
+
+test("joins the legacy temp socket when only that bus is listening", { skip: process.platform === "win32" }, async (t) => {
+  const { legacySocket } = withIsolatedIpcEnvironment(t);
+
+  await listenOnSocket(t, legacySocket);
+
+  assert.equal(resolveDefaultIpcSocketPath(), legacySocket);
+});
+
+test("prefers the Codex home bus when both sockets are listening", { skip: process.platform === "win32" }, async (t) => {
+  const { codexHomeSocket, legacySocket } = withIsolatedIpcEnvironment(t);
+
+  await listenOnSocket(t, legacySocket);
+  await listenOnSocket(t, codexHomeSocket);
+
+  assert.equal(resolveDefaultIpcSocketPath(), codexHomeSocket);
 });

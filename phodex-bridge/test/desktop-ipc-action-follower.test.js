@@ -870,6 +870,49 @@ test("uses the Codex Desktop named pipe as the default Windows IPC path", (t) =>
   assert.equal(resolveDefaultIpcSocketPath(), "\\\\.\\pipe\\codex-ipc");
 });
 
+test("desktop IPC follower tries the legacy candidate after the current socket fails", async (t) => {
+  const { tempDir, socketPath: legacySocketPath } = createIpcTestSocket("remodex-ipc-legacy-fallback-");
+  const currentSocketPath = path.join(tempDir, "missing-current.sock");
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "desktop",
+          result: { clientId: "legacy-follower" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(legacySocketPath, resolve));
+  t.after(() => {
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const follower = createDesktopIpcActionFollower({
+    socketPath: () => [currentSocketPath, legacySocketPath],
+    sendApplicationResponse() {},
+    requestTimeoutMs: 500,
+  });
+  t.after(() => follower.stopAll());
+
+  follower.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-legacy-fallback" },
+  }));
+
+  await waitFor(() => serverSocket);
+  assert.ok(serverSocket);
+});
+
 test("desktop IPC follower projects first add patch-only action updates without a baseline read", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-recovery-");
   let baselineReads = 0;

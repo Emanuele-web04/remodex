@@ -16,6 +16,7 @@ const {
   readString,
   requestIdKey,
   resolveDefaultIpcSocketPath,
+  resolveIpcSocketPathCandidates,
   safeParseJSON,
   visibleUserPromptFromInputEntries,
 } = require("./desktop-ipc-shared");
@@ -114,7 +115,9 @@ function createDesktopIpcLiveOwner({
   sendRawCodexMessage,
   normalizeTurnStartParams = (params) => params,
   runtimeSettingsStore = null,
-  socketPath = resolveDefaultIpcSocketPath(),
+  // Resolved per connect: Codex Desktop can start, stop, or move its bus while
+  // the bridge stays up.
+  socketPath = resolveIpcSocketPathCandidates,
   sidebarRefreshDelayMs = DEFAULT_SIDEBAR_REFRESH_DELAY_MS,
   snapshotDebounceMs = DEFAULT_SNAPSHOT_DEBOUNCE_MS,
   maxPatchCount = DEFAULT_MAX_PATCH_COUNT,

@@ -212,7 +212,7 @@ private extension CodexService {
                     modelIdentifierOverride: sourceModelIdentifier
                 )
             } catch {
-                if shouldAllowProjectRebindWithoutResume(error) {
+                if isMissingRolloutError(error) {
                     continue
                 }
                 throw error
