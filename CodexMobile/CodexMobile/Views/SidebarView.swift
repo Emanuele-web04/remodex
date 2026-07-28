@@ -5,17 +5,18 @@
 //          which gives the bar the native Liquid Glass material + scroll-edge
 //          handoff used by the chat's system navigation bar. On iOS 18 it
 //          falls back to `safeAreaInset(edge:.top)` with an opaque header
-//          fill so nothing regresses. Body: native scroll with search +
-//          project / chat list, swapped for search + a status chip + a centered
+//          fill so nothing regresses. Body: native scroll with the
+//          project / chat list, swapped for a status chip + a centered
 //          connect/reconnect/scan-QR card when the relay is offline and no
 //          cached chats exist. The
 //          Projects/Chats scope picker routes rootless chats separately from
-//          project groups. Bottom: SidebarBottomActionBar with the primary Chat
-//          FAB (glass on iOS 26, accent pill on iOS 18).
+//          project groups. Bottom: SidebarBottomActionBar hosting the Search
+//          Chats capsule plus icon-only Terminal and Chat circles; focusing
+//          search lifts the bar above the keyboard via the safe-area inset.
 // Layer: View
 // Exports: SidebarView
 // Depends on: CodexService, SidebarHeaderView, SidebarThreadListView,
-//             SidebarBottomActionBar, SidebarSearchField,
+//             SidebarBottomActionBar,
 //             SidebarConnectionEmptyStatePanel, SidebarConnectionStatusBadge,
 //             SidebarConnectionEmptyStateFooter
 //
@@ -81,7 +82,9 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
                 SidebarHeaderView(
                     showsCloseButton: showsInlineCloseButton,
                     onClose: onClose,
-                    overflowActions: overflowMenuActions
+                    overflowActions: overflowMenuActions,
+                    connectedComputerName: codex.trustedPairPresentation?.name,
+                    isConnected: codex.isConnected
                 )
                 .modifier(SidebarHeaderBackdropModifier())
             }
@@ -593,13 +596,9 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
         } else {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    SidebarSearchField(text: $searchText, isActive: $isSearchActive)
-                        .padding(.horizontal, 16)
-                        .padding(.top, 12)
-                        .padding(.bottom, 12)
-
                     sidebarScopeRow
                         .padding(.horizontal, 16)
+                        .padding(.top, 12)
                         .padding(.bottom, 8)
 
                     threadList
@@ -613,19 +612,15 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
         }
     }
 
-    // Keeps search + connection status in the same top rhythm as the normal
+    // Keeps the connection status chip in the same top rhythm as the normal
     // Projects/Chats chips, while centering the connect panel between the
     // header and the safe-area footer.
     private var connectionEmptyStateLayout: some View {
         VStack(spacing: 0) {
-            SidebarSearchField(text: $searchText, isActive: $isSearchActive)
-                .padding(.horizontal, 16)
-                .padding(.top, 12)
-                .padding(.bottom, 12)
-
             SidebarConnectionStatusBadge(connectionPhase: connectionPhase)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 16)
+                .padding(.top, 12)
                 .padding(.bottom, 8)
 
             Spacer(minLength: 0)
@@ -741,6 +736,8 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
 
     private var bottomActionBar: some View {
         SidebarBottomActionBar(
+            searchText: $searchText,
+            isSearchActive: $isSearchActive,
             isChatEnabled: canCreateThread,
             isCreatingThread: isCreatingThread,
             // Scope matters: Projects > Chat shows the folder picker; Chats > Chat stays rootless.

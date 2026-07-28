@@ -598,9 +598,18 @@ extension CodexService {
             }
             return
         }
-        guard expected.approvalsReviewerCandidates.compactMap({ $0 }).contains(reviewer) else {
-            throw CodexServiceError.invalidResponse(
-                "\(context) applied approval reviewer \(reviewer) instead of \(expected.approvalsReviewer ?? "the selected reviewer")."
+
+        // Mismatches below are diagnostic, never fatal. When the app-server
+        // rejoins an already-running thread it ignores resume-time overrides
+        // and echoes the thread's pre-existing state, so a reopen after
+        // switching access modes legitimately reports the old values. The
+        // enforcement point that matters is the per-turn override set
+        // (approvalPolicy/approvalsReviewer/sandboxPolicy) sent with every
+        // turn/start; runtimes that lack a capability outright reject it at
+        // request time, which the fallback chains already surface as errors.
+        if !expected.approvalsReviewerCandidates.compactMap({ $0 }).contains(reviewer) {
+            debugRuntimeLog(
+                "\(context) reported approval reviewer \(reviewer) instead of \(expected.approvalsReviewer ?? "the selected reviewer"); relying on per-turn overrides"
             )
         }
 
@@ -609,23 +618,23 @@ extension CodexService {
             let expectedPolicies = expected.approvalPolicyCandidates.map {
                 $0.lowercased().filter(\.isLetter)
             }
-            guard expectedPolicies.contains(normalizedPolicy) else {
-                throw CodexServiceError.invalidResponse(
-                    "\(context) applied approval policy \(policy) instead of \(expected.approvalPolicy)."
+            if !expectedPolicies.contains(normalizedPolicy) {
+                debugRuntimeLog(
+                    "\(context) reported approval policy \(policy) instead of \(expected.approvalPolicy); relying on per-turn overrides"
                 )
             }
         }
 
-        if let appliedSandbox = result["sandbox"]?.objectValue,
-           let expectedSandbox = expected.sandboxPolicy.objectValue {
-            let appliedType = appliedSandbox["type"]?.stringValue
-            let expectedType = expectedSandbox["type"]?.stringValue
-            let appliedNetwork = appliedSandbox["networkAccess"]?.boolValue
-            let expectedNetwork = expectedSandbox["networkAccess"]?.boolValue
-            guard appliedType == expectedType,
-                  expectedNetwork == nil || appliedNetwork == expectedNetwork else {
-                throw CodexServiceError.invalidResponse(
-                    "\(context) did not apply the selected sandbox permissions."
+        // The response `sandbox` is a documented legacy compatibility echo, and
+        // thread-level params cannot express `networkAccess` at all, so only
+        // the type is worth comparing.
+        if let appliedType = result["sandbox"]?.objectValue?["type"]?.stringValue,
+           let expectedType = expected.sandboxPolicy.objectValue?["type"]?.stringValue {
+            let normalizedApplied = appliedType.lowercased().filter(\.isLetter)
+            let normalizedExpected = expectedType.lowercased().filter(\.isLetter)
+            if normalizedApplied != normalizedExpected {
+                debugRuntimeLog(
+                    "\(context) reported sandbox \(appliedType) instead of \(expectedType); relying on per-turn sandboxPolicy"
                 )
             }
         }

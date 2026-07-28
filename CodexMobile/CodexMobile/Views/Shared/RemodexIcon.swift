@@ -17,9 +17,10 @@ enum RemodexIcon {
         "arrow.up.right.square": "central-fork-code",
         "at": "central-at",
         "bell.badge": "central-bell-2",
-        // Single source for the fast-mode glyph: every fast-mode affordance
-        // renders the solid Central `zap` (same artwork Synara uses).
-        "bolt": "central-zap",
+        // Fast-mode glyph pair (same artwork Synara uses): the outline
+        // `central-icons-reversed` zap for the off state, the solid
+        // `central-icons-fill` zap for the on state.
+        "bolt": "central-zap-outline",
         "bolt.fill": "central-zap",
         "brain": "central-brain",
         "bubble.left.and.bubble.right": "central-bubble-5",

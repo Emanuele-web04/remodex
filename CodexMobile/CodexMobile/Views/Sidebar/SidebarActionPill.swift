@@ -3,6 +3,9 @@
 //          Terminal and Chat (and any future companion action) read as a
 //          matched pair — identical font, icon sizing, padding and capsule
 //          shape, with only the background / foreground swapped per style.
+//          An empty `title` renders the icon-only variant: the same styles on
+//          a fixed-diameter circle, used by the bottom bar next to the search
+//          capsule.
 //          The accent style mirrors the composer send button: it reads the
 //          user's `UserBubbleColor` preference and resolves it through
 //          `ctaPalette` (Default → Primary) so the pill stays a bold,
@@ -41,6 +44,7 @@ struct SidebarActionPill: View {
     let iconWeight: Font.Weight
     let horizontalPadding: CGFloat
     let verticalPadding: CGFloat
+    let circleDiameter: CGFloat
     let hapticStyle: UIImpactFeedbackGenerator.FeedbackStyle
     let accessibilityLabelOverride: String?
     let onTap: () -> Void
@@ -50,7 +54,7 @@ struct SidebarActionPill: View {
     private var userBubbleColorRawValue = UserBubbleColor.defaultStoredRawValue
 
     init(
-        title: String,
+        title: String = "",
         iconSystemName: String,
         style: SidebarActionPillStyle,
         isEnabled: Bool = true,
@@ -61,6 +65,7 @@ struct SidebarActionPill: View {
         iconWeight: Font.Weight = .semibold,
         horizontalPadding: CGFloat = 16,
         verticalPadding: CGFloat = 12,
+        circleDiameter: CGFloat = 44,
         hapticStyle: UIImpactFeedbackGenerator.FeedbackStyle = .medium,
         accessibilityLabel: String? = nil,
         onTap: @escaping () -> Void
@@ -76,6 +81,7 @@ struct SidebarActionPill: View {
         self.iconWeight = iconWeight
         self.horizontalPadding = horizontalPadding
         self.verticalPadding = verticalPadding
+        self.circleDiameter = circleDiameter
         self.hapticStyle = hapticStyle
         self.accessibilityLabelOverride = accessibilityLabel
         self.onTap = onTap
@@ -93,17 +99,26 @@ struct SidebarActionPill: View {
     // MARK: - Content
 
     private var pillContent: some View {
-        HStack(spacing: 6) {
-            iconView
+        // A Capsule over the icon-only square frame resolves to a circle, so
+        // both variants share the same background modifier and hit shape.
+        Group {
+            if title.isEmpty {
+                iconView
+                    .frame(width: circleDiameter, height: circleDiameter)
+            } else {
+                HStack(spacing: 6) {
+                    iconView
 
-            Text(title)
-                .font(titleFont)
-                .fontWeight(titleWeight)
-                .lineLimit(1)
+                    Text(title)
+                        .font(titleFont)
+                        .fontWeight(titleWeight)
+                        .lineLimit(1)
+                }
+                .padding(.horizontal, horizontalPadding)
+                .padding(.vertical, verticalPadding)
+            }
         }
         .foregroundStyle(foregroundColor)
-        .padding(.horizontal, horizontalPadding)
-        .padding(.vertical, verticalPadding)
         .modifier(
             SidebarActionPillBackground(
                 style: style,

@@ -1,32 +1,37 @@
 // FILE: SidebarBottomActionBar.swift
-// Purpose: Bottom-anchored sidebar bar. Hosts the Terminal pill and the primary
-//          Chat pill, built from the shared `SidebarActionPill` component so
-//          they share font, icon size, padding, and capsule shape — only the
-//          style differs. Trusted-device switching now lives entirely inside
-//          the Connections sheet (reached via the sidebar overflow menu), so
-//          the bottom bar no longer carries a devices affordance. iOS 26 wraps
-//          the row in `AdaptiveGlassContainer` so both pills participate in
-//          the same Liquid Glass sampling region.
+// Purpose: Bottom-anchored sidebar bar. Hosts the Search Chats capsule plus
+//          icon-only Terminal and Chat circles built from the shared
+//          `SidebarActionPill` component. While search is engaged (focused or
+//          filtering) the action circles slide away so the capsule and its
+//          dismiss button take the full row — the bar lives in a bottom
+//          `safeAreaInset`, so the keyboard lifts it automatically and search
+//          floats right above it. Trusted-device switching lives inside the
+//          Connections sheet (via the sidebar overflow menu), so the bar
+//          carries no devices affordance.
 // Layer: View Component
 // Exports: SidebarBottomActionBar
-// Depends on: SwiftUI, SidebarActionPill, AdaptiveGlassModifier
+// Depends on: SwiftUI, SidebarActionPill, SidebarSearchField, AdaptiveGlassModifier
 
 import SwiftUI
 
 struct SidebarBottomActionBar: View {
+    @Binding var searchText: String
+    @Binding var isSearchActive: Bool
     let isChatEnabled: Bool
     let isCreatingThread: Bool
     let onTapChat: () -> Void
     let onTapTerminal: () -> Void
 
     var body: some View {
-        Group {
-            if #available(iOS 26.0, *) {
-                iOS26LiquidGlassLayout
-            } else {
-                iOS18FallbackLayout
+        HStack(spacing: 10) {
+            SidebarSearchField(text: $searchText, isActive: $isSearchActive)
+
+            if !isSearchEngaged {
+                actionCircles
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
             }
         }
+        .animation(.easeInOut(duration: 0.2), value: isSearchEngaged)
         .padding(.horizontal, 16)
         // safeAreaBar(edge:.bottom) on iOS 26 already adds the system safe-area
         // inset, so we only need a tiny visual gap above/below the controls.
@@ -34,11 +39,25 @@ struct SidebarBottomActionBar: View {
         .padding(.bottom, 4)
     }
 
-    // MARK: - Pills (built from the shared SidebarActionPill component)
+    // Keeps the row uncramped while a filter is live: the search field's own
+    // dismiss button already occupies the trailing slot in that state.
+    private var isSearchEngaged: Bool {
+        isSearchActive || !searchText.isEmpty
+    }
 
-    private var terminalPill: SidebarActionPill {
+    // Groups the two circles in the same native Liquid Glass sampling region
+    // on iOS 26; the search capsule manages its own glass container.
+    private var actionCircles: some View {
+        AdaptiveGlassContainer(spacing: 10) {
+            HStack(spacing: 10) {
+                terminalButton
+                chatButton
+            }
+        }
+    }
+
+    private var terminalButton: SidebarActionPill {
         SidebarActionPill(
-            title: "Terminal",
             iconSystemName: "terminal.fill",
             style: .glass,
             hapticStyle: .light,
@@ -47,9 +66,8 @@ struct SidebarBottomActionBar: View {
         )
     }
 
-    private var chatPill: SidebarActionPill {
+    private var chatButton: SidebarActionPill {
         SidebarActionPill(
-            title: "Chat",
             iconSystemName: "square.and.pencil",
             style: .accent,
             isEnabled: isChatEnabled,
@@ -58,34 +76,16 @@ struct SidebarBottomActionBar: View {
             onTap: onTapChat
         )
     }
-
-    // MARK: - Layouts
-
-    private var iOS26LiquidGlassLayout: some View {
-        // Groups Terminal and Chat pills in the same native Liquid Glass
-        // sampling region so the glass backgrounds stay consistent with the
-        // surrounding sidebar surface.
-        AdaptiveGlassContainer(spacing: 10) {
-            pillRow
-        }
-    }
-
-    private var iOS18FallbackLayout: some View {
-        pillRow
-    }
-
-    private var pillRow: some View {
-        HStack(spacing: 10) {
-            terminalPill
-            Spacer(minLength: 0)
-            chatPill
-        }
-    }
 }
 
 #if DEBUG
 #Preview {
+    @Previewable @State var searchText = ""
+    @Previewable @State var isSearchActive = false
+
     SidebarBottomActionBar(
+        searchText: $searchText,
+        isSearchActive: $isSearchActive,
         isChatEnabled: true,
         isCreatingThread: false,
         onTapChat: {},

@@ -28,7 +28,7 @@ private struct PaywallFeature: Identifiable {
 }
 
 private let paywallFeatures: [PaywallFeature] = [
-    .init(id: 0, icon: "bolt", title: "Fast mode"),
+    .init(id: 0, icon: "bolt.fill", title: "Fast mode"),
     .init(id: 1, icon: "arrow.triangle.branch", title: "Git from your phone"),
     .init(id: 2, icon: "lock.shield", title: "End-to-end encrypted"),
     .init(id: 3, icon: "waveform", title: "Voice mode with speech-to-text"),

@@ -116,6 +116,9 @@ struct TurnComposerView: View {
     @State private var composerInputHeight: CGFloat = 32
     @State private var inputChangeTask: Task<Void, Never>?
     @State private var isShowingQueuedDraftsSheet = false
+    // The runtime picker is presented from the always-mounted composer root (not
+    // from the bottom bar) so it survives the composer collapsing mid-flow.
+    @State private var showsRuntimeOverlay = false
 
     @Environment(\.pinnedPlanAccessory) private var pinnedPlanAccessory
 
@@ -190,6 +193,13 @@ struct TurnComposerView: View {
                 onSteer: onSteerQueuedDraft,
                 onRemove: onRemoveQueuedDraft
             )
+        }
+        // Containment, not presentation: presenting any view controller ends
+        // editing and drops the keyboard. The overlay is installed in this same
+        // hierarchy, so the composer keeps focus and the chat behind it is what
+        // gets blurred. Anchored here so the picker sits right above the keyboard.
+        .fullScreenOverlay(isPresented: showsRuntimeOverlay) {
+            runtimeSliderOverlay
         }
         .onChange(of: accessoryState.hasQueuedDrafts) { _, hasDrafts in
             if !hasDrafts {
@@ -385,11 +395,7 @@ struct TurnComposerView: View {
 
     private var expandedBottomBar: some View {
         ComposerBottomBar(
-            orderedModelOptions: orderedModelOptions,
-            selectedModelID: selectedModelID,
-            selectedModelTitle: selectedModelTitle,
-            isLoadingModels: isLoadingModels,
-            isRuntimeSelectionLoading: isRuntimeSelectionLoading,
+            runtimeLabelParts: runtimeLabelParts,
             runtimeState: runtimeState,
             runtimeActions: runtimeActions,
             remainingAttachmentSlots: remainingAttachmentSlots,
@@ -417,7 +423,35 @@ struct TurnComposerView: View {
             onSetPlanModeArmed: onSetPlanModeArmed,
             onResumeQueue: onResumeQueue,
             onStopTurn: onStopTurn,
+            onTapRuntimePill: { showsRuntimeOverlay = true },
             onSend: onSend
+        )
+    }
+
+    // MARK: - Runtime picker hosting
+
+    // Shared by the pill and the slider overlay so both render identical text.
+    private var runtimeLabelParts: TurnComposerRuntimeLabelParts {
+        TurnComposerMetaMapper.runtimeLabelParts(
+            selectedModelID: selectedModelID,
+            selectedModelTitle: selectedModelTitle,
+            isRuntimeSelectionLoading: isRuntimeSelectionLoading,
+            runtimeState: runtimeState
+        )
+    }
+
+    // The overlay owns its own backdrop, model menu, and all-models sheet; this
+    // view only decides when it is on screen.
+    private var runtimeSliderOverlay: some View {
+        ComposerRuntimeSliderOverlay(
+            runtimeState: runtimeState,
+            runtimeActions: runtimeActions,
+            modelDisplayTitle: runtimeLabelParts.modelPart,
+            effortDisplayTitle: runtimeLabelParts.effortPart,
+            orderedModelOptions: orderedModelOptions,
+            selectedModelID: selectedModelID,
+            isLoadingModels: isLoadingModels,
+            onDismiss: { showsRuntimeOverlay = false }
         )
     }
 

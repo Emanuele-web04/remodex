@@ -1,8 +1,9 @@
 // FILE: TurnComposerMetaMapper.swift
 // Purpose: Centralizes model/reasoning label mapping and ordering for TurnView composer menus.
 // Layer: View Helper
-// Exports: TurnComposerMetaMapper, TurnComposerReasoningDisplayOption
-// Depends on: CodexModelOption
+// Exports: TurnComposerMetaMapper, TurnComposerReasoningDisplayOption,
+//          TurnComposerRuntimeLabelParts
+// Depends on: CodexModelOption, TurnComposerRuntimeState
 
 import Foundation
 
@@ -73,6 +74,46 @@ enum TurnComposerMetaMapper {
         }
     }
 
+    // ─── Runtime pill label ──────────────────────────────────────────
+
+    // Resolves the "Model Effort" label pair shown on the composer runtime
+    // pill and echoed by the slider overlay, so both surfaces render the
+    // exact same strings from one rule set.
+    static func runtimeLabelParts(
+        selectedModelID: String?,
+        selectedModelTitle: String,
+        isRuntimeSelectionLoading: Bool,
+        runtimeState: TurnComposerRuntimeState
+    ) -> TurnComposerRuntimeLabelParts {
+        guard selectedModelID != nil else {
+            return TurnComposerRuntimeLabelParts(
+                modelPart: isRuntimeSelectionLoading ? "Loading…" : "Select model",
+                effortPart: nil
+            )
+        }
+
+        let effort = runtimeState.selectedReasoningTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        return TurnComposerRuntimeLabelParts(
+            modelPart: compactModelTitle(from: selectedModelTitle),
+            effortPart: (effort.isEmpty || effort == "Select reasoning") ? nil : effort
+        )
+    }
+
+    // Strips family prefixes ("GPT", "Codex") so the pill shows the short
+    // product name, e.g. "GPT-5.5" -> "5.5".
+    static func compactModelTitle(from title: String) -> String {
+        let words = title
+            .replacingOccurrences(of: "-", with: " ")
+            .replacingOccurrences(of: "_", with: " ")
+            .split(separator: " ")
+            .map(String.init)
+            .filter { word in
+                let lowercased = word.lowercased()
+                return lowercased != "gpt" && lowercased != "codex"
+            }
+        return words.isEmpty ? title : words.joined(separator: " ")
+    }
+
     // ─── Reasoning Mapping ───────────────────────────────────────────
 
     // Converts server effort values to user-facing labels and sorts them by level.
@@ -113,6 +154,13 @@ enum TurnComposerMetaMapper {
                 .joined(separator: " ")
         }
     }
+}
+
+// The two-tone label shown on the runtime pill: model name in primary,
+// effort (when known) in a dimmer style alongside it.
+struct TurnComposerRuntimeLabelParts: Equatable {
+    let modelPart: String
+    let effortPart: String?
 }
 
 struct TurnComposerReasoningDisplayOption: Identifiable, Equatable {

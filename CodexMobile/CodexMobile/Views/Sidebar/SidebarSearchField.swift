@@ -21,7 +21,7 @@ struct SidebarSearchField: View {
                         .font(AppFont.body())
                         .foregroundStyle(.secondary)
 
-                    TextField("Search conversations", text: $text)
+                    TextField("Search Chats", text: $text)
                         .font(AppFont.body())
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()

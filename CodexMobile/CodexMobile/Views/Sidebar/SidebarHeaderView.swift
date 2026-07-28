@@ -1,8 +1,11 @@
 // FILE: SidebarHeaderView.swift
-// Purpose: Top sidebar row with logo/title, detached utility shortcut (settings),
-//          overflow creation menu, and the hamburger close affordance. All
-//          icon buttons route through `SidebarToolbarIconButton` so they
-//          share one visual treatment.
+// Purpose: Top sidebar bar with a centered brand block — "Remodex" over the
+//          paired computer's name with a live status dot — flanked by two
+//          detached circle buttons: leading close hamburger (or the settings
+//          gear when the sidebar is the navigation root and has no close
+//          affordance) and the trailing overflow menu. All icon buttons route
+//          through `SidebarToolbarIconButton` so they share one visual
+//          treatment.
 // Layer: View Component
 // Exports: SidebarHeaderView, SidebarOverflowMenuActions
 // Depends on: SwiftUI, UIKit, SidebarToolbarIconButton, RemodexIcon,
@@ -26,29 +29,27 @@ struct SidebarHeaderView: View {
     var showsCloseButton: Bool = true
     var onClose: () -> Void
     var overflowActions: SidebarOverflowMenuActions
+    var connectedComputerName: String? = nil
+    var isConnected: Bool = false
 
     var body: some View {
         AdaptiveGlassContainer(spacing: 10) {
-            HStack(spacing: 10) {
-                appLogo
-                Text("Remodex")
-                    .font(AppFont.title3(weight: .medium))
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.75)
+            // ZStack keeps the brand block centered on the bar regardless of
+            // how wide the flanking circle buttons are.
+            ZStack {
+                titleBlock
+                    .padding(.horizontal, 52)
 
-                Spacer(minLength: 0)
+                HStack {
+                    if showsCloseButton {
+                        hamburgerButton
+                    } else {
+                        settingsButton
+                    }
 
-                overflowMenuButton
+                    Spacer(minLength: 0)
 
-                SidebarToolbarIconButton(
-                    icon: .systemImage("gearshape"),
-                    accessibilityLabel: "Settings",
-                    action: overflowActions.onOpenSettings
-                )
-
-                if showsCloseButton {
-                    hamburgerButton
+                    overflowMenuButton
                 }
             }
         }
@@ -57,13 +58,42 @@ struct SidebarHeaderView: View {
         .padding(.bottom, 4)
     }
 
-    private var appLogo: some View {
-        // Custom SF Symbol so the glyph picks up the same font-driven
-        // scaling SwiftUI gives native symbols; semibold has its own asset
-        // because interpolated weights are too subtle for this custom mark.
-        Image("remodex_symbol_semibold")
-            .font(.system(size: 20))
-            .foregroundStyle(.primary)
+    // Brand title with the paired computer underneath so users can tell at a
+    // glance which machine the app is talking to. Hidden when no pair exists.
+    private var titleBlock: some View {
+        VStack(spacing: 2) {
+            Text("Remodex")
+                .font(AppFont.title3(weight: .semibold))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+
+            if let connectedComputerName {
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(isConnected ? Color.green : Color(.tertiaryLabel))
+                        .frame(width: 6, height: 6)
+
+                    RemodexIcon.image(systemName: "laptopcomputer", size: 11, weight: .medium)
+                        .foregroundStyle(.secondary)
+
+                    Text(connectedComputerName)
+                        .font(AppFont.caption(weight: .regular))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.6)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(accessibilityTitleLabel)
+    }
+
+    private var accessibilityTitleLabel: String {
+        guard let connectedComputerName else { return "Remodex" }
+        let status = isConnected ? "connected to" : "paired with"
+        return "Remodex, \(status) \(connectedComputerName)"
     }
 
     // Close affordance kept inside the sidebar so both drawer and full-width
@@ -76,6 +106,16 @@ struct SidebarHeaderView: View {
         )
     }
 
+    // Occupies the leading slot when the sidebar is the navigation root: there
+    // is no close action there, and Settings keeps its one-tap access.
+    private var settingsButton: some View {
+        SidebarToolbarIconButton(
+            icon: .systemImage("gearshape"),
+            accessibilityLabel: "Settings",
+            action: overflowActions.onOpenSettings
+        )
+    }
+
     private var overflowMenuButton: some View {
         // Routed through `UIKitMenuButton` so the leading glyphs render
         // through `RemodexIcon.menuUIImage` at the SF Symbol menu glyph
@@ -83,7 +123,7 @@ struct SidebarHeaderView: View {
         UIKitMenuButton(
             label: {
                 // Reuses the same toolbar button shell so the ellipsis trigger
-                // matches the surrounding settings + hamburger glyphs exactly.
+                // matches the surrounding header glyphs exactly.
                 SidebarToolbarIconButton(
                     icon: .systemImage("ellipsis"),
                     accessibilityLabel: "More actions",
@@ -97,47 +137,62 @@ struct SidebarHeaderView: View {
     }
 
     private func buildOverflowMenu() -> UIMenu {
-        UIMenu(
-            title: "",
-            children: [
+        var sections: [UIMenuElement] = [
+            UIMenu(
+                title: "",
+                options: [.displayInline],
+                children: [
+                    overflowAction(
+                        title: "New Chat",
+                        systemName: "square.and.pencil",
+                        isEnabled: overflowActions.isEnabled
+                    ) {
+                        overflowActions.onNewChat()
+                    },
+                    overflowAction(
+                        title: "Quick Chat",
+                        systemName: "message",
+                        isEnabled: overflowActions.isEnabled
+                    ) {
+                        overflowActions.onQuickChat()
+                    },
+                    overflowAction(
+                        title: "New Project",
+                        systemName: "folder.badge.plus",
+                        isEnabled: overflowActions.isEnabled
+                    ) {
+                        overflowActions.onNewProject()
+                    },
+                ]
+            ),
+            UIMenu(
+                title: "",
+                options: [.displayInline],
+                children: [
+                    overflowAction(title: "Connections", systemName: "globe") {
+                        overflowActions.onOpenConnections()
+                    },
+                ]
+            ),
+        ]
+
+        // The leading slot hosts the hamburger in this configuration, so
+        // Settings moves into the menu to stay reachable.
+        if showsCloseButton {
+            sections.append(
                 UIMenu(
                     title: "",
                     options: [.displayInline],
                     children: [
-                        overflowAction(
-                            title: "New Chat",
-                            systemName: "square.and.pencil",
-                            isEnabled: overflowActions.isEnabled
-                        ) {
-                            overflowActions.onNewChat()
-                        },
-                        overflowAction(
-                            title: "Quick Chat",
-                            systemName: "message",
-                            isEnabled: overflowActions.isEnabled
-                        ) {
-                            overflowActions.onQuickChat()
-                        },
-                        overflowAction(
-                            title: "New Project",
-                            systemName: "folder.badge.plus",
-                            isEnabled: overflowActions.isEnabled
-                        ) {
-                            overflowActions.onNewProject()
+                        overflowAction(title: "Settings", systemName: "gearshape") {
+                            overflowActions.onOpenSettings()
                         },
                     ]
-                ),
-                UIMenu(
-                    title: "",
-                    options: [.displayInline],
-                    children: [
-                        overflowAction(title: "Connections", systemName: "globe") {
-                            overflowActions.onOpenConnections()
-                        },
-                    ]
-                ),
-            ]
-        )
+                )
+            )
+        }
+
+        return UIMenu(title: "", children: sections)
     }
 
     private func overflowAction(
@@ -170,7 +225,9 @@ struct SidebarHeaderView: View {
             onOpenTerminal: {},
             onOpenConnections: {},
             onOpenSettings: {}
-        )
+        ),
+        connectedComputerName: "MacBook-Pro-di-Emanuele.local",
+        isConnected: true
     )
 }
 #endif

@@ -48,9 +48,9 @@ struct ComposerAttachmentMenu: View {
                     HapticFeedback.shared.triggerImpactFeedback(style: .light)
                     toggleFastMode()
                 } label: {
-                    // Native SF bolt on purpose so the menu item matches the
-                    // speed badge / Speed submenu icon used elsewhere.
-                    Label("Fast Mode", systemImage: fastModePlusMenuIconName)
+                    // Central zap pair (outline = off, solid = on), matching
+                    // the pill badge and the runtime slider overlay's toggle.
+                    RemodexIcon.menuLabel("Fast Mode", systemName: fastModePlusMenuIconName)
                 }
             }
 
