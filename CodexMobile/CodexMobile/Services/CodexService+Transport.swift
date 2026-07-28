@@ -16,7 +16,9 @@ let codexWebSocketMaximumMessageSizeBytes = 16 * 1024 * 1024
 
 private enum CodexWebSocketKeepAlivePolicy {
     static let intervalNanoseconds: UInt64 = 25_000_000_000
-    static let foregroundProbeTimeoutNanoseconds: UInt64 = 1_500_000_000
+    // The foreground probe waits for a served response, not just a queued ping, so it
+    // needs room for a radio that is still waking up after a long suspend.
+    static let foregroundProbeTimeoutNanoseconds: UInt64 = 4_000_000_000
     static let constrainedIntervalNanoseconds: UInt64 = 35_000_000_000
 }
 
@@ -429,7 +431,7 @@ extension CodexService {
                 }
 
                 do {
-                    try await self.sendWebSocketKeepAlivePing()
+                    try await self.performForegroundConnectionProbe()
                     waiter.finish(.success(()))
                 } catch {
                     waiter.finish(.failure(error))
@@ -446,6 +448,16 @@ extension CodexService {
             }
             waiter.addTask(timeoutTask)
         }
+    }
+
+    // Relay pings complete as soon as the local stack buffers the frame, so a socket that
+    // died silently while the phone slept still passes a ping-only probe: the app then sits
+    // "connected" against a dead peer and the sidebar never refreshes until a relaunch.
+    // Only a served response proves the far side is alive, so the probe also asks for a
+    // single thread row.
+    private func performForegroundConnectionProbe() async throws {
+        try await sendWebSocketKeepAlivePing()
+        _ = try await fetchCoalescedServerThreads(limit: 1)
     }
 
     func stopWebSocketKeepAliveLoop() {

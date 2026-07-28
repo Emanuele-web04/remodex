@@ -2682,6 +2682,90 @@ test("desktop IPC follower settles an announced background turn after reconnect"
   assert.equal(completions[0].params.status, "completed");
 });
 
+test("desktop IPC follower re-announces a still-running background turn on sidebar refresh", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-background-reannounce-");
+  let serverSocket = null;
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "desktop",
+          result: { clientId: "remodex-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  let currentTime = 1_700_000_000_000;
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    requestTimeoutMs: 500,
+    now: () => currentTime,
+  });
+  t.after(() => follower.stopAll());
+
+  const threadStarts = () => outbound.filter((message) => (
+    message.method === "turn/started"
+      && message.params?.threadId === "thread-background-reannounce"
+  ));
+  const refreshSidebar = () => follower.observeInbound(JSON.stringify({ method: "thread/list", params: {} }));
+
+  refreshSidebar();
+  await waitFor(() => serverSocket);
+  writeFrame(serverSocket, backgroundConversationSnapshot(
+    "thread-background-reannounce",
+    "inProgress",
+    { turnId: "turn-background-reannounce" }
+  ));
+  await waitFor(() => threadStarts().length === 1);
+
+  // A phone that connected after the run began learns about it here.
+  refreshSidebar();
+  await waitFor(() => threadStarts().length === 2);
+  const reannounced = threadStarts()[1];
+  assert.equal(reannounced.params.turnId, "turn-background-reannounce");
+  assert.equal(reannounced.params.remodexTurnIdentityContinuity, true);
+  assert.equal(reannounced.params.remodexBackgroundDiscovery, true);
+
+  refreshSidebar();
+  await wait(25);
+  assert.equal(threadStarts().length, 2, "refreshes inside the throttle window must not duplicate");
+
+  currentTime += 31_000;
+  refreshSidebar();
+  await waitFor(() => threadStarts().length === 3);
+
+  writeFrame(serverSocket, backgroundConversationSnapshot(
+    "thread-background-reannounce",
+    "completed",
+    { turnId: "turn-background-reannounce" }
+  ));
+  await waitFor(() => outbound.some((message) => (
+    message.method === "turn/completed"
+      && message.params?.threadId === "thread-background-reannounce"
+  )));
+
+  currentTime += 31_000;
+  refreshSidebar();
+  await wait(25);
+  assert.equal(threadStarts().length, 3, "a settled turn must not be re-announced");
+});
+
 test("desktop IPC follower keeps announced background turns running through an IPC disconnect", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-background-disconnect-");
   let serverSocket = null;

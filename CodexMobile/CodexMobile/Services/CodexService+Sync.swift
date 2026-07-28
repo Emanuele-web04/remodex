@@ -185,6 +185,13 @@ extension CodexService {
             reconcileLocalThreadsWithServer(activeThreads)
             debugSyncLog("sync thread/list active=\(activeThreads.count) local=\(threads.count)")
         } catch {
+            // A capped thread/list timing out while the socket still accepts writes is the
+            // signature of a half-open connection: recover the transport instead of polling
+            // a dead peer every cycle.
+            if isConnected, isAppInForeground, isRecoverableTransientConnectionError(error) {
+                handleReceiveError(error)
+                return
+            }
             presentConnectionErrorIfNeeded(error)
         }
     }
@@ -917,6 +924,17 @@ extension CodexService {
             || runningThreadIDs.contains(threadId)
             || protectedRunningFallbackThreadIDs.contains(threadId)
             || desktopMirroredRunningThreadIDs.contains(threadId)
+    }
+
+    // Only exact thread matches count: approvals that arrive without a thread id are
+    // routed to the open chat at prompt time and must not badge an unrelated row.
+    func threadHasPendingApproval(_ threadId: String) -> Bool {
+        guard let normalizedThreadID = normalizedApprovalThreadIdentifier(threadId) else {
+            return false
+        }
+        return pendingApprovals.contains {
+            normalizedApprovalThreadIdentifier($0.threadId) == normalizedThreadID
+        }
     }
 
     // Keeps short-lived background execution alive when a run is still in flight.

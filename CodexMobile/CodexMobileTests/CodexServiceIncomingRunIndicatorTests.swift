@@ -1233,6 +1233,37 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertNil(service.threadRunBadgeState(for: failedThreadID))
     }
 
+    func testPendingApprovalBadgeOutranksRunningAndStaysThreadScoped() {
+        let service = makeService()
+        let waitingThreadID = "thread-waiting-\(UUID().uuidString)"
+        let runningThreadID = "thread-running-\(UUID().uuidString)"
+
+        sendTurnStarted(service: service, threadID: waitingThreadID, turnID: "turn-\(UUID().uuidString)")
+        sendTurnStarted(service: service, threadID: runningThreadID, turnID: "turn-\(UUID().uuidString)")
+        XCTAssertEqual(service.threadRunBadgeState(for: waitingThreadID), .running)
+
+        let requestID = JSONValue.string("approval-1")
+        service.enqueuePendingApproval(
+            CodexApprovalRequest(
+                id: service.idKey(from: requestID),
+                requestID: requestID,
+                method: "item/commandExecution/requestApproval",
+                command: "git status",
+                reason: nil,
+                threadId: waitingThreadID,
+                turnId: nil,
+                params: nil
+            )
+        )
+
+        XCTAssertEqual(service.threadRunBadgeState(for: waitingThreadID), .waitingOnUser)
+        XCTAssertEqual(service.threadRunBadgeState(for: runningThreadID), .running)
+
+        service.removePendingApproval(requestID: requestID)
+
+        XCTAssertEqual(service.threadRunBadgeState(for: waitingThreadID), .running)
+    }
+
     func testPrepareThreadForDisplayClearsOutcomeBadge() async {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"

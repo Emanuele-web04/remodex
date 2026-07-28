@@ -236,6 +236,28 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
         XCTAssertNil(service.lastErrorMessage)
     }
 
+    // The zombie that actually reaches users: writes still succeed, so the ping passes and
+    // only the missing response gives the dead peer away.
+    func testForegroundProbeArmsReconnectWhenOnlyTheResponseIsMissing() async {
+        let service = CodexService()
+        service.isConnected = true
+        service.isInitialized = true
+        service.isAppInForeground = true
+        service.webSocketForegroundProbeTimeoutOverrideNanoseconds = 50_000_000
+        service.webSocketKeepAlivePingOverride = {}
+        service.requestTransportOverride = { _, _ in
+            try await Task.sleep(nanoseconds: 5_000_000_000)
+            throw NWError.posix(.ETIMEDOUT)
+        }
+
+        await service.probeForegroundConnectionIfNeeded()
+
+        XCTAssertFalse(service.isConnected)
+        XCTAssertTrue(service.shouldAutoReconnectOnForeground)
+        XCTAssertEqual(service.connectionRecoveryState, .retrying(attempt: 0, message: "Reconnecting..."))
+        XCTAssertNil(service.lastErrorMessage)
+    }
+
     func testBenignDisconnectStaysSilentWhileAutoReconnectIsRunning() {
         let service = CodexService()
         let error = CodexServiceError.disconnected

@@ -54,6 +54,12 @@ const DESKTOP_STATE_READ_METHODS = new Set([
 // this, a phone with no selected chat never connects to the Desktop bus and
 // cannot discover runs that started on the Mac.
 const DESKTOP_BACKGROUND_DISCOVERY_METHODS = new Set(["thread/list"]);
+// A run is announced to the phone exactly once, and the phone ignores buffered
+// replays of that announcement by design. An app session that starts after the
+// run did would otherwise never learn about it and show no sidebar badge until
+// the chat is opened. Sidebar refreshes re-announce still-active turns instead,
+// throttled per thread so steady polling costs one idempotent notification.
+const BACKGROUND_TURN_REANNOUNCE_MIN_INTERVAL_MS = 30_000;
 const DESKTOP_TURNS_CURSOR_PREFIX = "remodex-desktop-turns:";
 // Per-thread activity can be quiet during tools and subagents, so the short
 // freshness window alone does not revoke a healthy Desktop owner.
@@ -272,6 +278,7 @@ function createDesktopIpcActionFollower({
   // baseline. Otherwise a disconnect/eviction can erase the only evidence
   // needed to send the matching completion and leave a phantom running badge.
   const announcedBackgroundTurnsByThreadId = new Map();
+  const backgroundTurnReannouncedAtByThreadId = new Map();
   // JS Set preserves insertion order; delete-before-add refreshes recency, and
   // cap eviction skips threads with pending prompts so approvals are not lost.
   function rememberActiveThread(threadId) {
@@ -350,6 +357,7 @@ function createDesktopIpcActionFollower({
     const method = readString(message?.method);
     if (DESKTOP_BACKGROUND_DISCOVERY_METHODS.has(method)) {
       ipc.ensureConnected();
+      reannounceActiveBackgroundTurns();
     }
     if (DESKTOP_STATE_READ_METHODS.has(method)) {
       const threadId = readThreadId(message?.params);
@@ -368,6 +376,7 @@ function createDesktopIpcActionFollower({
           settleAnnouncedBackgroundTurn(threadId, "interrupted");
         }
         announcedBackgroundTurnsByThreadId.delete(threadId);
+        backgroundTurnReannouncedAtByThreadId.delete(threadId);
         if (rawState) {
           const liveState = boundedDesktopLiveStateForThread(threadId, rawState);
           const hasCanonicalNormalizedHistory = canonicalHistoryThreadIds.has(threadId)
@@ -502,6 +511,7 @@ function createDesktopIpcActionFollower({
     activeThreadIds.clear();
     backgroundOnlyThreadIds.clear();
     announcedBackgroundTurnsByThreadId.clear();
+    backgroundTurnReannouncedAtByThreadId.clear();
     recoveringThreadIds.clear();
     baselineRecoveryStateByThreadId.clear();
     queuedChangesByThreadId.clear();
@@ -1555,7 +1565,34 @@ function createDesktopIpcActionFollower({
       settledTurn
     )));
     announcedBackgroundTurnsByThreadId.delete(threadId);
+    backgroundTurnReannouncedAtByThreadId.delete(threadId);
     return true;
+  }
+
+  // Re-sends the start of runs that are still in flight, so a phone that missed
+  // the original announcement (fresh app session, reconnect after the run began)
+  // gets its sidebar badge on the next sidebar refresh instead of only when the
+  // chat is opened. The phone treats a repeated start for the same turn as a
+  // no-op, and the identity marker keeps a phone that already saw it from
+  // treating this as a second run. Only worth doing while Desktop IPC is
+  // responsive: the matching completion arrives over the same link, so this
+  // cannot keep a phantom badge alive on its own.
+  function reannounceActiveBackgroundTurns() {
+    if (announcedBackgroundTurnsByThreadId.size === 0 || !hasResponsiveDesktopIpc()) {
+      return;
+    }
+
+    const reannouncedAt = now();
+    for (const [threadId, announcedTurn] of announcedBackgroundTurnsByThreadId) {
+      const lastReannouncedAt = backgroundTurnReannouncedAtByThreadId.get(threadId) || 0;
+      if (reannouncedAt - lastReannouncedAt < BACKGROUND_TURN_REANNOUNCE_MIN_INTERVAL_MS) {
+        continue;
+      }
+      backgroundTurnReannouncedAtByThreadId.set(threadId, reannouncedAt);
+      sendApplicationResponse(JSON.stringify(notificationWithTurnIdentityContinuity(
+        backgroundTurnLifecycleNotification("turn/started", threadId, announcedTurn)
+      )));
+    }
   }
 
   function syncThreadArchiveBroadcast(envelope) {

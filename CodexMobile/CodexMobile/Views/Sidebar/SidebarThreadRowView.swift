@@ -140,7 +140,7 @@ struct SidebarThreadRowView: View {
                     .truncationMode(.tail)
             }
 
-            if let runBadgeState, runBadgeState.isVisibleInSidebar {
+            if let runBadgeState {
                 SidebarThreadRunBadgeView(state: runBadgeState)
                     .frame(width: 28, alignment: .trailing)
             }

@@ -584,7 +584,7 @@ private enum SidebarThreadListPreviewFixtures {
     static let runBadges: [String: CodexThreadRunBadgeState] = [
         "om-1": .running,
         "om-3": .ready,
-        "br-1": .running,
+        "br-1": .waitingOnUser,
         "br-2": .ready,
     ]
 

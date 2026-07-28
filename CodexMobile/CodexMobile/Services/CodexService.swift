@@ -239,6 +239,8 @@ struct CodexExternalThreadOpenRequest: Identifiable, Equatable, Sendable {
 
 enum CodexThreadRunBadgeState: Hashable, Sendable {
     case running
+    // Run is parked on an approval prompt: it only moves again once the user answers.
+    case waitingOnUser
     case ready
     case failed
     // Persistent goal is active on an idle thread (continuation may start on its own).
