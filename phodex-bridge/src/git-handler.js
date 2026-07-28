@@ -679,6 +679,13 @@ async function gitCreateWorktree(cwd, params) {
       );
     }
 
+    // Backfill manifest files a worktree created before `.worktreeinclude`
+    // existed never received; the copy skips files the worktree already has.
+    const existingWorktreeRoot = await resolveRepoRoot(existingWorktreePath).catch(() => null);
+    if (existingWorktreeRoot) {
+      await copyWorktreeIncludeFiles(repoRoot, existingWorktreeRoot);
+    }
+
     return {
       branch,
       worktreePath: existingWorktreePath,
@@ -717,6 +724,7 @@ async function gitCreateWorktree(cwd, params) {
     if (copiedLocalChangesPatch) {
       await applyCopiedLocalChangesToWorktree(worktreeRootPath, copiedLocalChangesPatch);
     }
+    await copyWorktreeIncludeFiles(repoRoot, worktreeRootPath);
   } catch (err) {
     if (didCreateWorktree) {
       await cleanupManagedWorktree(repoRoot, worktreeRootPath, branch);
@@ -803,6 +811,7 @@ async function gitCreateManagedWorktree(cwd, params) {
     if (copiedLocalChangesPatch) {
       await applyCopiedLocalChangesToWorktree(worktreeRootPath, copiedLocalChangesPatch);
     }
+    await copyWorktreeIncludeFiles(repoRoot, worktreeRootPath);
   } catch (err) {
     if (didCreateWorktree) {
       await cleanupManagedWorktree(repoRoot, worktreeRootPath);
@@ -2003,6 +2012,106 @@ async function rollbackFailedHandoffTransfer(cwd, pathspecArgs = []) {
   } catch {
     // Best effort: leave the original transfer error as the primary failure.
   }
+}
+
+// Mirrors Codex Desktop's `.worktreeinclude`: files Git leaves behind (like an
+// ignored `.env`) listed in a repository-root manifest are copied into worktrees.
+// Best effort by design — a stale manifest entry must never fail creation.
+const WORKTREE_INCLUDE_FILE = ".worktreeinclude";
+const WORKTREE_INCLUDE_MAX_FILES = 512;
+
+async function copyWorktreeIncludeFiles(repoRoot, worktreeRootPath) {
+  const manifestPath = path.join(repoRoot, WORKTREE_INCLUDE_FILE);
+  if (!fs.existsSync(manifestPath)) {
+    return;
+  }
+
+  const relativePaths = await listWorktreeIncludePaths(repoRoot, manifestPath);
+  if (relativePaths.length === 0) {
+    return;
+  }
+
+  const canonicalWorktreeRoot = await fs.promises.realpath(worktreeRootPath).catch(() => null);
+  if (!canonicalWorktreeRoot) {
+    return;
+  }
+
+  for (const relativePath of relativePaths) {
+    const sourcePath = path.resolve(repoRoot, relativePath);
+    const destinationPath = path.resolve(worktreeRootPath, relativePath);
+    // `ls-files` output is repo-relative, but keep both sides pinned to their
+    // roots so a hostile manifest entry cannot escape either tree.
+    if (!isPathContainedIn(sourcePath, repoRoot) || !isPathContainedIn(destinationPath, worktreeRootPath)) {
+      continue;
+    }
+    await copyWorktreeIncludeEntry(sourcePath, destinationPath, canonicalWorktreeRoot);
+  }
+}
+
+// Resolves the manifest to repo-relative untracked paths. The manifest uses
+// gitignore syntax, so let git itself do the matching: `--others -i
+// --exclude-from` lists every untracked file (ignored or not) that the
+// manifest patterns select, with full gitignore semantics — nested `.env`
+// matches, anchored `/foo` and `!negations` behave as documented, and a
+// malformed line cannot abort the listing the way a bad pathspec would.
+async function listWorktreeIncludePaths(repoRoot, manifestPath) {
+  let listing = "";
+  try {
+    listing = await git(
+      repoRoot,
+      "ls-files",
+      "--others",
+      "-i",
+      "-z",
+      `--exclude-from=${manifestPath}`
+    );
+  } catch (err) {
+    console.error(`[remodex] .worktreeinclude listing failed: ${err.message}`);
+    return [];
+  }
+
+  const relativePaths = listing.split("\0").filter(Boolean);
+  if (relativePaths.length > WORKTREE_INCLUDE_MAX_FILES) {
+    console.error(
+      `[remodex] .worktreeinclude matched ${relativePaths.length} files; copying only the first ${WORKTREE_INCLUDE_MAX_FILES}. Narrow the manifest patterns.`
+    );
+    relativePaths.length = WORKTREE_INCLUDE_MAX_FILES;
+  }
+  return relativePaths;
+}
+
+// Copies one manifest match into the worktree, skipping anything unsafe or
+// already present rather than failing the surrounding creation flow.
+async function copyWorktreeIncludeEntry(sourcePath, destinationPath, canonicalWorktreeRoot) {
+  try {
+    // Regular files only: copying through a symlinked source would smuggle
+    // out-of-repo content (e.g. `.env -> ~/.ssh/key`) into every worktree.
+    const sourceStats = await fs.promises.lstat(sourcePath);
+    if (!sourceStats.isFile()) {
+      return;
+    }
+    const destinationDirectory = path.dirname(destinationPath);
+    await fs.promises.mkdir(destinationDirectory, { recursive: true });
+    // Re-check containment on the real path: a checked-out symlinked parent
+    // directory would otherwise let the copy write outside the worktree.
+    const canonicalDestinationDirectory = await fs.promises.realpath(destinationDirectory);
+    if (!isPathContainedIn(canonicalDestinationDirectory, canonicalWorktreeRoot)) {
+      return;
+    }
+    // COPYFILE_EXCL keeps existing files intact: change transfer may already
+    // have carried a dirty copy, and reused worktrees keep their own state.
+    await fs.promises.copyFile(
+      sourcePath,
+      path.join(canonicalDestinationDirectory, path.basename(destinationPath)),
+      fs.constants.COPYFILE_EXCL
+    );
+  } catch {
+    // Skip unreadable or already-present entries; the worktree stays usable.
+  }
+}
+
+function isPathContainedIn(candidatePath, rootPath) {
+  return candidatePath === rootPath || candidatePath.startsWith(rootPath + path.sep);
 }
 
 async function cleanupManagedWorktree(repoRoot, worktreeRootPath, branchName = null) {

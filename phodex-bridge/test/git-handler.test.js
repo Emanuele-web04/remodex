@@ -1169,6 +1169,102 @@ test("gitCreateManagedWorktree creates a detached managed worktree under CODEX_H
   }
 });
 
+test("gitCreateManagedWorktree copies .worktreeinclude-listed files into the new worktree", async () => {
+  const repoDir = makeTempRepo();
+  const projectDir = path.join(repoDir, "phodex-bridge");
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-codex-home-"));
+  const previousCodexHome = process.env.CODEX_HOME;
+
+  process.env.CODEX_HOME = codexHome;
+
+  try {
+    fs.writeFileSync(path.join(repoDir, ".gitignore"), ".env\nignored-not-listed.txt\nlink.env\n");
+    fs.writeFileSync(path.join(repoDir, ".env"), "SECRET=root\n");
+    fs.mkdirSync(path.join(repoDir, "packages", "api"), { recursive: true });
+    // Gitignore semantics: an unanchored `.env` pattern matches at any depth.
+    fs.writeFileSync(path.join(repoDir, "packages", "api", ".env"), "SECRET=nested\n");
+    // Untracked-but-not-ignored manifest entries travel too.
+    fs.writeFileSync(path.join(repoDir, "notes.local"), "plain untracked\n");
+    fs.writeFileSync(path.join(repoDir, "ignored-not-listed.txt"), "skip me\n");
+    // Symlinked sources never travel: they could smuggle out-of-repo content.
+    fs.symlinkSync(path.join(repoDir, ".env"), path.join(repoDir, "link.env"));
+    fs.writeFileSync(
+      path.join(repoDir, ".worktreeinclude"),
+      "# required non-tracked files\n.env\nnotes.local\nlink.env\nmissing-entry.txt\n"
+    );
+    git(repoDir, "add", ".gitignore", ".worktreeinclude");
+    git(repoDir, "commit", "-m", "Add worktree include manifest");
+
+    const result = await __test.gitCreateManagedWorktree(projectDir, {
+      baseBranch: "main",
+    });
+    const worktreeRoot = path.dirname(result.worktreePath);
+
+    assert.equal(fs.readFileSync(path.join(worktreeRoot, ".env"), "utf8"), "SECRET=root\n");
+    assert.equal(
+      fs.readFileSync(path.join(worktreeRoot, "packages", "api", ".env"), "utf8"),
+      "SECRET=nested\n"
+    );
+    assert.equal(fs.readFileSync(path.join(worktreeRoot, "notes.local"), "utf8"), "plain untracked\n");
+    // Only manifest matches travel; other ignored files and symlinks stay behind.
+    assert.equal(fs.existsSync(path.join(worktreeRoot, "ignored-not-listed.txt")), false);
+    assert.equal(fs.existsSync(path.join(worktreeRoot, "link.env")), false);
+  } finally {
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    fs.rmSync(repoDir, { recursive: true, force: true });
+    fs.rmSync(codexHome, { recursive: true, force: true });
+  }
+});
+
+test("gitCreateWorktree backfills missing .worktreeinclude files when reusing an existing worktree", async () => {
+  const repoDir = makeTempRepo();
+  const projectDir = path.join(repoDir, "phodex-bridge");
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-codex-home-"));
+  const previousCodexHome = process.env.CODEX_HOME;
+
+  process.env.CODEX_HOME = codexHome;
+
+  try {
+    // First creation happens before the manifest exists, so nothing is copied.
+    const created = await __test.gitCreateWorktree(projectDir, {
+      name: "reused",
+      baseBranch: "main",
+    });
+    const worktreeRoot = path.dirname(created.worktreePath);
+    assert.equal(fs.existsSync(path.join(worktreeRoot, ".env")), false);
+
+    fs.writeFileSync(path.join(repoDir, ".gitignore"), ".env\n");
+    fs.writeFileSync(path.join(repoDir, ".env"), "SECRET=late\n");
+    fs.writeFileSync(path.join(repoDir, "kept.env"), "source version\n");
+    fs.writeFileSync(path.join(worktreeRoot, "kept.env"), "worktree version\n");
+    fs.writeFileSync(path.join(repoDir, ".worktreeinclude"), ".env\nkept.env\n");
+    git(repoDir, "add", ".gitignore", ".worktreeinclude");
+    git(repoDir, "commit", "-m", "Add worktree include manifest");
+
+    const reused = await __test.gitCreateWorktree(projectDir, {
+      name: "reused",
+      baseBranch: "main",
+    });
+
+    assert.equal(reused.alreadyExisted, true);
+    // Missing manifest files are backfilled, but existing ones are never clobbered.
+    assert.equal(fs.readFileSync(path.join(worktreeRoot, ".env"), "utf8"), "SECRET=late\n");
+    assert.equal(fs.readFileSync(path.join(worktreeRoot, "kept.env"), "utf8"), "worktree version\n");
+  } finally {
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    fs.rmSync(repoDir, { recursive: true, force: true });
+    fs.rmSync(codexHome, { recursive: true, force: true });
+  }
+});
+
 test("gitCreateWorktree reuses an existing worktree for the same remodex branch", async () => {
   const repoDir = makeTempRepo();
   const projectDir = path.join(repoDir, "phodex-bridge");
