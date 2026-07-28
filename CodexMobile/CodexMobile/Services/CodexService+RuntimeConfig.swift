@@ -494,10 +494,6 @@ extension CodexService {
         applyThreadRuntimeOverride(inheritedOverride, to: normalizedDestinationThreadID)
     }
 
-    func runtimeSandboxPolicyObject(for accessMode: CodexAccessMode) -> JSONValue {
-        RuntimeAccessConfiguration(mode: accessMode).sandboxPolicy
-    }
-
     func shouldFallbackFromSandboxPolicy(_ error: Error) -> Bool {
         guard let serviceError = error as? CodexServiceError,
               case .rpcError(let rpcError) = serviceError else {

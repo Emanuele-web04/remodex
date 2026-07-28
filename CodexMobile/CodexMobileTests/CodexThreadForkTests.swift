@@ -93,7 +93,7 @@ final class CodexThreadForkTests: XCTestCase {
                     result: .object([
                         "approvalPolicy": .string("on-request"),
                         "approvalsReviewer": .string("auto_review"),
-                        "sandbox": service.runtimeSandboxPolicyObject(for: .autoReview),
+                        "sandbox": RuntimeAccessConfiguration(mode: .autoReview).sandboxPolicy,
                         "thread": .object([
                             "id": .string("fork-local"),
                         ]),
@@ -107,7 +107,7 @@ final class CodexThreadForkTests: XCTestCase {
                     result: .object([
                         "approvalPolicy": .string("on-request"),
                         "approvalsReviewer": .string("auto_review"),
-                        "sandbox": service.runtimeSandboxPolicyObject(for: .autoReview),
+                        "sandbox": RuntimeAccessConfiguration(mode: .autoReview).sandboxPolicy,
                         "thread": .object([
                             "id": .string("fork-local"),
                             "cwd": .string("/tmp/remodex-worktree"),

@@ -336,7 +336,7 @@ final class CodexAutoApprovalReviewTests: XCTestCase {
 
         XCTAssertEqual(
             capturedParams["sandboxPolicy"],
-            service.runtimeSandboxPolicyObject(for: .autoReview)
+            RuntimeAccessConfiguration(mode: .autoReview).sandboxPolicy
         )
         XCTAssertNil(capturedParams["sandbox"])
     }
@@ -368,7 +368,7 @@ final class CodexAutoApprovalReviewTests: XCTestCase {
         XCTAssertEqual(attempts.count, 2)
         XCTAssertEqual(
             attempts[1]["sandboxPolicy"],
-            service.runtimeSandboxPolicyObject(for: .autoReview)
+            RuntimeAccessConfiguration(mode: .autoReview).sandboxPolicy
         )
         XCTAssertNil(attempts[1]["sandbox"])
     }
@@ -416,7 +416,7 @@ final class CodexAutoApprovalReviewTests: XCTestCase {
                         "thread": .object(["id": .string("thread-1")]),
                         "approvalPolicy": .string("on-request"),
                         "approvalsReviewer": .string("auto_review"),
-                        "sandbox": service.runtimeSandboxPolicyObject(for: .autoReview),
+                        "sandbox": RuntimeAccessConfiguration(mode: .autoReview).sandboxPolicy,
                     ]),
                     includeJSONRPC: false
                 )
