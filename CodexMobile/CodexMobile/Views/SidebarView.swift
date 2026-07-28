@@ -125,7 +125,11 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
             // per frame" warnings).
             .onChange(of: badgeFingerprint) { _, _ in
                 debugSidebarLog("badge fingerprint changed visible=\(isVisible)")
-                Task { @MainActor in rebuildCachedRunBadges() }
+                Task { @MainActor in
+                    rebuildCachedRunBadges()
+                    // A run starting or ending re-sorts rows, not just their badges.
+                    rebuildGroupedThreads()
+                }
             }
             .onChange(of: isVisible) { _, visible in
                 debugSidebarLog("visibility changed visible=\(visible)")
@@ -415,14 +419,23 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
                 || ($0.normalizedProjectPath?.localizedCaseInsensitiveContains(query) ?? false)
             }
         }
-        let fingerprint = groupingFingerprint(query: query, source: source)
+        // Run badges participate in ordering, so grouping reads the same state the
+        // badge column shows; the shared fingerprint keeps the two from diverging.
+        var runBadges: [String: CodexThreadRunBadgeState] = [:]
+        for thread in source {
+            if let badgeState = codex.threadRunBadgeState(for: thread.id) {
+                runBadges[thread.id] = badgeState
+            }
+        }
+        let fingerprint = groupingFingerprint(query: query, source: source, runBadges: runBadges)
         guard fingerprint != lastGroupedThreadsFingerprint else { return }
         lastGroupedThreadsFingerprint = fingerprint
         groupedThreads = SidebarThreadGrouping.makeGroups(
             from: source,
             pinnedThreadIDs: codex.pinnedThreadIDs,
             scope: sidebarGroupingScope,
-            projectlessRootPaths: projectlessChatRootPaths
+            projectlessRootPaths: projectlessChatRootPaths,
+            runBadgeStateByThreadID: runBadges
         )
         debugSidebarLog(
             "rebuildGroupedThreads durationMs=\(Int(Date().timeIntervalSince(startedAt) * 1000)) "
@@ -431,7 +444,11 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
         )
     }
 
-    private func groupingFingerprint(query: String, source: [CodexThread]) -> Int {
+    private func groupingFingerprint(
+        query: String,
+        source: [CodexThread],
+        runBadges: [String: CodexThreadRunBadgeState]
+    ) -> Int {
         var hasher = Hasher()
         hasher.combine(query)
         hasher.combine(selectedContentScope)
@@ -439,6 +456,7 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
         hasher.combine(codex.pinnedThreadIDs)
         for thread in source {
             hasher.combine(thread)
+            hasher.combine(runBadges[thread.id])
         }
         return hasher.finalize()
     }

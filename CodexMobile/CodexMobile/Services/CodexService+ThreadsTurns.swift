@@ -1096,7 +1096,9 @@ private extension CodexService {
 
         return pendingApprovals.remove(at: exactIndex)
     }
+}
 
+extension CodexService {
     func normalizedApprovalThreadIdentifier(_ rawValue: String?) -> String? {
         guard let rawValue else {
             return nil

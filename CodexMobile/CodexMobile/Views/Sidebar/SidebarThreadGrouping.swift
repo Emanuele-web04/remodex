@@ -73,6 +73,7 @@ enum SidebarThreadGrouping {
         pinnedThreadIDs: [String] = [],
         scope: SidebarThreadGroupingScope = .all,
         projectlessRootPaths: [String] = [],
+        runBadgeStateByThreadID: [String: CodexThreadRunBadgeState] = [:],
         now _: Date = Date(),
         calendar _: Calendar = .current
     ) -> [SidebarThreadGroup] {
@@ -98,14 +99,30 @@ enum SidebarThreadGrouping {
         case .all:
             let projectThreads = threadsForScope(.projects, from: scopedThreads, projectlessRootPaths: projectlessRootPaths)
             let chatThreads = threadsForScope(.chats, from: scopedThreads, projectlessRootPaths: projectlessRootPaths)
-            groups.append(contentsOf: makeProjectGroups(from: projectThreads, excludingPinnedThreadIDs: pinnedThreadIDSet))
-            if let chatGroup = makeRootlessChatGroup(from: chatThreads, excludingPinnedThreadIDs: pinnedThreadIDSet) {
+            groups.append(contentsOf: makeProjectGroups(
+                from: projectThreads,
+                excludingPinnedThreadIDs: pinnedThreadIDSet,
+                runBadgeStateByThreadID: runBadgeStateByThreadID
+            ))
+            if let chatGroup = makeRootlessChatGroup(
+                from: chatThreads,
+                excludingPinnedThreadIDs: pinnedThreadIDSet,
+                runBadgeStateByThreadID: runBadgeStateByThreadID
+            ) {
                 groups.append(chatGroup)
             }
         case .projects:
-            groups.append(contentsOf: makeProjectGroups(from: scopedThreads, excludingPinnedThreadIDs: pinnedThreadIDSet))
+            groups.append(contentsOf: makeProjectGroups(
+                from: scopedThreads,
+                excludingPinnedThreadIDs: pinnedThreadIDSet,
+                runBadgeStateByThreadID: runBadgeStateByThreadID
+            ))
         case .chats:
-            if let chatGroup = makeRootlessChatGroup(from: scopedThreads, excludingPinnedThreadIDs: pinnedThreadIDSet) {
+            if let chatGroup = makeRootlessChatGroup(
+                from: scopedThreads,
+                excludingPinnedThreadIDs: pinnedThreadIDSet,
+                runBadgeStateByThreadID: runBadgeStateByThreadID
+            ) {
                 groups.append(chatGroup)
             }
         }
@@ -195,11 +212,18 @@ enum SidebarThreadGrouping {
     private static func makeProjectGroup(
         projectKey: String,
         projectPath: String?,
-        threads: [CodexThread]
+        threads: [CodexThread],
+        runBadgeStateByThreadID: [String: CodexThreadRunBadgeState]
     ) -> SidebarThreadGroup {
-        let sortedThreads = sortThreadsByRecentActivity(threads)
-        let representativeThread = sortedThreads.first
-        let sortDate = representativeThread?.updatedAt ?? representativeThread?.createdAt ?? .distantPast
+        let sortedThreads = sortThreadsByRecentActivity(
+            threads,
+            runBadgeStateByThreadID: runBadgeStateByThreadID
+        )
+        // The first thread can be an old chat lifted by its run state, so the group's
+        // recency comes from the newest activity anywhere in the group instead.
+        let sortDate = threads
+            .compactMap { $0.updatedAt ?? $0.createdAt }
+            .max() ?? .distantPast
         return SidebarThreadGroup(
             id: "project:\(projectKey)",
             label: CodexThread.projectDisplayLabel(for: projectPath),
@@ -212,13 +236,17 @@ enum SidebarThreadGrouping {
 
     private static func makeRootlessChatGroup(
         from threads: [CodexThread],
-        excludingPinnedThreadIDs pinnedThreadIDs: Set<String>
+        excludingPinnedThreadIDs pinnedThreadIDs: Set<String>,
+        runBadgeStateByThreadID: [String: CodexThreadRunBadgeState]
     ) -> SidebarThreadGroup? {
         let liveThreads = threads.filter {
             $0.syncState != .archivedLocal && !pinnedThreadIDs.contains($0.id)
         }
-        let sortedThreads = sortThreadsByRecentActivity(liveThreads)
-        guard let firstThread = sortedThreads.first else {
+        let sortedThreads = sortThreadsByRecentActivity(
+            liveThreads,
+            runBadgeStateByThreadID: runBadgeStateByThreadID
+        )
+        guard !sortedThreads.isEmpty else {
             return nil
         }
 
@@ -226,7 +254,9 @@ enum SidebarThreadGrouping {
             id: "chats:rootless",
             label: "Chats",
             kind: .chat,
-            sortDate: firstThread.updatedAt ?? firstThread.createdAt ?? .distantPast,
+            sortDate: liveThreads
+                .compactMap { $0.updatedAt ?? $0.createdAt }
+                .max() ?? .distantPast,
             projectPath: nil,
             threads: sortedThreads
         )
@@ -325,7 +355,8 @@ enum SidebarThreadGrouping {
     // Keeps project-derived UI consistent by centralizing the live-thread → project bucket mapping.
     private static func makeProjectGroups(
         from threads: [CodexThread],
-        excludingPinnedThreadIDs pinnedThreadIDs: Set<String> = []
+        excludingPinnedThreadIDs pinnedThreadIDs: Set<String> = [],
+        runBadgeStateByThreadID: [String: CodexThreadRunBadgeState] = [:]
     ) -> [SidebarThreadGroup] {
         var liveThreadsByProject: [String: [CodexThread]] = [:]
         var projectPathByGroupKey: [String: String] = [:]
@@ -344,10 +375,20 @@ enum SidebarThreadGrouping {
             makeProjectGroup(
                 projectKey: projectKey,
                 projectPath: projectPathByGroupKey[projectKey],
-                threads: projectThreads
+                threads: projectThreads,
+                runBadgeStateByThreadID: runBadgeStateByThreadID
             )
         }
         .sorted { lhs, rhs in
+            // A project whose chat is running (or waiting on the user) outranks purely
+            // newer projects: threads are already tier-sorted, so each group's urgency
+            // is whatever its first thread carries.
+            let lhsTier = sidebarActivityTier(of: lhs.threads.first, in: runBadgeStateByThreadID)
+            let rhsTier = sidebarActivityTier(of: rhs.threads.first, in: runBadgeStateByThreadID)
+            if lhsTier != rhsTier {
+                return lhsTier < rhsTier
+            }
+
             if lhs.sortDate != rhs.sortDate {
                 return lhs.sortDate > rhs.sortDate
             }
@@ -414,14 +455,45 @@ enum SidebarThreadGrouping {
         }
     }
 
-    private static func sortThreadsByRecentActivity(_ threads: [CodexThread]) -> [CodexThread] {
+    private static func sortThreadsByRecentActivity(
+        _ threads: [CodexThread],
+        runBadgeStateByThreadID: [String: CodexThreadRunBadgeState] = [:]
+    ) -> [CodexThread] {
         threads.sorted { lhs, rhs in
+            // Recency alone buries the chats the user cares about most: an orchestrating
+            // run can sit idle for an hour while the worktree runs it spawned keep
+            // writing, so the still-running chat would sink below its own children.
+            let lhsTier = sidebarActivityTier(of: lhs, in: runBadgeStateByThreadID)
+            let rhsTier = sidebarActivityTier(of: rhs, in: runBadgeStateByThreadID)
+            if lhsTier != rhsTier {
+                return lhsTier < rhsTier
+            }
             let lhsDate = lhs.updatedAt ?? lhs.createdAt ?? .distantPast
             let rhsDate = rhs.updatedAt ?? rhs.createdAt ?? .distantPast
             if lhsDate != rhsDate {
                 return lhsDate > rhsDate
             }
             return lhs.id < rhs.id
+        }
+    }
+
+    // Ordering tier for a sidebar row: active work first, unread outcomes next,
+    // everything else (including ambient goal states) by recency alone.
+    private static func sidebarActivityTier(
+        of thread: CodexThread?,
+        in runBadgeStateByThreadID: [String: CodexThreadRunBadgeState]
+    ) -> Int {
+        guard let thread, let badgeState = runBadgeStateByThreadID[thread.id] else {
+            return 2
+        }
+
+        switch badgeState {
+        case .running, .waitingOnUser:
+            return 0
+        case .ready, .failed:
+            return 1
+        case .goalActive, .goalAttention:
+            return 2
         }
     }
 

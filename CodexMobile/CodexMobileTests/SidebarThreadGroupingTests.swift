@@ -697,6 +697,46 @@ final class SidebarThreadGroupingTests: XCTestCase {
         )
     }
 
+    func testRunningThreadOutranksNewerIdleThreadsAndLiftsItsGroup() {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let threads = [
+            // The orchestrating chat: oldest activity in its group, but still running.
+            makeThread(id: "thread-running", updatedAt: now.addingTimeInterval(-3_600), cwd: "/Users/me/work/app"),
+            makeThread(id: "thread-worktree-a", updatedAt: now, cwd: "/Users/me/work/app"),
+            makeThread(id: "thread-worktree-b", updatedAt: now.addingTimeInterval(-60), cwd: "/Users/me/work/app"),
+            makeThread(id: "thread-done", updatedAt: now.addingTimeInterval(-1_800), cwd: "/Users/me/work/app"),
+            // A different project with strictly newer activity than the running chat.
+            makeThread(id: "thread-other", updatedAt: now.addingTimeInterval(-30), cwd: "/Users/me/work/site"),
+        ]
+
+        let groups = SidebarThreadGrouping.makeGroups(
+            from: threads,
+            runBadgeStateByThreadID: [
+                "thread-running": .running,
+                "thread-done": .ready,
+            ],
+            now: now
+        )
+
+        XCTAssertEqual(groups.map(\.id), ["project:/Users/me/work/app", "project:/Users/me/work/site"])
+        XCTAssertEqual(
+            groups.first?.threads.map(\.id),
+            ["thread-running", "thread-done", "thread-worktree-a", "thread-worktree-b"]
+        )
+    }
+
+    func testGroupOrderStaysRecencyBasedWithoutRunBadges() {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let threads = [
+            makeThread(id: "thread-a", updatedAt: now.addingTimeInterval(-3_600), cwd: "/Users/me/work/app"),
+            makeThread(id: "thread-b", updatedAt: now, cwd: "/Users/me/work/site"),
+        ]
+
+        let groups = SidebarThreadGrouping.makeGroups(from: threads, now: now)
+
+        XCTAssertEqual(groups.map(\.id), ["project:/Users/me/work/site", "project:/Users/me/work/app"])
+    }
+
     private func makeThread(
         id: String,
         updatedAt: Date,
