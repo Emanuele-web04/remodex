@@ -16,6 +16,64 @@ func remodexNormalizedCreatedBranchName(_ rawName: String) -> String {
     return "remodex/\(trimmedName)"
 }
 
+// A prompt-stage name is creatable once it holds more than the seeded prefix.
+func remodexCreatedBranchNameIsValid(_ rawName: String) -> Bool {
+    let trimmedName = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+    return !trimmedName.isEmpty && trimmedName != "remodex/"
+}
+
+// Single fallback rule for the label branch surfaces show: the current
+// checkout branch, else the repo default, else a neutral placeholder.
+func remodexVisibleBranchLabel(currentBranch: String, defaultBranch: String) -> String {
+    let normalizedCurrentBranch = currentBranch.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !normalizedCurrentBranch.isEmpty {
+        return normalizedCurrentBranch
+    }
+    let normalizedDefaultBranch = defaultBranch.trimmingCharacters(in: .whitespacesAndNewlines)
+    return normalizedDefaultBranch.isEmpty ? "Branch" : normalizedDefaultBranch
+}
+
+// Shared "New branch" prompt so every branch surface keeps one copy of the
+// wording, normalization, and validation. `branchName` stays caller-owned so
+// each surface can seed its own prefill (search text, bare prefix, ...).
+private struct NewGitBranchPromptModifier: ViewModifier {
+    @Binding var isPresented: Bool
+    @Binding var branchName: String
+    let onCreate: (String) -> Void
+
+    func body(content: Content) -> some View {
+        content.alert("New branch", isPresented: $isPresented) {
+            TextField("remodex/my-feature", text: $branchName)
+            Button("Cancel", role: .cancel) {
+                branchName = ""
+            }
+            Button("Create") {
+                let normalizedName = remodexNormalizedCreatedBranchName(branchName)
+                guard !normalizedName.isEmpty else { return }
+                onCreate(normalizedName)
+                branchName = ""
+            }
+            .disabled(!remodexCreatedBranchNameIsValid(branchName))
+        } message: {
+            Text("Branch will be created locally and checked out. Uncommitted changes stay with this working copy.")
+        }
+    }
+}
+
+extension View {
+    func newGitBranchPrompt(
+        isPresented: Binding<Bool>,
+        branchName: Binding<String>,
+        onCreate: @escaping (String) -> Void
+    ) -> some View {
+        modifier(NewGitBranchPromptModifier(
+            isPresented: isPresented,
+            branchName: branchName,
+            onCreate: onCreate
+        ))
+    }
+}
+
 // Leaves "open elsewhere" branches selectable so the caller can surface the right alert or git error.
 func remodexCurrentBranchSelectionIsDisabled(
     branch: String,
@@ -95,10 +153,7 @@ struct TurnGitBranchSelector: View, Equatable {
         currentGitBranch.trimmingCharacters(in: .whitespacesAndNewlines)
     }
     private var visibleBranchLabel: String {
-        if !normalizedCurrentBranch.isEmpty {
-            return normalizedCurrentBranch
-        }
-        return normalizedDefaultBranch ?? "Branch"
+        remodexVisibleBranchLabel(currentBranch: currentGitBranch, defaultBranch: defaultBranch)
     }
 
     static func == (lhs: TurnGitBranchSelector, rhs: TurnGitBranchSelector) -> Bool {
@@ -233,12 +288,6 @@ struct TurnGitBranchPickerSheet: View {
         return branches.filter { $0.lowercased().contains(query) }
     }
 
-    private var isNewBranchNameValid: Bool {
-        let trimmed = newBranchName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, trimmed != "remodex/" else { return false }
-        return true
-    }
-
     // Suggests quick branch creation when the search query does not match an existing branch.
     private var suggestedCreateBranchName: String? {
         guard allowsSelectingCurrentBranch else { return nil }
@@ -367,21 +416,9 @@ struct TurnGitBranchPickerSheet: View {
         .listSectionSpacing(.compact)
         .environment(\.defaultMinListRowHeight, 28)
         .searchable(text: $searchText, prompt: "Search branches")
-        .alert("New branch", isPresented: $isShowingCreateBranchPrompt) {
-            TextField("remodex/my-feature", text: $newBranchName)
-            Button("Cancel", role: .cancel) {
-                newBranchName = ""
-            }
-            Button("Create") {
-                let branchName = remodexNormalizedCreatedBranchName(newBranchName)
-                guard !branchName.isEmpty else { return }
-                onCreateBranch(branchName)
-                newBranchName = ""
-                dismiss()
-            }
-            .disabled(!isNewBranchNameValid)
-        } message: {
-            Text("Branch will be created locally and checked out. Uncommitted changes stay with this working copy.")
+        .newGitBranchPrompt(isPresented: $isShowingCreateBranchPrompt, branchName: $newBranchName) { branchName in
+            onCreateBranch(branchName)
+            dismiss()
         }
     }
 }

@@ -1,7 +1,7 @@
 // FILE: ComposerRuntimeSliderOverlay.swift
 // Purpose: Runtime picker popped over the chat from the composer's model pill.
 //          The app blurs behind it (material backdrop) while the keyboard stays
-//          up, and a bottom-anchored block shows: the fast-mode bolt toggle
+//          up, and a screen-centered block shows: the fast-mode bolt toggle
 //          (Central zap outline = off, solid = on), the model + effort label that
 //          opens the model menu, and a fill slider that sweeps the selected
 //          model's reasoning efforts from the first to the last. Tapping the
@@ -38,8 +38,8 @@ struct ComposerRuntimeSliderOverlay: View {
     let isLoadingModels: Bool
     let onDismiss: () -> Void
 
-    // Drives the whole in/out animation: the backdrop fades and the content adds
-    // a short rise so it reads as a popover growing out of the composer.
+    // Drives the whole in/out animation: the backdrop fades while the content
+    // pops in place — a centered scale-up, not a slide from anywhere.
     @State private var isVisible = false
     @State private var showsAllModelsSheet = false
 
@@ -55,9 +55,9 @@ struct ComposerRuntimeSliderOverlay: View {
                 .contentShape(Rectangle())
                 .onTapGesture { dismiss() }
 
+            // Centered by the ZStack: the picker always lands mid-screen, no
+            // matter where it was opened from or whether the keyboard is up.
             VStack(spacing: 18) {
-                Spacer(minLength: 0)
-
                 modelRow
 
                 if !ascendingEffortOptions.isEmpty {
@@ -71,9 +71,10 @@ struct ComposerRuntimeSliderOverlay: View {
                 }
             }
             .padding(.horizontal, 28)
-            .padding(.bottom, 20)
             .opacity(isVisible ? 1 : 0)
-            .offset(y: isVisible ? 0 : 20)
+            // Scaled on the controls block alone so the picker expands from
+            // its own center and reads as popping into place.
+            .scaleEffect(isVisible ? 1 : 0.85)
         }
         .onAppear {
             withAnimation(appearAnimation) { isVisible = true }

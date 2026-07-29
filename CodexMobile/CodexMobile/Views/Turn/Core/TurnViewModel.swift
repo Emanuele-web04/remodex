@@ -1717,12 +1717,15 @@ final class TurnViewModel {
     }
 
     // Starts a real thread only when the first draft message is sent from the New Chat screen.
+    // `makeThread` lets the draft substitute how the thread materializes (e.g. creating a
+    // managed worktree first); the default path is a plain `thread/start` in the project.
     @discardableResult
     func sendNewThread(
         codex: CodexService,
         subscriptions: SubscriptionService? = nil,
         draftThreadID: String,
         preferredProjectPath: String?,
+        makeThread: (@MainActor @Sendable () async throws -> CodexThread)? = nil,
         onThreadCreated: @escaping @MainActor @Sendable (CodexThread) -> Void,
         onSendFailed: (@MainActor @Sendable () -> Void)? = nil
     ) -> Bool {
@@ -1753,10 +1756,15 @@ final class TurnViewModel {
             defer { isSending = false }
 
             do {
-                let thread = try await codex.startThreadIfReady(
-                    preferredProjectPath: preferredProjectPath,
-                    rootlessChatPromptHint: rootlessChatPromptHint
-                )
+                let thread: CodexThread
+                if let makeThread {
+                    thread = try await makeThread()
+                } else {
+                    thread = try await codex.startThreadIfReady(
+                        preferredProjectPath: preferredProjectPath,
+                        rootlessChatPromptHint: rootlessChatPromptHint
+                    )
+                }
                 let preAppendedMessage = movePreAppendedNewThreadUserMessageIfNeeded(
                     draftPreAppendedMessage,
                     pendingSend: pendingSend,

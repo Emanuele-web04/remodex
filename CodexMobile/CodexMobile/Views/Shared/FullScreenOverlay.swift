@@ -11,22 +11,24 @@
 // * Presenting a view controller — `fullScreenCover`, or even a UIKit
 //   `.overFullScreen` presentation — makes UIKit end editing in the presenting
 //   hierarchy: the keyboard slides away and comes back on dismissal. The overlay
-//   here is instead installed as a CHILD view controller of the top-most
-//   ancestor, i.e. plain view hierarchy work that never touches the responder
-//   chain. It also means a `.ultraThinMaterial` in the content blurs the live app
-//   underneath, since everything stays in one window.
-// * The content is bottom-anchored against the ANCHOR's bottom edge, published as
-//   `additionalSafeAreaInsets.bottom`. Callers attach this to the view that
-//   already follows the keyboard (the composer), so the overlay lands exactly
-//   where that view sits — above the keyboard — without depending on a fresh
-//   hosting controller inheriting an already-visible keyboard's frame. The
-//   content ignores the keyboard safe-area region so the two never stack.
+//   lives in its OWN `UIWindow` instead, with the hosting controller as that
+//   window's root. The window is never made key, so the composer keeps its
+//   first responder; and because the host is a proper window root (not a
+//   detached or foreign-subview controller), UIKit menus and sheets can present
+//   from inside the overlay without "detached view controller" warnings.
+// * The window sits just above the app's windows and below the system keyboard
+//   window, so a `.ultraThinMaterial` in the content blurs the live app while
+//   the keyboard stays visible on top.
+// * Content lays out against the full screen (a ZStack centers by default), so
+//   the overlay reads the same wherever it was launched from. The keyboard
+//   safe-area region is ignored to keep that placement stable whether or not
+//   the keyboard is up.
 // * The content runs in its own `UIHostingController`, so it inherits UIKit
 //   traits (color scheme, Dynamic Type) but NOT the SwiftUI environment of the
 //   anchoring view. Pass anything else it needs in explicitly.
-// * Appearance and dismissal animations belong to the content: it is inserted and
-//   removed without animation, so it should fade/settle itself in `onAppear` and
-//   animate out before calling its dismiss callback.
+// * Appearance and dismissal animations belong to the content: it is inserted
+//   and removed without animation, so it should fade/settle itself in
+//   `onAppear` and animate out before calling its dismiss callback.
 
 import SwiftUI
 import UIKit
@@ -39,8 +41,8 @@ extension View {
     ) -> some View {
         background(
             FullScreenOverlayAnchor(isPresented: isPresented) {
-                // The overlay is positioned from the anchor's geometry, so
-                // SwiftUI must not add its own keyboard inset on top.
+                // Keep the overlay's placement identical with and without the
+                // keyboard: no SwiftUI keyboard avoidance inside the window.
                 content().ignoresSafeArea(.keyboard)
             }
             .allowsHitTesting(false)
@@ -78,6 +80,7 @@ private struct FullScreenOverlayAnchor<OverlayContent: View>: UIViewControllerRe
 // MARK: - Anchor controller
 
 final class FullScreenOverlayAnchorController<OverlayContent: View>: UIViewController {
+    private var overlayWindow: UIWindow?
     private var host: FullScreenOverlayHostController<OverlayContent>?
     private var latestContent: OverlayContent?
     private var wantsOverlay = false
@@ -86,15 +89,14 @@ final class FullScreenOverlayAnchorController<OverlayContent: View>: UIViewContr
         let container = UIView()
         container.backgroundColor = .clear
         container.isOpaque = false
-        // Purely a geometry anchor: it must never intercept the host view's taps.
+        // Purely a lifecycle anchor: it must never intercept the host view's taps.
         container.isUserInteractionEnabled = false
         view = container
     }
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        syncBottomInset()
-        // Covers the case where the flag flipped before this view was installed.
+        // Covers the case where the flag flipped before this view had a scene.
         syncOverlay()
     }
 
@@ -110,11 +112,11 @@ final class FullScreenOverlayAnchorController<OverlayContent: View>: UIViewContr
     func removeOverlay() {
         wantsOverlay = false
         latestContent = nil
-        guard let host else { return }
-        self.host = nil
-        host.willMove(toParent: nil)
-        host.view.removeFromSuperview()
-        host.removeFromParent()
+        guard let overlayWindow else { return }
+        self.overlayWindow = nil
+        host = nil
+        overlayWindow.isHidden = true
+        overlayWindow.rootViewController = nil
     }
 
     // MARK: - Installation
@@ -122,63 +124,29 @@ final class FullScreenOverlayAnchorController<OverlayContent: View>: UIViewContr
     private func syncOverlay() {
         if wantsOverlay {
             installOverlayIfNeeded()
-        } else if host != nil {
+        } else if overlayWindow != nil {
             removeOverlay()
         }
     }
 
     private func installOverlayIfNeeded() {
-        guard host == nil, let latestContent, let container = overlayContainer else { return }
+        guard overlayWindow == nil, let latestContent,
+              let windowScene = view.window?.windowScene else { return }
 
         let host = FullScreenOverlayHostController(rootView: latestContent)
-        // Anchor before the first layout so the content never lands at the screen
-        // bottom for one frame and then jumps up.
-        applyBottomInset(to: host)
-
-        container.addChild(host)
-        host.view.translatesAutoresizingMaskIntoConstraints = false
-        container.view.addSubview(host.view)
-        NSLayoutConstraint.activate([
-            host.view.leadingAnchor.constraint(equalTo: container.view.leadingAnchor),
-            host.view.trailingAnchor.constraint(equalTo: container.view.trailingAnchor),
-            host.view.topAnchor.constraint(equalTo: container.view.topAnchor),
-            host.view.bottomAnchor.constraint(equalTo: container.view.bottomAnchor),
-        ])
-        host.didMove(toParent: container)
+        let window = UIWindow(windowScene: windowScene)
+        window.rootViewController = host
+        window.backgroundColor = .clear
+        window.isOpaque = false
+        // Above the app's windows, below the system keyboard window. Showing it
+        // WITHOUT `makeKey` is what keeps the composer's keyboard alive: key
+        // status (and the first responder with it) never moves.
+        window.windowLevel = .normal + 1
+        window.frame = windowScene.coordinateSpace.bounds
+        window.isHidden = false
 
         self.host = host
-    }
-
-    // The top-most ancestor covers the whole surface this view belongs to (the
-    // screen, or the sheet hosting it), so the overlay can blur all of it.
-    private var overlayContainer: UIViewController? {
-        var candidate: UIViewController = self
-        while let parent = candidate.parent {
-            candidate = parent
-        }
-        return candidate === self ? nil : candidate
-    }
-
-    // MARK: - Geometry
-
-    // Publishes the gap between the anchor's bottom edge and the window's, so
-    // bottom-anchored overlay content lands exactly where the anchoring view sits
-    // (i.e. above the keyboard while it is up).
-    private func syncBottomInset() {
-        guard let host else { return }
-        applyBottomInset(to: host)
-    }
-
-    private func applyBottomInset(to host: FullScreenOverlayHostController<OverlayContent>) {
-        guard let window = view.window else { return }
-        let frameInWindow = view.convert(view.bounds, to: window)
-        let gap = max(window.bounds.maxY - frameInWindow.maxY, 0)
-        // `additionalSafeAreaInsets` stacks on the safe area the full-screen host
-        // already inherits, so publish only the extra distance above it —
-        // otherwise the content floats a home-indicator height too high.
-        let inset = max(gap - window.safeAreaInsets.bottom, 0)
-        guard abs(host.additionalSafeAreaInsets.bottom - inset) > 0.5 else { return }
-        host.additionalSafeAreaInsets.bottom = inset
+        overlayWindow = window
     }
 }
 

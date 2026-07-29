@@ -35,6 +35,14 @@ enum NewChatDraftLeadingControl {
     case hamburger(action: () -> Void)
 }
 
+// Where the first send materializes the thread: the local checkout itself, or a
+// managed worktree created at send time (mirrors Codex Desktop's draft mode —
+// nothing is created on disk until the first message goes out).
+private enum NewChatDraftRuntimeMode {
+    case local
+    case newWorktree
+}
+
 struct NewChatDraftView: View {
     @Environment(CodexService.self) private var codex
     @Environment(SubscriptionService.self) private var subscriptions
@@ -62,6 +70,11 @@ struct NewChatDraftView: View {
     @State private var isShowingMacHandoffConfirm = false
     @State private var macHandoffErrorMessage: String?
     @State private var isDeferringSendForFocusDismissal = false
+    @State private var draftRuntimeMode: NewChatDraftRuntimeMode = .local
+    @State private var selectedWorktreeBaseBranch: String?
+    @State private var isShowingCreateBranchPrompt = false
+    @State private var newDraftBranchName = ""
+    @State private var isShowingAllBranchesPicker = false
     @StateObject private var voiceInput = VoiceInputCoordinator()
 
     // UI-only check for layout experiments: true when opened from the general
@@ -76,9 +89,11 @@ struct NewChatDraftView: View {
             if let pendingDraftUserMessage {
                 pendingDraftUserMessageView(pendingDraftUserMessage)
             } else {
+                // Bottom-anchored like Codex Desktop's new-task rows: the
+                // pickers sit just above the composer instead of mid-screen.
                 Spacer(minLength: 0)
                 promptStack
-                Spacer(minLength: 0)
+                    .padding(.bottom, 20)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -160,10 +175,20 @@ struct NewChatDraftView: View {
             DispatchQueue.main.async { [viewModel] in
                 viewModel.clearComposerAutocomplete()
             }
+            // Runtime mode and base branch are per-repo choices; a folder
+            // switch resets them so a stale base can't leak across projects.
+            draftRuntimeMode = .local
+            selectedWorktreeBaseBranch = nil
             refreshDraftGitStateForSelectedProject()
         }
         .sheet(item: $activeSheet) { sheet in
             sheetContent(sheet)
+        }
+        .sheet(isPresented: $isShowingAllBranchesPicker) {
+            allBranchesPickerSheet
+        }
+        .newGitBranchPrompt(isPresented: $isShowingCreateBranchPrompt, branchName: $newDraftBranchName) { branchName in
+            createDraftBranch(branchName)
         }
         .sheet(item: $repositoryDiffPresentation) { presentation in
             TurnDiffSheet(
@@ -262,59 +287,86 @@ struct NewChatDraftView: View {
         dynamicTypeSize.isAccessibilitySize ? 20 : 16
     }
 
-    // Source-specific prompt UI:
-    // - Project-backed General Chat exposes the available-folder context menu
-    //   before first send; global/rootless Chat stays picker-free.
-    // - Folder/project button keeps the normal title because that folder is already implied.
-    // Regression guard: the Projects general-chat empty state must stay as
-    // "What should we work on?" followed by the folder-only picker, while the
-    // global Chats pill stays just "What should we work on?" + input.
+    // Unified draft context for every route (general chat and folder chats):
+    // one place to pick the folder, Local vs new worktree, and the branch —
+    // all through plain context menus, mirroring Codex Desktop's new-task rows.
     private var promptStack: some View {
-        Group {
-            if isFromGeneralChat {
-                generalChatPrompt
-            } else {
-                folderButtonPrompt
-            }
-        }
-        .padding()
+        draftContextRows
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 16)
     }
 
-    private var generalChatPrompt: some View {
-        VStack(spacing: 8) {
-            ChatLogoBadge()
-                .padding(.bottom, 4)
-            Text("What should we work on?")
-                .font(AppFont.title2(weight: .regular))
-                .foregroundStyle(.primary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 28)
+    // Near-label gray: almost white in dark mode, almost black in light —
+    // dimmer than `.primary` but clearly brighter than `.secondary`.
+    private var draftContextRowForeground: Color {
+        Color(.label).opacity(0.88)
+    }
 
-            if showsGeneralFolderPicker {
-                // Visible only for project-backed general chat; rootless global Chat stays bare.
-                folderPickerPill
+    // The Git rows appear only once a folder with an initialized repo is bound;
+    // rootless Quick Chat shows just the folder row so it can become project-backed.
+    private var showsGitContextRows: Bool {
+        hasSelectedProject && viewModel.isGitRepositoryInitialized
+    }
+
+    private var draftContextRows: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            UIKitMenuButton {
+                draftContextRowLabel(title: folderPillLabel) {
+                    pickerIcon
+                }
+            } menu: {
+                folderPickerMenu()
             }
-            Text("Chats are End-to-end encrypted")
-                .font(AppFont.caption())
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 28)
+            .accessibilityLabel("Select folder")
+            .accessibilityValue(folderPillLabel)
+
+            if showsGitContextRows {
+                UIKitMenuButton {
+                    draftContextRowLabel(title: draftRuntimeMode == .newWorktree ? "New worktree" : "Work locally") {
+                        if draftRuntimeMode == .newWorktree {
+                            CodexWorktreeIcon(pointSize: 19)
+                        } else {
+                            RemodexIcon.image(systemName: "laptopcomputer", size: 19)
+                        }
+                    }
+                } menu: {
+                    draftRuntimeModeMenu()
+                }
+                .accessibilityLabel("Where to work")
+                .accessibilityValue(draftRuntimeMode == .newWorktree ? "New worktree" : "Work locally")
+
+                UIKitMenuButton {
+                    draftContextRowLabel(title: draftBranchLabel) {
+                        RemodexIcon.image(systemName: "remodex.git-branch", size: 19)
+                    }
+                } menu: {
+                    draftBranchMenu()
+                }
+                .disabled(viewModel.isSwitchingGitBranch || viewModel.isLoadingGitBranchTargets)
+                .accessibilityLabel(draftRuntimeMode == .newWorktree ? "Worktree base branch" : "Current branch")
+                .accessibilityValue(draftBranchLabel)
+            }
         }
     }
 
-    private var folderButtonPrompt: some View {
-        VStack(spacing: 12) {
-            ChatLogoBadge()
-            ChatEmptyStateTitleBuilder.makeTitle(for: placeholderFolderName)
-                .font(AppFont.title2(weight: .regular))
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 28)
-            Text("Chats are End-to-end encrypted")
-                .font(AppFont.caption())
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 28)
+    // One reference row: fixed icon column, near-label gray, small selector chevron.
+    private func draftContextRowLabel(title: String, @ViewBuilder icon: () -> some View) -> some View {
+        HStack(spacing: 10) {
+            icon()
+                .foregroundStyle(draftContextRowForeground)
+                .frame(width: 24, height: 24)
+            Text(title)
+                .font(AppFont.body(weight: .regular))
+                .foregroundStyle(draftContextRowForeground)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Image(systemName: "chevron.up.chevron.down")
+                .font(AppFont.caption(weight: .semibold))
+                .foregroundStyle(.tertiary)
         }
+        .padding(.vertical, 8)
+        .padding(.horizontal, 8)
+        .contentShape(Rectangle())
     }
 
     private var toolbarTitleLabel: some View {
@@ -435,11 +487,6 @@ struct NewChatDraftView: View {
         selectedProjectPath?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
     }
 
-    private var showsGeneralFolderPicker: Bool {
-        isFromGeneralChat
-            && CodexThreadStartProjectBinding.normalizedProjectPath(route.preferredProjectPath) != nil
-    }
-
     private func handleDraftGitActionSelection(_ action: TurnGitActionKind) {
         guard isDraftGitActionEnabled else { return }
         viewModel.triggerGitAction(
@@ -525,32 +572,7 @@ struct NewChatDraftView: View {
         placeholderFolderName ?? "Quick Chat"
     }
 
-    // Compact inline picker shown below the "What should we work on?" prompt.
-    // Regression guard: this is a context menu of available folders only, not
-    // the full new-chat sheet and not a Quick Chat selector.
-    private var folderPickerPill: some View {
-        UIKitMenuButton {
-            HStack(spacing: 6) {
-                pickerIcon
-                Text(folderPillLabel)
-                    .font(AppFont.title2(weight: .regular))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(AppFont.body(weight: .regular))
-            }
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 10)
-            .contentShape(Capsule())
-        } menu: {
-            folderPickerMenu()
-        }
-        .accessibilityLabel("Select folder")
-        .accessibilityHint("Opens available folders")
-        .accessibilityValue(folderPillLabel)
-    }
-
-    // Builds the small folder-only menu used by the general-chat empty state.
+    // Builds the folder-only context menu used by the draft's folder row.
     private func folderPickerMenu() -> UIMenu {
         guard !projectChoices.isEmpty else {
             return UIMenu(children: [
@@ -582,7 +604,175 @@ struct NewChatDraftView: View {
             .renderingMode(.template)
             .resizable()
             .scaledToFit()
-            .frame(width: 22, height: 22)
+            .frame(width: 21, height: 21)
+    }
+
+    // ─── Runtime + branch rows ───────────────────────────────────
+
+    private func draftRuntimeModeMenu() -> UIMenu {
+        let localAction = UIAction(
+            title: "Work locally",
+            image: RemodexIcon.menuUIImage(systemName: "laptopcomputer"),
+            state: draftRuntimeMode == .local ? .on : .off
+        ) { _ in
+            HapticFeedback.shared.triggerImpactFeedback(style: .light)
+            draftRuntimeMode = .local
+        }
+        let worktreeAction = UIAction(
+            title: "New worktree",
+            image: CodexWorktreeIcon.menuImage(pointSize: 16),
+            state: draftRuntimeMode == .newWorktree ? .on : .off
+        ) { _ in
+            HapticFeedback.shared.triggerImpactFeedback(style: .light)
+            draftRuntimeMode = .newWorktree
+        }
+        return UIMenu(options: [.displayInline, .singleSelection], children: [localAction, worktreeAction])
+    }
+
+    // Local mode reflects (and switches) the checkout; worktree mode only picks
+    // the base branch that the managed worktree will be cut from at first send.
+    private var draftBranchLabel: String {
+        if draftRuntimeMode == .newWorktree,
+           let selectedWorktreeBaseBranch,
+           !selectedWorktreeBaseBranch.isEmpty {
+            return selectedWorktreeBaseBranch
+        }
+        return remodexVisibleBranchLabel(
+            currentBranch: viewModel.currentGitBranch,
+            defaultBranch: viewModel.gitDefaultBranch
+        )
+    }
+
+    // Keeps the context menu scannable; the full searchable picker stays one tap away.
+    private static let maxRecentBranchesInMenu = 7
+
+    private func draftBranchMenu() -> UIMenu {
+        // Default branch first, then the rest in bridge order (most recent first).
+        var orderedBranches = viewModel.availableGitBranchTargets
+        let defaultBranch = viewModel.gitDefaultBranch.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !defaultBranch.isEmpty, let defaultIndex = orderedBranches.firstIndex(of: defaultBranch) {
+            orderedBranches.remove(at: defaultIndex)
+            orderedBranches.insert(defaultBranch, at: 0)
+        }
+        let recentBranches = orderedBranches.prefix(Self.maxRecentBranchesInMenu)
+
+        let branchActions = recentBranches.map { branch in
+            // Any branch can seed a detached worktree, so "open elsewhere" only
+            // blocks selection when it would mean switching the local checkout.
+            let isDisabled = draftRuntimeMode == .local && remodexCurrentBranchSelectionIsDisabled(
+                branch: branch,
+                currentBranch: viewModel.currentGitBranch,
+                gitBranchesCheckedOutElsewhere: viewModel.gitBranchesCheckedOutElsewhere,
+                gitWorktreePathsByBranch: viewModel.gitWorktreePathsByBranch,
+                allowsSelectingCurrentBranch: true
+            )
+            return UIAction(
+                title: branch,
+                image: RemodexIcon.menuUIImage(systemName: "remodex.git-branch"),
+                attributes: isDisabled ? [.disabled] : [],
+                state: branch == draftBranchLabel ? .on : .off
+            ) { _ in
+                selectDraftBranch(branch)
+            }
+        }
+        let recentSection = UIMenu(
+            title: "Recent branches",
+            options: [.displayInline, .singleSelection],
+            children: branchActions
+        )
+
+        var trailingActions: [UIMenuElement] = []
+        if draftRuntimeMode == .local {
+            // Creating a branch only makes sense when it becomes the checkout;
+            // a worktree base must already exist.
+            trailingActions.append(UIAction(
+                title: "New branch...",
+                image: RemodexIcon.menuUIImage(systemName: "plus")
+            ) { _ in
+                newDraftBranchName = "remodex/"
+                isShowingCreateBranchPrompt = true
+            })
+        }
+        if orderedBranches.count > recentBranches.count {
+            trailingActions.append(UIAction(
+                title: "All branches...",
+                image: RemodexIcon.menuUIImage(systemName: "magnifyingglass")
+            ) { _ in
+                isShowingAllBranchesPicker = true
+            })
+        }
+
+        guard !trailingActions.isEmpty else {
+            return recentSection
+        }
+        return UIMenu(children: [
+            recentSection,
+            UIMenu(options: [.displayInline], children: trailingActions),
+        ])
+    }
+
+    private func selectDraftBranch(_ branch: String) {
+        HapticFeedback.shared.triggerImpactFeedback(style: .light)
+        switch draftRuntimeMode {
+        case .newWorktree:
+            selectedWorktreeBaseBranch = branch
+        case .local:
+            guard hasSelectedProject else { return }
+            viewModel.requestSwitchGitBranch(
+                to: branch,
+                codex: codex,
+                workingDirectory: selectedProjectPath,
+                threadID: route.id,
+                activeTurnID: nil
+            )
+        }
+    }
+
+    private func createDraftBranch(_ rawName: String) {
+        let branchName = remodexNormalizedCreatedBranchName(rawName)
+        guard !branchName.isEmpty, hasSelectedProject else { return }
+        viewModel.requestCreateGitBranch(
+            named: branchName,
+            codex: codex,
+            workingDirectory: selectedProjectPath,
+            threadID: route.id,
+            activeTurnID: nil
+        )
+    }
+
+    // Full searchable picker for repos with more branches than the menu shows.
+    private var allBranchesPickerSheet: some View {
+        NavigationStack {
+            TurnGitBranchPickerSheet(
+                branches: viewModel.availableGitBranchTargets.filter { $0 != viewModel.gitDefaultBranch },
+                gitBranchesCheckedOutElsewhere: draftRuntimeMode == .local
+                    ? viewModel.gitBranchesCheckedOutElsewhere
+                    : [],
+                gitWorktreePathsByBranch: viewModel.gitWorktreePathsByBranch,
+                selectedBranch: draftBranchLabel,
+                defaultBranch: remodexSelectableDefaultBranch(
+                    defaultBranch: viewModel.gitDefaultBranch,
+                    availableGitBranchTargets: viewModel.availableGitBranchTargets
+                ),
+                currentBranch: viewModel.currentGitBranch,
+                allowsSelectingCurrentBranch: true,
+                sectionTitle: "Branches",
+                navigationTitle: draftRuntimeMode == .newWorktree ? "Base Branch" : "Current Branch",
+                isLoading: viewModel.isLoadingGitBranchTargets,
+                isSwitching: viewModel.isSwitchingGitBranch,
+                onSelect: { branch in
+                    selectDraftBranch(branch)
+                    isShowingAllBranchesPicker = false
+                },
+                onCreateBranch: { branchName in
+                    createDraftBranch(branchName)
+                    isShowingAllBranchesPicker = false
+                },
+                onRefresh: { refreshDraftGitStateIfNeeded() }
+            )
+            .navigationBarTitleDisplayMode(.inline)
+        }
+        .presentationDetents([.medium, .large])
     }
 
     private var trustedHostName: String? {
@@ -621,8 +811,11 @@ struct NewChatDraftView: View {
                 orderedModelOptions: orderedModelOptions,
                 selectedModelTitle: selectedModelTitle,
                 reasoningDisplayOptions: reasoningDisplayOptions,
-                showsGitControls: hasSelectedProject && viewModel.isGitRepositoryInitialized,
-                isGitBranchSelectorEnabled: isDraftGitActionEnabled && viewModel.isGitRepositoryInitialized,
+                // The draft's folder/runtime/branch rows own Git context now, so
+                // the composer's collapsible cluster stays off to avoid two
+                // competing branch pickers on one screen.
+                showsGitControls: false,
+                isGitBranchSelectorEnabled: false,
                 onSelectGitBranch: { branch in
                     guard hasSelectedProject else { return }
                     viewModel.requestSwitchGitBranch(
@@ -793,6 +986,27 @@ struct NewChatDraftView: View {
         let openThread: @MainActor @Sendable (CodexThread) -> Void = { thread in
             onOpenThread(thread)
         }
+
+        // Worktree mode defers everything to first send: the managed worktree
+        // is cut from the chosen base branch only when a message actually goes out.
+        var makeWorktreeThread: (@MainActor @Sendable () async throws -> CodexThread)?
+        if draftRuntimeMode == .newWorktree,
+           showsGitContextRows,
+           let projectPath = selectedProjectPath {
+            // Match what the branch row shows: explicit pick, else the current
+            // checkout branch; only with neither does the repo default apply.
+            let currentBranch = viewModel.currentGitBranch.trimmingCharacters(in: .whitespacesAndNewlines)
+            let baseBranch = selectedWorktreeBaseBranch ?? (currentBranch.isEmpty ? nil : currentBranch)
+            let codex = codex
+            makeWorktreeThread = {
+                try await WorktreeFlowCoordinator.startNewWorktreeChat(
+                    preferredProjectPath: projectPath,
+                    baseBranch: baseBranch,
+                    codex: codex
+                )
+            }
+        }
+
         Task { @MainActor in
             await Task.yield()
             viewModel.sendNewThread(
@@ -800,6 +1014,7 @@ struct NewChatDraftView: View {
                 subscriptions: subscriptions,
                 draftThreadID: route.id,
                 preferredProjectPath: selectedProjectPath,
+                makeThread: makeWorktreeThread,
                 onThreadCreated: openThread
             )
             isDeferringSendForFocusDismissal = false

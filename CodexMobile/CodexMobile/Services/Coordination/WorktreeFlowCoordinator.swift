@@ -31,13 +31,15 @@ enum WorktreeFlowCoordinator {
         try await codex.startThreadIfReady(preferredProjectPath: preferredProjectPath)
     }
 
-    // Input: Local checkout path for the repo that should host the new worktree chat.
+    // Input: Local checkout path for the repo that should host the new worktree chat,
+    //   plus an optional explicit base branch (defaults to the repo default branch).
     // Output: a brand-new chat opened in a clean managed detached worktree.
     // Side effects: creates a managed worktree, then issues `thread/start` inside it.
     // Rollback: removes the temporary worktree only when chat creation failed before a durable thread exists.
     // Errors: base-branch resolution, Git worktree creation, or `thread/start` failures.
     static func startNewWorktreeChat(
         preferredProjectPath: String,
+        baseBranch requestedBaseBranch: String? = nil,
         codex: CodexService
     ) async throws -> CodexThread {
         let normalizedPreferredProjectPath = try requiredProjectPath(
@@ -45,8 +47,14 @@ enum WorktreeFlowCoordinator {
             message: "A valid local project path is required."
         )
         let gitService = GitActionsService(codex: codex, workingDirectory: normalizedPreferredProjectPath)
-        let branches = try await gitService.branchesWithStatus()
-        let baseBranch = branches.defaultBranch?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let baseBranch: String
+        if let requestedBaseBranch = requestedBaseBranch?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !requestedBaseBranch.isEmpty {
+            baseBranch = requestedBaseBranch
+        } else {
+            let branches = try await gitService.branchesWithStatus()
+            baseBranch = branches.defaultBranch?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        }
         guard !baseBranch.isEmpty else {
             throw WorktreeFlowError(
                 "Could not determine a base branch for the new worktree chat.",
