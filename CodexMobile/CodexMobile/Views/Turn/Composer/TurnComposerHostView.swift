@@ -194,6 +194,7 @@ struct TurnComposerHostView: View {
             onRefreshUsageStatus: {
                 await codex.refreshUsageStatus(threadId: thread.id)
             },
+            onRefreshModelsIfNeeded: { codex.refreshModelsIfNeeded() },
             onSelectAccessMode: codex.setSelectedAccessMode,
             onTapAddImage: { viewModel.openPhotoLibraryPicker(codex: codex) },
             onTapTakePhoto: { viewModel.openCamera(codex: codex) },

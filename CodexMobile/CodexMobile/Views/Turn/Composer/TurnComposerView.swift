@@ -68,6 +68,9 @@ struct TurnComposerView: View {
     let gitState: TurnComposerGitState
     let gitActions: TurnComposerGitActions
     let onRefreshUsageStatus: () async -> Void
+    // Re-requests model/list when the runtime picker opens without options
+    // (bootstrap fetch failed or still in flight). Defaulted for previews.
+    var onRefreshModelsIfNeeded: () -> Void = {}
 
     let onSelectAccessMode: (CodexAccessMode) -> Void
     let onTapAddImage: () -> Void
@@ -423,7 +426,12 @@ struct TurnComposerView: View {
             onSetPlanModeArmed: onSetPlanModeArmed,
             onResumeQueue: onResumeQueue,
             onStopTurn: onStopTurn,
-            onTapRuntimePill: { showsRuntimeOverlay = true },
+            onTapRuntimePill: {
+                // A failed bootstrap fetch would otherwise leave the picker
+                // with no fast-mode toggle and no effort slider forever.
+                onRefreshModelsIfNeeded()
+                showsRuntimeOverlay = true
+            },
             onSend: onSend
         )
     }

@@ -68,6 +68,20 @@ struct ComposerRuntimeSliderOverlay: View {
                         isDisabled: runtimeState.reasoningMenuDisabled,
                         onSelect: runtimeActions.selectReasoning
                     )
+                } else {
+                    // No resolved model yet (bootstrap model/list failed or is
+                    // still in flight): say so instead of showing a bare row.
+                    // Opening the picker retries the fetch, and the slider pops
+                    // in live once options land.
+                    HStack(spacing: 8) {
+                        if isLoadingModels {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                        Text(isLoadingModels ? "Loading model options…" : "Model options unavailable. Check the Mac connection.")
+                            .font(AppFont.subheadline())
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
             .padding(.horizontal, 28)

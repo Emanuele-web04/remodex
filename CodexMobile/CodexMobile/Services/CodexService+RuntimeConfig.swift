@@ -162,6 +162,16 @@ extension CodexService {
         throw lastError ?? CodexServiceError.invalidResponse("\(method) failed with unknown approvalPolicy error")
     }
 
+    // On-demand retry for runtime surfaces: the bootstrap `model/list` can fail
+    // or still be in flight when the user opens a picker, and nothing else
+    // re-requests it until the next reconnect. Cheap no-op once models exist.
+    func refreshModelsIfNeeded() {
+        guard availableModels.isEmpty, !isLoadingModels, isConnected else { return }
+        Task { @MainActor in
+            try? await listModels()
+        }
+    }
+
     func listModels() async throws {
         isLoadingModels = true
         defer { isLoadingModels = false }
