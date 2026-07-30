@@ -174,6 +174,12 @@ function createDesktopOwnerIpcClient({
     if (!socket || socket.destroyed || !isInitialized) {
       return false;
     }
+    // A write to the bridge-owned fallback router is not a delivery when no
+    // Desktop/VSCode peer is attached. Report that state as pending so callers
+    // can replay metadata and snapshots when the router announces a real peer.
+    if (localRouter && !localRouter.hasBroadcastRecipientFor(clientId)) {
+      return false;
+    }
     const envelope = {
       type: "broadcast",
       method,
@@ -722,9 +728,25 @@ function createDesktopIpcRouterServer({
     }
   }
 
+  function hasBroadcastRecipientFor(senderClientId) {
+    const sender = clientsById.get(senderClientId);
+    if (!sender) {
+      // The owner is connected to an external Codex bus rather than this
+      // fallback router; that bus itself is the broadcast recipient.
+      return true;
+    }
+    return Array.from(clientsById.values()).some((client) => (
+      client !== sender
+      && client.initialized
+      && !client.socket.destroyed
+      && normalizeToken(client.type) !== "remodexbridge"
+    ));
+  }
+
   return {
     start,
     close,
+    hasBroadcastRecipientFor,
     get isStarted() {
       return started && !closed;
     },

@@ -199,4 +199,64 @@ test("desktop owner IPC fallback router", { concurrency: false }, async (t) => {
     assert.equal(started, true, "the fallback router should answer on the replaced path");
     assert.match(routerClientId, /^remodex-router-/);
   });
+
+  await t.test("keeps broadcasts pending until a fallback-router peer connects", skipOnWindows, async (t) => {
+    const socketPath = createSocketPath(t);
+    const peerFrames = [];
+    let connectedClientId = "";
+    let peerSocket = null;
+    const client = createDesktopOwnerIpcClient({
+      socketPath,
+      netModule: net,
+      now: () => 1,
+      requestTimeoutMs: 200,
+      reconnectMs: 10,
+      logPrefix: "[test]",
+      onConnected: (clientId) => {
+        connectedClientId = clientId;
+      },
+    });
+    t.after(() => {
+      client.close();
+      peerSocket?.destroy();
+    });
+
+    client.ensureConnected();
+    const ownerConnected = await waitFor(async () => connectedClientId.startsWith("remodex-router-"));
+    assert.equal(ownerConnected, true);
+    assert.equal(
+      client.sendBroadcast("thread-unarchived", { conversationId: "thread-pending" }),
+      false,
+      "the fallback router alone must not count as a recipient"
+    );
+
+    peerSocket = await connectOnce(socketPath);
+    const frameReader = createFrameReader({
+      onFrame: (envelope) => peerFrames.push(envelope),
+    });
+    peerSocket.on("data", (chunk) => frameReader.push(chunk));
+    writeFrame(peerSocket, JSON.stringify({
+      type: "request",
+      requestId: "desktop-init",
+      sourceClientId: "initializing-client",
+      version: 1,
+      method: "initialize",
+      params: { clientType: "vscode" },
+    }));
+    const peerInitialized = await waitFor(async () => peerFrames.some(
+      (frame) => frame.type === "response" && frame.requestId === "desktop-init"
+    ));
+    assert.equal(peerInitialized, true);
+
+    assert.equal(
+      client.sendBroadcast("thread-unarchived", { conversationId: "thread-pending" }),
+      true
+    );
+    const peerReceived = await waitFor(async () => peerFrames.some(
+      (frame) => frame.type === "broadcast"
+        && frame.method === "thread-unarchived"
+        && frame.params?.conversationId === "thread-pending"
+    ));
+    assert.equal(peerReceived, true);
+  });
 });
