@@ -160,6 +160,11 @@ function createDesktopIpcLiveOwner({
   const streamRevisionsByThreadId = new Map();
   const announcedSidebarThreadIds = new Set();
   const sidebarRefreshTimersByThreadId = new Map();
+  // A new rollout can exist as a thread id before Desktop's separate app-server
+  // can return it from thread/list. Keep a bounded materialization replay alive
+  // until the first user item and turn completion prove the rollout was written.
+  const pendingSidebarMaterializationThreadIds = new Set();
+  const replayedSidebarMaterializationThreadIds = new Set();
   const pendingTurnStartParamsByThreadId = new Map();
   const pendingTurnStartEntriesByRequestId = new Map();
   const followerRuntimeOverridesByThreadId = new Map();
@@ -325,6 +330,7 @@ function createDesktopIpcLiveOwner({
       }
       refreshOptimisticFallbackForThread(update.threadId);
       scheduleSnapshot(update.threadId);
+      replaySidebarAnnouncementAfterMaterialization(message, update.threadId);
     }
 
     if (readString(message.method) === "turn/completed") {
@@ -368,6 +374,8 @@ function createDesktopIpcLiveOwner({
     }
     sidebarRefreshTimersByThreadId.clear();
     announcedSidebarThreadIds.clear();
+    pendingSidebarMaterializationThreadIds.clear();
+    replayedSidebarMaterializationThreadIds.clear();
     pendingTurnStartParamsByThreadId.clear();
     pendingTurnStartEntriesByRequestId.clear();
     followerRuntimeOverridesByThreadId.clear();
@@ -677,6 +685,8 @@ function createDesktopIpcLiveOwner({
     announcedReadStateThreadIds.delete(normalizedThreadId);
     cancelSidebarAnnouncement(normalizedThreadId);
     announcedSidebarThreadIds.delete(normalizedThreadId);
+    pendingSidebarMaterializationThreadIds.delete(normalizedThreadId);
+    replayedSidebarMaterializationThreadIds.delete(normalizedThreadId);
     pendingTurnStartParamsByThreadId.delete(normalizedThreadId);
     followerRuntimeOverridesByThreadId.delete(normalizedThreadId);
     for (const [requestId, pending] of Array.from(pendingTurnStartEntriesByRequestId.entries())) {
@@ -729,9 +739,9 @@ function createDesktopIpcLiveOwner({
   }
 
   // Desktop has no watcher on the shared session store, but its webview reacts
-  // to thread-unarchived broadcasts by re-running thread/list. Announcing each
-  // phone-driven thread once (after the rollout has had time to persist) makes
-  // it appear in Desktop's sidebar without the disruptive deep-link bounce.
+  // to thread-unarchived broadcasts by re-running thread/list. The first timed
+  // announcement keeps the common path responsive; materialization events below
+  // replay it because a new rollout id can precede Desktop's thread/list entry.
   function scheduleSidebarAnnouncement(threadId) {
     const normalizedThreadId = readString(threadId);
     if (!normalizedThreadId
@@ -739,6 +749,7 @@ function createDesktopIpcLiveOwner({
       || sidebarRefreshTimersByThreadId.has(normalizedThreadId)) {
       return;
     }
+    pendingSidebarMaterializationThreadIds.add(normalizedThreadId);
     const timer = setTimeout(() => {
       sidebarRefreshTimersByThreadId.delete(normalizedThreadId);
       if (!ownedThreadIds.has(normalizedThreadId)) {
@@ -749,6 +760,42 @@ function createDesktopIpcLiveOwner({
     }, Math.max(0, sidebarRefreshDelayMs));
     timer.unref?.();
     sidebarRefreshTimersByThreadId.set(normalizedThreadId, timer);
+  }
+
+  function replaySidebarAnnouncementAfterMaterialization(message, threadId) {
+    const normalizedThreadId = readString(threadId);
+    if (!normalizedThreadId
+      || !ownedThreadIds.has(normalizedThreadId)
+      || !pendingSidebarMaterializationThreadIds.has(normalizedThreadId)) {
+      return;
+    }
+
+    const method = readString(message?.method);
+    const itemType = readString(message?.params?.item?.type);
+    const turnItems = Array.isArray(message?.params?.turn?.items)
+      ? message.params.turn.items
+      : [];
+    const includesPersistedUserMessage = (
+      (method === "item/started" || method === "item/completed")
+        && itemType === "userMessage"
+    ) || turnItems.some((item) => readString(item?.type) === "userMessage");
+    const turnCompleted = method === "turn/completed";
+    if (!includesPersistedUserMessage && !turnCompleted) {
+      return;
+    }
+
+    cancelSidebarAnnouncement(normalizedThreadId);
+    announcedSidebarThreadIds.add(normalizedThreadId);
+    if (!replayedSidebarMaterializationThreadIds.has(normalizedThreadId) || turnCompleted) {
+      broadcastThreadUnarchived(normalizedThreadId);
+    }
+
+    if (turnCompleted) {
+      pendingSidebarMaterializationThreadIds.delete(normalizedThreadId);
+      replayedSidebarMaterializationThreadIds.delete(normalizedThreadId);
+      return;
+    }
+    replayedSidebarMaterializationThreadIds.add(normalizedThreadId);
   }
 
   function cancelSidebarAnnouncement(threadId) {
