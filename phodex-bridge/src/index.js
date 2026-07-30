@@ -18,6 +18,7 @@ const {
   runMacOSBridgeService,
   startMacOSBridgeService,
   stopMacOSBridgeService,
+  uninstallMacOSBridgeService,
 } = require("./macos-launch-agent");
 
 module.exports = {
@@ -32,6 +33,7 @@ module.exports = {
   runMacOSBridgeService,
   startMacOSBridgeService,
   stopMacOSBridgeService,
+  uninstallMacOSBridgeService,
   resetBridgePairing: resetBridgeTrustState,
   openLastActiveThread,
   watchThreadRollout,

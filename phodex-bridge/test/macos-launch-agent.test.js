@@ -6,11 +6,13 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const { spawnSync } = require("child_process");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const {
   buildLaunchAgentPlist,
+  buildLaunchAgentProgramArguments,
   getMacOSBridgeServiceStatus,
   mergeBridgeStatusForDaemon,
   printMacOSBridgePairingQr,
@@ -20,6 +22,7 @@ const {
   runMacOSBridgeService,
   startMacOSBridgeService,
   stopMacOSBridgeService,
+  uninstallMacOSBridgeService,
 } = require("../src/macos-launch-agent");
 const {
   writeDaemonConfig,
@@ -32,7 +35,70 @@ const {
 
 const TEST_UID = typeof process.getuid === "function" ? process.getuid() : 501;
 
-test("buildLaunchAgentPlist points launchd at run-service with remodex state paths", () => {
+test("buildLaunchAgentProgramArguments keeps installed paths positional in a constant guard", () => {
+  assert.deepEqual(
+    buildLaunchAgentProgramArguments({
+      nodePath: "/usr/local/bin/node",
+      cliPath: "/tmp/remodex/bin/remodex.js",
+    }),
+    [
+      "/bin/sh",
+      "-c",
+      'if [ ! -x "$1" ] || [ ! -f "$2" ]; then exit 0; fi; exec "$1" "$2" run-service',
+      "com.remodex.bridge",
+      "/usr/local/bin/node",
+      "/tmp/remodex/bin/remodex.js",
+    ]
+  );
+});
+
+test("launch agent guard exits 0 when the saved Node binary is missing", () => {
+  const args = buildLaunchAgentProgramArguments({
+    nodePath: "/nonexistent path/node",
+    cliPath: "/nonexistent path/remodex.js",
+  });
+
+  const result = spawnSync(args[0], args.slice(1), { encoding: "utf8" });
+
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, "");
+});
+
+test("launch agent guard exits 0 when the saved CLI entrypoint is missing", () => {
+  const args = buildLaunchAgentProgramArguments({
+    nodePath: process.execPath,
+    cliPath: "/nonexistent path/remodex.js",
+  });
+
+  const result = spawnSync(args[0], args.slice(1), { encoding: "utf8" });
+
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, "");
+});
+
+test("launch agent guard execs Node with run-service and preserves non-zero exit codes", () => {
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "remodex guard "));
+  try {
+    const fixturePath = path.join(fixtureDir, "fake remodex.js");
+    fs.writeFileSync(
+      fixturePath,
+      "process.exit(process.argv[2] === \"run-service\" ? 42 : 1);\n",
+      "utf8"
+    );
+    const args = buildLaunchAgentProgramArguments({
+      nodePath: process.execPath,
+      cliPath: fixturePath,
+    });
+
+    const result = spawnSync(args[0], args.slice(1), { encoding: "utf8" });
+
+    assert.equal(result.status, 42);
+  } finally {
+    fs.rmSync(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test("buildLaunchAgentPlist wraps run-service in the /bin/sh guard with restart-on-failure only", () => {
   const plist = buildLaunchAgentPlist({
     homeDir: "/Users/tester",
     pathEnv: "/usr/local/bin:/usr/bin",
@@ -44,8 +110,12 @@ test("buildLaunchAgentPlist points launchd at run-service with remodex state pat
   });
 
   assert.match(plist, /<string>com\.remodex\.bridge<\/string>/);
-  assert.match(plist, /<string>run-service<\/string>/);
+  assert.match(plist, /<string>\/bin\/sh<\/string>/);
+  assert.ok(plist.includes("exec &quot;$1&quot; &quot;$2&quot; run-service"));
+  assert.match(plist, /<string>\/usr\/local\/bin\/node<\/string>/);
+  assert.match(plist, /<string>\/tmp\/remodex\/bin\/remodex\.js<\/string>/);
   assert.match(plist, /<key>KeepAlive<\/key>\s*<dict>\s*<key>SuccessfulExit<\/key>\s*<false\/>\s*<\/dict>/);
+  assert.equal(plist.includes("PathState"), false);
   assert.match(plist, /<key>REMODEX_DEVICE_STATE_DIR<\/key>/);
 });
 
@@ -216,7 +286,7 @@ test("startMacOSBridgeService kickstarts the launch agent after bootstrap", () =
   });
 });
 
-test("restartMacOSBridgeService kickstarts an existing LaunchAgent without relay config", async () => {
+test("restartMacOSBridgeService regenerates a legacy plist and re-bootstraps it without relay config", async () => {
   await withTempDaemonEnv(async ({ rootDir }) => {
     const calls = [];
     const env = {
@@ -232,6 +302,8 @@ test("restartMacOSBridgeService kickstarts an existing LaunchAgent without relay
     const result = await restartMacOSBridgeService({
       env,
       platform: "darwin",
+      nodePath: "/usr/local/bin/node",
+      cliPath: "/tmp/remodex/bin/remodex.js",
       execFileSyncImpl(command, args) {
         calls.push([command, args]);
       },
@@ -240,8 +312,15 @@ test("restartMacOSBridgeService kickstarts an existing LaunchAgent without relay
     assert.equal(result.plistPath, plistPath);
     assert.equal(result.pairingSession, null);
     assert.deepEqual(calls, [
+      ["launchctl", ["bootout", `gui/${TEST_UID}`, plistPath]],
+      ["launchctl", ["bootstrap", `gui/${TEST_UID}`, plistPath]],
       ["launchctl", ["kickstart", "-k", `gui/${TEST_UID}/com.remodex.bridge`]],
     ]);
+    const regenerated = fs.readFileSync(plistPath, "utf8");
+    assert.match(regenerated, /<string>\/bin\/sh<\/string>/);
+    assert.match(regenerated, /<string>\/usr\/local\/bin\/node<\/string>/);
+    assert.match(regenerated, /<string>\/tmp\/remodex\/bin\/remodex\.js<\/string>/);
+    assert.equal(readDaemonConfig({ env }), null);
   });
 });
 
@@ -286,9 +365,92 @@ test("restartMacOSBridgeService can wait for the daemon to publish a fresh pairi
 
     assert.equal(result.plistPath, plistPath);
     assert.equal(result.pairingSession?.pairingPayload?.sessionId, "fresh-session");
-    assert.deepEqual(calls, [
-      ["launchctl", ["kickstart", "-k", `gui/${TEST_UID}/com.remodex.bridge`]],
+    assert.deepEqual(calls.map(([command, args]) => [command, args[0]]), [
+      ["launchctl", "bootout"],
+      ["launchctl", "bootstrap"],
+      ["launchctl", "kickstart"],
     ]);
+  });
+});
+
+test("uninstallMacOSBridgeService unloads and terminates the orphan before removing the plist", () => {
+  withTempDaemonEnv(({ rootDir }) => {
+    const env = { ...process.env, UID: String(TEST_UID) };
+    const plistPath = path.join(rootDir, "Library", "LaunchAgents", "com.remodex.bridge.plist");
+    fs.mkdirSync(path.dirname(plistPath), { recursive: true });
+    fs.writeFileSync(plistPath, "<plist />", "utf8");
+    writePairingSession({ sessionId: "session-uninstall" });
+    writeBridgeStatus({ state: "running", connectionStatus: "connected", pid: 4242 });
+
+    const killed = [];
+    const result = uninstallMacOSBridgeService({
+      env,
+      platform: "darwin",
+      execFileSyncImpl(command, args) {
+        assert.equal(fs.existsSync(plistPath), true, "plist must stay on disk until launchd unload completes");
+        if (command === "launchctl") {
+          const error = new Error("Could not find service");
+          error.stderr = Buffer.from("Could not find service");
+          throw error;
+        }
+
+        assert.equal(command, "ps");
+        assert.deepEqual(args, ["-p", "4242", "-o", "command="]);
+        return "/usr/local/bin/node /usr/local/bin/remodex run-service";
+      },
+      processImpl: {
+        pid: 9999,
+        kill(pid, signal) {
+          killed.push([pid, signal]);
+        },
+      },
+    });
+
+    assert.deepEqual(result, { plistPath, removed: true });
+    assert.deepEqual(killed, [[4242, "SIGTERM"]]);
+    assert.equal(fs.existsSync(plistPath), false);
+    assert.equal(readPairingSession(), null);
+    assert.equal(readBridgeStatus(), null);
+  });
+});
+
+test("uninstallMacOSBridgeService is idempotent when the service and plist are already gone", () => {
+  withTempDaemonEnv(({ rootDir }) => {
+    const plistPath = path.join(rootDir, "Library", "LaunchAgents", "com.remodex.bridge.plist");
+
+    const result = uninstallMacOSBridgeService({
+      env: { ...process.env, UID: String(TEST_UID) },
+      platform: "darwin",
+      execFileSyncImpl() {
+        const error = new Error("Could not find service");
+        error.stderr = Buffer.from("Could not find service");
+        throw error;
+      },
+    });
+
+    assert.deepEqual(result, { plistPath, removed: false });
+  });
+});
+
+test("uninstallMacOSBridgeService keeps the plist when bootout fails for a real reason", () => {
+  withTempDaemonEnv(({ rootDir }) => {
+    const plistPath = path.join(rootDir, "Library", "LaunchAgents", "com.remodex.bridge.plist");
+    fs.mkdirSync(path.dirname(plistPath), { recursive: true });
+    fs.writeFileSync(plistPath, "<plist />", "utf8");
+
+    assert.throws(() => {
+      uninstallMacOSBridgeService({
+        env: { ...process.env, UID: String(TEST_UID) },
+        platform: "darwin",
+        execFileSyncImpl() {
+          const error = new Error("Operation not permitted");
+          error.stderr = Buffer.from("Bootout failed: 1: Operation not permitted");
+          throw error;
+        },
+      });
+    }, /Operation not permitted/);
+
+    assert.equal(fs.existsSync(plistPath), true);
   });
 });
 

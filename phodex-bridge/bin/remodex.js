@@ -16,6 +16,7 @@ const {
   startBridge,
   startMacOSBridgeService,
   stopMacOSBridgeService,
+  uninstallMacOSBridgeService,
   resetBridgePairing,
   openLastActiveThread,
   watchThreadRollout,
@@ -33,6 +34,7 @@ const defaultDeps = {
   startBridge,
   startMacOSBridgeService,
   stopMacOSBridgeService,
+  uninstallMacOSBridgeService,
   resetBridgePairing,
   openLastActiveThread,
   watchThreadRollout,
@@ -189,6 +191,27 @@ async function main({
     return;
   }
 
+  if (command === "uninstall-service") {
+    assertMacOSCommand(command, {
+      platform,
+      consoleImpl,
+      exitImpl,
+    });
+    const result = deps.uninstallMacOSBridgeService();
+    emitResult({
+      payload: {
+        ok: true,
+        currentVersion: version,
+        plistPath: result?.plistPath,
+        removed: result?.removed,
+      },
+      message: "[remodex] Removed the macOS bridge service. You can now run `npm uninstall -g remodex`.",
+      jsonOutput,
+      consoleImpl,
+    });
+    return;
+  }
+
   if (command === "status") {
     assertMacOSCommand(command, {
       platform,
@@ -273,9 +296,9 @@ async function main({
 
   consoleImpl.error(`Unknown command: ${command}`);
   consoleImpl.error(
-    "Usage: remodex up | remodex run | remodex start | remodex restart | remodex qr | remodex pair | remodex stop | remodex status | "
+    "Usage: remodex up | remodex run | remodex start | remodex restart | remodex qr | remodex pair | remodex stop | remodex uninstall-service | remodex status | "
     + "remodex reset-pairing | remodex resume | remodex watch [threadId] | remodex --version | "
-    + "append --json to start/restart/qr/pair/stop/status/reset-pairing/resume for machine-readable output"
+    + "append --json to start/restart/qr/pair/stop/uninstall-service/status/reset-pairing/resume for machine-readable output"
   );
   exitImpl(1);
 }

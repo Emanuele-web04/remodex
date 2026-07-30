@@ -140,6 +140,8 @@ To update an existing global install later:
 npm install -g remodex@latest
 ```
 
+If the macOS background service is installed, run `remodex restart` after updating. It refreshes the saved Node/CLI paths and LaunchAgent policy used by `launchd` without replacing your pairing state.
+
 If you only want to try Remodex, you can install it from npm and run it without cloning this repository.
 
 ## Quick Start
@@ -264,10 +266,22 @@ If the service is already loaded, this path refreshes it in place.
 ### `remodex restart`
 
 macOS only. Explicitly restarts the background bridge service without waiting for or printing a QR in the current terminal.
+If a service is already installed, restart regenerates its LaunchAgent plist with the current Node/CLI paths and re-bootstraps it, so run it after updating the package. It does not rewrite the saved relay configuration.
 
 ### `remodex stop`
 
 macOS only. Stops the background bridge service and clears its transient runtime status.
+
+### `remodex uninstall-service`
+
+macOS only. Unloads the background bridge service from `launchd` and removes its LaunchAgent plist. Saved configuration, logs, and trusted-device data in `~/.remodex` are preserved for a future reinstall.
+
+To remove Remodex completely and safely:
+
+```sh
+remodex uninstall-service
+npm uninstall -g remodex
+```
 
 ### `remodex status`
 

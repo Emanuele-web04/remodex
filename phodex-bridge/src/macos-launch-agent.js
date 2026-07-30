@@ -1,7 +1,7 @@
 // FILE: macos-launch-agent.js
-// Purpose: Owns macOS-only launchd install/start/stop/status helpers for the background Remodex bridge.
+// Purpose: Owns macOS-only launchd install/start/stop/uninstall/status helpers for the background Remodex bridge.
 // Layer: CLI helper
-// Exports: start/stop/status helpers plus the launchd service runner used by `remodex up`.
+// Exports: start/stop/uninstall/status helpers plus the launchd service runner used by `remodex up`.
 // Depends on: child_process, fs, os, path, ./bridge, ./daemon-state, ./codex-desktop-refresher, ./qr, ./secure-device-state
 
 const { execFileSync } = require("child_process");
@@ -32,6 +32,23 @@ const {
 const SERVICE_LABEL = "com.remodex.bridge";
 const DEFAULT_PAIRING_WAIT_TIMEOUT_MS = 10_000;
 const DEFAULT_PAIRING_WAIT_INTERVAL_MS = 200;
+
+// If the saved Node binary or CLI entrypoint disappears (npm uninstall, deleted
+// checkout), exit 0 so launchd's KeepAlive.SuccessfulExit=false stops rescheduling
+// the job; `exec` keeps genuine daemon failures non-zero so they still restart.
+const LAUNCH_AGENT_GUARD_SCRIPT = 'if [ ! -x "$1" ] || [ ! -f "$2" ]; then exit 0; fi; exec "$1" "$2" run-service';
+
+// Keeps the guard script constant: the installed paths are shell positionals, never interpolated source.
+function buildLaunchAgentProgramArguments({ nodePath, cliPath }) {
+  return [
+    "/bin/sh",
+    "-c",
+    LAUNCH_AGENT_GUARD_SCRIPT,
+    SERVICE_LABEL,
+    nodePath,
+    cliPath,
+  ];
+}
 
 // Runs the bridge inside launchd while keeping QR rendering in the foreground CLI command.
 function runMacOSBridgeService({ env = process.env, platform = process.platform } = {}) {
@@ -123,17 +140,19 @@ async function startMacOSBridgeService({
   };
 }
 
-// Restarts the installed LaunchAgent without rewriting relay config, useful during local bridge development.
+// Restarts the installed LaunchAgent without rewriting relay config, regenerating the plist so
+// legacy launch definitions pick up the current Node/CLI paths and launch policy.
 async function restartMacOSBridgeService({
   env = process.env,
   platform = process.platform,
   fsImpl = fs,
   execFileSyncImpl = execFileSync,
   osImpl = os,
+  nodePath = process.execPath,
+  cliPath = path.resolve(__dirname, "..", "bin", "remodex.js"),
   waitForPairing = false,
   pairingTimeoutMs = DEFAULT_PAIRING_WAIT_TIMEOUT_MS,
   pairingPollIntervalMs = DEFAULT_PAIRING_WAIT_INTERVAL_MS,
-  ...startOptions
 } = {}) {
   assertDarwinPlatform(platform);
   const plistPath = resolveLaunchAgentPlistPath({ env, osImpl });
@@ -144,10 +163,11 @@ async function restartMacOSBridgeService({
       fsImpl,
       execFileSyncImpl,
       osImpl,
+      nodePath,
+      cliPath,
       waitForPairing,
       pairingTimeoutMs,
       pairingPollIntervalMs,
-      ...startOptions,
     });
   }
 
@@ -156,7 +176,16 @@ async function restartMacOSBridgeService({
     clearPairingSession({ env, fsImpl });
   }
 
-  kickstartLaunchAgent({
+  ensureRemodexStateDir({ env, fsImpl, osImpl });
+  ensureRemodexLogsDir({ env, fsImpl, osImpl });
+  writeLaunchAgentPlist({
+    env,
+    fsImpl,
+    osImpl,
+    nodePath,
+    cliPath,
+  });
+  restartLaunchAgent({
     env,
     execFileSyncImpl,
     plistPath,
@@ -202,6 +231,31 @@ function stopMacOSBridgeService({
   });
   clearPairingSession({ env, fsImpl });
   clearBridgeStatus({ env, fsImpl });
+}
+
+// Removes launchd ownership of the bridge (unload + plist) while preserving daemon config,
+// logs, device trust, and pairing identity for a future reinstall.
+function uninstallMacOSBridgeService({
+  env = process.env,
+  platform = process.platform,
+  execFileSyncImpl = execFileSync,
+  fsImpl = fs,
+  osImpl = os,
+  processImpl = process,
+} = {}) {
+  assertDarwinPlatform(platform);
+  const plistPath = resolveLaunchAgentPlistPath({ env, osImpl });
+  const removed = fsImpl.existsSync(plistPath);
+  // Stop first: a real bootout failure throws here and leaves the plist on disk.
+  stopMacOSBridgeService({
+    env,
+    platform,
+    execFileSyncImpl,
+    fsImpl,
+    processImpl,
+  });
+  fsImpl.rmSync(plistPath, { force: true });
+  return { plistPath, removed };
 }
 
 // Revokes pairing immediately on macOS by stopping the daemon before rotating identity/trust state.
@@ -359,9 +413,9 @@ function buildLaunchAgentPlist({
   <string>${escapeXml(SERVICE_LABEL)}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${escapeXml(nodePath)}</string>
-    <string>${escapeXml(cliPath)}</string>
-    <string>run-service</string>
+${buildLaunchAgentProgramArguments({ nodePath, cliPath })
+    .map((argument) => `    <string>${escapeXml(argument)}</string>`)
+    .join("\n")}
   </array>
   <key>RunAtLoad</key>
   <true/>
@@ -438,31 +492,6 @@ function restartLaunchAgent({
     "-k",
     launchAgentLabelDomain(env),
   ], { stdio: ["ignore", "ignore", "pipe"] });
-}
-
-function kickstartLaunchAgent({
-  env = process.env,
-  execFileSyncImpl = execFileSync,
-  plistPath,
-} = {}) {
-  try {
-    execFileSyncImpl("launchctl", [
-      "kickstart",
-      "-k",
-      launchAgentLabelDomain(env),
-    ], { stdio: ["ignore", "ignore", "pipe"] });
-  } catch {
-    execFileSyncImpl("launchctl", [
-      "bootstrap",
-      launchAgentDomain(env),
-      plistPath,
-    ], { stdio: ["ignore", "ignore", "pipe"] });
-    execFileSyncImpl("launchctl", [
-      "kickstart",
-      "-k",
-      launchAgentLabelDomain(env),
-    ], { stdio: ["ignore", "ignore", "pipe"] });
-  }
 }
 
 function bootoutLaunchAgent({
@@ -660,6 +689,7 @@ function shortFingerprint(value) {
 module.exports = {
   buildTrustedDeviceSummary,
   buildLaunchAgentPlist,
+  buildLaunchAgentProgramArguments,
   getMacOSBridgeServiceStatus,
   mergeBridgeStatusForDaemon,
   printMacOSBridgePairingQr,
@@ -670,4 +700,5 @@ module.exports = {
   runMacOSBridgeService,
   startMacOSBridgeService,
   stopMacOSBridgeService,
+  uninstallMacOSBridgeService,
 };
