@@ -367,10 +367,6 @@ final class TurnViewModel {
             && !isCreatingGitWorktree
     }
 
-    // Cached projected timeline to avoid re-running TurnTimelineReducer on every SwiftUI evaluation.
-    var projectedMessages: [CodexMessage] = []
-    @ObservationIgnored private var threadActivationTask: Task<Void, Never>?
-
     @ObservationIgnored var fileAutocompleteDebounceTask: Task<Void, Never>?
     @ObservationIgnored var skillAutocompleteDebounceTask: Task<Void, Never>?
     @ObservationIgnored var pluginAutocompleteDebounceTask: Task<Void, Never>?
@@ -401,26 +397,8 @@ final class TurnViewModel {
 
     init() {}
 
-    // MARK: - Cached Timeline Projection
-
-    @ObservationIgnored private var lastProjectedThreadID: String?
-    @ObservationIgnored private var lastProjectionChangeToken: Int = -1
-
-    func updateProjectedTimeline(threadID: String, messages: [CodexMessage], changeToken: Int) {
-        guard threadID != lastProjectedThreadID || changeToken != lastProjectionChangeToken else { return }
-        lastProjectedThreadID = threadID
-        lastProjectionChangeToken = changeToken
-        projectedMessages = TurnTimelineReducer.project(messages: messages).messages
-    }
-
-    // MARK: - Cancellable Thread Activation
-
-    func cancelThreadActivation() { threadActivationTask?.cancel() }
-
     // Cancels view-scoped async work before the chat view model disappears.
     func cancelTransientTasks() {
-        threadActivationTask?.cancel()
-        threadActivationTask = nil
         fileAutocompleteDebounceTask?.cancel()
         fileAutocompleteDebounceTask = nil
         skillAutocompleteDebounceTask?.cancel()
@@ -440,17 +418,6 @@ final class TurnViewModel {
         detachedAttachmentLoadIDs.formUnion(attachmentLoadTasks.keys)
         detachedAttachmentLoadIDs.formUnion(loadingAttachmentIDs)
         attachmentLoadTasks.removeAll()
-    }
-
-    func activateThread(threadID: String, codex: CodexService, onComplete: @escaping () -> Void) {
-        threadActivationTask?.cancel()
-        threadActivationTask = Task { @MainActor [weak self] in
-            guard !Task.isCancelled else { return }
-            let didPrepare = await codex.prepareThreadForDisplay(threadId: threadID)
-            guard didPrepare, !Task.isCancelled, codex.activeThreadId == threadID else { return }
-            self?.flushQueueIfPossible(codex: codex, threadID: threadID)
-            onComplete()
-        }
     }
 
     // Normalized composer input reused by send validation and turn creation.

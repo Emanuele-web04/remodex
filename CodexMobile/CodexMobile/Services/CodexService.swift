@@ -670,6 +670,9 @@ final class CodexService {
     @ObservationIgnored var forcedHistoryLoadThreadIDs: Set<String> = []
     // Preserves callers that need "not materialized" reads to keep retrying instead of marking hydrated.
     @ObservationIgnored var deferHydratedMarkForNotMaterializedThreadIDs: Set<String> = []
+    // Coalesces the sidebar/lifecycle open triggers so one tap runs the display
+    // preparation pipeline once instead of racing duplicate resume/history passes.
+    @ObservationIgnored var prepareThreadDisplayTaskByThreadID: [String: Task<Bool, Never>] = [:]
     // Coalesces per-thread resume work so rapid thread switches reuse the same in-flight refresh.
     @ObservationIgnored var threadResumeTaskByThreadID: [String: Task<CodexThread?, Error>] = [:]
     // Remembers which cwd/model pair an in-flight resume is actually targeting.

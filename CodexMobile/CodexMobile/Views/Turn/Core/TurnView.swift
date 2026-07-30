@@ -1748,7 +1748,11 @@ struct TurnView: View {
     private func openThread(_ threadId: String) {
         codex.activeThreadId = threadId
         codex.markThreadAsViewed(threadId)
-        codex.requestImmediateActiveThreadSync(threadId: threadId, forceHistoryRefresh: true)
+        Task { @MainActor in
+            // Coalesces with the destination view's lifecycle trigger so cross-thread
+            // jumps run a single resume/history pipeline instead of a duplicate sync.
+            await codex.prepareThreadForDisplay(threadId: threadId)
+        }
     }
 
     // MARK: - Empty State

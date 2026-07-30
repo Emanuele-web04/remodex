@@ -17,6 +17,15 @@ private struct TurnTimelineRenderCacheState: Equatable {
     var blockInfoInputKey: Int?
 }
 
+// Body cannot commit @State, so a shape-miss projection computed during body
+// lands here and the lifecycle cache commit reuses it instead of projecting the
+// same rows a second time. Keyed on the fine signature: the coarse shape
+// signature alone could hand a stale projection to a text-only delta.
+private final class TurnTimelineTransientProjectionMemo {
+    var signature: TurnTimelineRenderItemsCacheSignature?
+    var result: TurnTimelineRenderProjection.Result?
+}
+
 struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
@@ -74,6 +83,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     @State private var visibleTailCount: Int = initialVisibleTailCount
     @State private var isScrolledToBottom = true
     @State private var renderCacheState = TurnTimelineRenderCacheState()
+    @State private var transientProjectionMemo = TurnTimelineTransientProjectionMemo()
     @State private var scrollSessionThreadID: String?
     @State private var autoScrollMode: TurnScrollOwnership = .followBottom
     @State private var progressiveTailRevealTask: Task<Void, Never>?
@@ -106,12 +116,29 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             return renderCacheState.visibleRenderItems
         }
 
-        return TurnTimelineRenderProjection.project(
+        return transientProjectionResult(for: visibleSlice).renderItems
+    }
+
+    // Computes (or reuses) one projection per fine signature so the body-side
+    // freshness fallback and the lifecycle cache commit never project twice.
+    private func transientProjectionResult(
+        for visibleSlice: ArraySlice<CodexMessage>
+    ) -> TurnTimelineRenderProjection.Result {
+        let signature = renderItemsCacheSignature(for: visibleSlice)
+        if transientProjectionMemo.signature == signature,
+           let memoizedResult = transientProjectionMemo.result {
+            return memoizedResult
+        }
+
+        let result = TurnTimelineRenderProjection.result(
             messages: Array(visibleSlice),
             completedTurnIDs: completedTurnIDs,
             activeTurnID: activeTurnID,
             isThreadRunning: isThreadRunning
         )
+        transientProjectionMemo.signature = signature
+        transientProjectionMemo.result = result
+        return result
     }
 
     private func renderItemsShapeSignature(for messages: ArraySlice<CodexMessage>) -> Int {
@@ -452,12 +479,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         if rebuildRenderItems || rebuildBlockInfo {
             let signature = renderItemsCacheSignature(for: visibleSlice)
             if signature != nextState.renderItemsSignature {
-                let result = TurnTimelineRenderProjection.result(
-                    messages: visibleMessagesArray(),
-                    completedTurnIDs: completedTurnIDs,
-                    activeTurnID: activeTurnID,
-                    isThreadRunning: isThreadRunning
-                )
+                let result = transientProjectionResult(for: visibleSlice)
                 projectionResult = result
                 nextState.visibleRenderItems = result.renderItems
                 nextState.renderItemsSignature = signature

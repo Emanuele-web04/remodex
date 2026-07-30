@@ -38,6 +38,7 @@ extension CodexService {
         messagePersistence.save(messagesByThread, macDeviceId: normalizedMacDeviceId)
         composerDraftPersistence.save(composerDraftsByThreadID, macDeviceId: normalizedMacDeviceId)
         aiChangeSetPersistence.save(Array(aiChangeSetsByID.values), macDeviceId: normalizedMacDeviceId)
+        persistDesktopMirroredRunningSnapshot(macDeviceId: normalizedMacDeviceId)
     }
 
     // Loads messages, drafts, and assistant change-set metadata for the provided Mac namespace.
@@ -79,6 +80,7 @@ extension CodexService {
             recentActivityLineByThread.removeAll()
             contextWindowUsageByThread.removeAll()
             removeAllThreadTimelineState()
+            restoreRecentDesktopMirroredRunningSnapshot(macDeviceId: normalizedMacDeviceId)
 
             let loadedChangeSets = aiChangeSetPersistence.load(
                 macDeviceId: normalizedMacDeviceId,
@@ -498,6 +500,59 @@ extension CodexService {
 private extension CodexService {
     static var legacyLocalStateMigrationCompletedDefaultsKey: String {
         "codex.macScopedLocalState.legacyMigrationCompleted"
+    }
+
+    static var desktopMirroredRunningSnapshotDefaultsKey: String {
+        "codex.macScopedLocalState.desktopMirroredRunning"
+    }
+
+    // A restored running hint older than this is more likely a finished run than a
+    // live one; the stale-snapshot grace policy still clears any wrong restore.
+    static var desktopMirroredRunningRestoreMaxAge: TimeInterval { 180 }
+
+    // Saves which threads were still desktop-mirrored running (with last activity)
+    // so a relaunch can paint the live indicator instead of a finished-looking
+    // timeline that visibly "restarts" once mirroring reattaches.
+    func persistDesktopMirroredRunningSnapshot(macDeviceId: String?) {
+        let key = macScopedDefaultsKey(
+            Self.desktopMirroredRunningSnapshotDefaultsKey,
+            macDeviceId: macDeviceId
+        )
+        guard !desktopMirroredRunningThreadIDs.isEmpty else {
+            defaults.removeObject(forKey: key)
+            return
+        }
+
+        let snapshot = desktopMirroredRunningThreadIDs.reduce(into: [String: Double]()) { partialResult, threadId in
+            let activityAt = desktopMirroredRunningLastActivityAtByThread[threadId] ?? Date()
+            partialResult[threadId] = activityAt.timeIntervalSince1970
+        }
+        defaults.set(snapshot, forKey: key)
+    }
+
+    // Restores only recently active mirrored runs; the regular turn-state refresh
+    // and stale-snapshot policy reconcile the flag once the connection is live.
+    func restoreRecentDesktopMirroredRunningSnapshot(macDeviceId: String?) {
+        let key = macScopedDefaultsKey(
+            Self.desktopMirroredRunningSnapshotDefaultsKey,
+            macDeviceId: macDeviceId
+        )
+        guard let stored = defaults.dictionary(forKey: key) as? [String: Double] else {
+            return
+        }
+
+        let now = Date()
+        for (threadId, activityEpoch) in stored {
+            let activityAt = Date(timeIntervalSince1970: activityEpoch)
+            guard now.timeIntervalSince(activityAt) <= Self.desktopMirroredRunningRestoreMaxAge,
+                  messagesByThread[threadId] != nil else {
+                continue
+            }
+            desktopMirroredRunningThreadIDs.insert(threadId)
+            desktopMirroredRunningStaleSnapshotCountsByThread[threadId] = 0
+            desktopMirroredRunningLastActivityAtByThread[threadId] = activityAt
+            markMirroredRunningCatchupNeeded(for: threadId)
+        }
     }
 
     func withApplyingMacScopedState(_ work: () -> Void) {

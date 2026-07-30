@@ -1205,7 +1205,9 @@ struct ContentView: View {
                 codex.lastErrorMessage = codex.userFacingTurnErrorMessageForFooter(from: error)
             }
 
-            codex.requestImmediateActiveThreadSync(threadId: thread.id, forceHistoryRefresh: true)
+            // Coalesces with the TurnView lifecycle trigger so one tap runs a single
+            // resume/history pipeline instead of racing a duplicate forced sync.
+            await codex.prepareThreadForDisplay(threadId: codex.activeThreadId ?? thread.id)
         }
     }
 

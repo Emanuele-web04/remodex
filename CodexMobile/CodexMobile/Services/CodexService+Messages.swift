@@ -235,7 +235,11 @@ extension CodexService {
 
         let state = ThreadTimelineState(threadID: threadId)
         threadTimelineStateByThread[threadId] = state
-        refreshThreadTimelineState(for: threadId)
+        // The first materialization must not be starved by an open catch-up burst:
+        // build from whatever is already cached so a reopened chat paints instantly
+        // instead of showing "Loading chat" until the burst flushes. The flush still
+        // rebuilds unconditionally once replay settles.
+        refreshThreadTimelineState(for: threadId, ignoringCatchUpBurstSuppression: true)
         return state
     }
 
@@ -934,8 +938,24 @@ extension CodexService {
     }
 
     // Sets the active thread and lazily hydrates old messages from server history.
+    // Concurrent calls for the same thread (sidebar open + view lifecycle) coalesce
+    // into a single pipeline run instead of racing duplicate resume/history passes.
     @discardableResult
     func prepareThreadForDisplay(threadId: String) async -> Bool {
+        if let existingTask = prepareThreadDisplayTaskByThreadID[threadId] {
+            return await existingTask.value
+        }
+
+        let task = Task<Bool, Never> { @MainActor [weak self] in
+            guard let self else { return false }
+            defer { self.prepareThreadDisplayTaskByThreadID.removeValue(forKey: threadId) }
+            return await self.performPrepareThreadForDisplay(threadId: threadId)
+        }
+        prepareThreadDisplayTaskByThreadID[threadId] = task
+        return await task.value
+    }
+
+    private func performPrepareThreadForDisplay(threadId: String) async -> Bool {
         activeThreadId = threadId
         markThreadAsViewed(threadId)
         // Opening a thread mid-mirror-batch must render immediately: settle any
@@ -957,9 +977,21 @@ extension CodexService {
             return true
         }
 
+        // Under pagination the resume below intentionally excludes turns, so nothing in
+        // the resume/catch-up chain contributes to first paint. Start the history fetch
+        // now so the first page races those lifecycle round trips instead of queueing
+        // behind them; loadThreadHistoryIfNeeded coalesces any follow-up force callers.
+        let shouldDeferHeavyHydration = shouldDeferHeavyDisplayHydration(threadId: threadId)
+        var earlyHistoryTask: Task<Void, Never>?
+        if supportsTurnPagination, !shouldDeferHeavyHydration {
+            earlyHistoryTask = Task { @MainActor [weak self] in
+                await self?.syncThreadHistory(threadId: threadId, force: true)
+            }
+        }
+
         // Reopening a huge, already-materialized chat should prefer local persisted rows over
         // an immediate full resume/read pass, otherwise one tap can freeze the app on-device.
-        if shouldDeferHeavyDisplayHydration(threadId: threadId) {
+        if shouldDeferHeavyHydration {
             // Large chats still need one lightweight turn-state ping so reconnect can rediscover
             // a live run before we decide to trust the local persisted transcript.
             didRefreshRunningState = await refreshInFlightTurnState(threadId: threadId)
@@ -1018,7 +1050,13 @@ extension CodexService {
             return false
         }
         if shouldRequestImmediateSync {
-            requestImmediateActiveThreadSync(threadId: threadId, forceHistoryRefresh: true)
+            // When the paginated history fetch is already in flight from the start of
+            // this open, only refresh lifecycle/thread state instead of forcing a
+            // second fetch once the first one finishes.
+            requestImmediateActiveThreadSync(
+                threadId: threadId,
+                forceHistoryRefresh: earlyHistoryTask == nil
+            )
         }
         return true
     }
@@ -5778,11 +5816,14 @@ extension CodexService {
     }
 
     // Rebuilds one thread's render snapshot from service-owned caches after any timeline mutation.
-    func refreshThreadTimelineState(for threadId: String) {
+    func refreshThreadTimelineState(
+        for threadId: String,
+        ignoringCatchUpBurstSuppression: Bool = false
+    ) {
         // While a catch-up burst is applying replayed history, defer the rebuild
         // so the reopened thread settles in one pass at flush time
         // (finishTimelineCatchUpBurst always rebuilds unconditionally).
-        if timelineCatchUpBurstThreadIDs.contains(threadId) {
+        if !ignoringCatchUpBurstSuppression, timelineCatchUpBurstThreadIDs.contains(threadId) {
             return
         }
         let state = timelineState(for: threadId)

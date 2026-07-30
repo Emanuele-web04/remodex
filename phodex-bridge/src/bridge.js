@@ -456,6 +456,27 @@ function createThreadTurnsListFastPageCoordinator({
       canonicalRequest,
       fetchCanonical
     );
+    let timeoutId = null;
+    const deadline = new Promise((resolveDeadline) => {
+      timeoutId = setTimeoutImpl(() => resolveDeadline({ deadline: true }), waitMs);
+    });
+    const first = await Promise.race([canonicalOutcomePromise, deadline]);
+    if (timeoutId != null) {
+      clearTimeoutImpl(timeoutId);
+    }
+
+    if (first?.ok && !isEmptyTurnsListResponse(first.response)) {
+      forgetCanonicalFirstPage(canonicalFirstPageCacheKey, canonicalOutcomePromise);
+      return {
+        source: "canonical",
+        response: rebindThreadTurnsListResponseId(first.response, request.id),
+        usesJsonl: false,
+      };
+    }
+
+    // Deadline hit, canonical error, or an empty canonical page: only now pay
+    // for the synchronous rollout read, so a fast canonical response never
+    // blocks behind it and never delays itself.
     let jsonlFallback = null;
     try {
       jsonlFallback = await readJsonl(request);
@@ -477,38 +498,6 @@ function createThreadTurnsListFastPageCoordinator({
         source: "canonical",
         response: rebindThreadTurnsListResponseId(response, request.id),
         usesJsonl: false,
-      };
-    }
-
-    let timeoutId = null;
-    const deadline = new Promise((resolveDeadline) => {
-      timeoutId = setTimeoutImpl(() => resolveDeadline({ deadline: true }), waitMs);
-    });
-    const first = await Promise.race([canonicalOutcomePromise, deadline]);
-    if (timeoutId != null) {
-      clearTimeoutImpl(timeoutId);
-    }
-
-    if (first?.ok && !isEmptyTurnsListResponse(first.response)) {
-      if (shouldPreferJsonlFirstPage(first.response, jsonlFallback.response)) {
-        const token = rememberHandoff(threadId, canonicalOutcomePromise, jsonlFallback);
-        return {
-          source: "jsonl",
-          response: buildJsonlCanonicalHandoffResponse(
-            jsonlFallback.response,
-            request.id,
-            token,
-            firstTurnsListTurnId(jsonlFallback.response)
-          ),
-          usesJsonl: true,
-        };
-      }
-      forgetCanonicalFirstPage(canonicalFirstPageCacheKey, canonicalOutcomePromise);
-      return {
-        source: "canonical",
-        response: rebindThreadTurnsListResponseId(first.response, request.id),
-        usesJsonl: false,
-        jsonlFallback,
       };
     }
 
@@ -637,21 +626,6 @@ function buildJsonlCanonicalHandoffResponse(response, requestId, token, anchorTu
       remodexCanonicalHandoff: true,
     },
   };
-}
-
-function shouldPreferJsonlFirstPage(canonicalResponse, jsonlResponse) {
-  const canonicalResult = canonicalResponse?.result;
-  const jsonlResult = jsonlResponse?.result;
-  const canonicalTurnsKey = findTurnsListResultKey(canonicalResult);
-  const jsonlTurnsKey = findTurnsListResultKey(jsonlResult);
-  if (!canonicalTurnsKey || !jsonlTurnsKey) {
-    return false;
-  }
-  const jsonlTurn = jsonlResult[jsonlTurnsKey]?.[0];
-  const jsonlTurnId = turnListTurnIdentifier(jsonlTurn);
-  return Boolean(jsonlTurnId)
-    && !canonicalResult[canonicalTurnsKey].some((turn) => turnListTurnIdentifier(turn) === jsonlTurnId)
-    && shouldMergeLatestJsonlTurn(jsonlTurn);
 }
 
 function firstTurnsListTurnId(response) {
@@ -1382,15 +1356,7 @@ function startBridge({
           }),
           readJsonl: (jsonlRequest) => maybeBuildJsonlThreadTurnsListFallback(jsonlRequest, null),
         });
-        let responsePayload = selection.response;
-        if (selection.source === "canonical" && selection.jsonlFallback?.response?.result) {
-          responsePayload = maybeMergeLatestJsonlTurnIntoTurnsListResponse(
-            request,
-            selection.response,
-            selection.jsonlFallback.response.result
-          ) || selection.response;
-        }
-        sendBridgeManagedThreadTurnsListResponse(request, responsePayload, respondOnce, {
+        sendBridgeManagedThreadTurnsListResponse(request, selection.response, respondOnce, {
           skipJsonlArtifactAugmentation: selection.usesJsonl,
         });
       } catch (error) {

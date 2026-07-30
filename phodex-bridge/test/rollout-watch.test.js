@@ -14,6 +14,8 @@ const { setTimeout: wait } = require("node:timers/promises");
 const {
   contextUsageFromTokenCountPayload,
   createThreadRolloutActivityWatcher,
+  findRecentRolloutFileForContextRead,
+  invalidateRolloutLookupCache,
   readLatestContextWindowUsage,
 } = require("../src/rollout-watch");
 
@@ -269,11 +271,87 @@ test("readLatestContextWindowUsage returns null when no rollout matches the requ
   assert.equal(result, null);
 });
 
+test("context lookup reuses the candidate-list walk within its TTL", (t) => {
+  const { homeDir, threadDir } = makeTemporarySessionsHome();
+  const sessionsRoot = path.join(homeDir, "sessions");
+  writeRolloutFile(path.join(threadDir, "rollout-2026-03-05T13-25-27-thread-a.jsonl"), {
+    turnId: "turn-a",
+    tokensUsed: 111,
+    tokenLimit: 1_000,
+  });
+  const trackedFs = createTrackedFs();
+  t.after(() => {
+    invalidateRolloutLookupCache({ fsModule: trackedFs });
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  findRecentRolloutFileForContextRead(sessionsRoot, {
+    threadId: "missing-a",
+    fsModule: trackedFs,
+    now: () => 1_000,
+  });
+  const readsAfterFirstLookup = trackedFs.readdirCalls;
+  findRecentRolloutFileForContextRead(sessionsRoot, {
+    threadId: "missing-b",
+    fsModule: trackedFs,
+    now: () => 2_999,
+  });
+  assert.equal(trackedFs.readdirCalls, readsAfterFirstLookup);
+
+  findRecentRolloutFileForContextRead(sessionsRoot, {
+    threadId: "missing-c",
+    fsModule: trackedFs,
+    now: () => 3_000,
+  });
+  assert.ok(trackedFs.readdirCalls > readsAfterFirstLookup);
+});
+
+test("context lookup negative memo skips a repeated tree walk", (t) => {
+  const { homeDir, threadDir } = makeTemporarySessionsHome();
+  const sessionsRoot = path.join(homeDir, "sessions");
+  writeRolloutFile(path.join(threadDir, "rollout-2026-03-05T13-25-27-thread-a.jsonl"), {
+    turnId: "turn-a",
+    tokensUsed: 111,
+    tokenLimit: 1_000,
+  });
+  const trackedFs = createTrackedFs();
+  t.after(() => {
+    invalidateRolloutLookupCache({ fsModule: trackedFs });
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  assert.equal(findRecentRolloutFileForContextRead(sessionsRoot, {
+    threadId: "missing-thread",
+    fsModule: trackedFs,
+    now: () => 1_000,
+  }), null);
+  const readsAfterFirstLookup = trackedFs.readdirCalls;
+  invalidateRolloutLookupCache({ root: sessionsRoot, fsModule: trackedFs });
+
+  assert.equal(findRecentRolloutFileForContextRead(sessionsRoot, {
+    threadId: "missing-thread",
+    fsModule: trackedFs,
+    now: () => 1_100,
+  }), null);
+  assert.equal(trackedFs.readdirCalls, readsAfterFirstLookup);
+});
+
 function makeTemporarySessionsHome() {
   const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "rollout-watch-"));
   const threadDir = path.join(homeDir, "sessions", "2026", "03", "12");
   fs.mkdirSync(threadDir, { recursive: true });
   return { homeDir, threadDir };
+}
+
+function createTrackedFs() {
+  return {
+    ...fs,
+    readdirCalls: 0,
+    readdirSync(...args) {
+      this.readdirCalls += 1;
+      return fs.readdirSync(...args);
+    },
+  };
 }
 
 function writeRolloutFile(filePath, { turnId, tokensUsed, tokenLimit }) {

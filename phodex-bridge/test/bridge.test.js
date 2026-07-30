@@ -9,6 +9,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { invalidateRolloutLookupCache } = require("../src/rollout-watch");
 const {
   annotateTurnStateProbeWithMirrorActiveTurn,
   buildThreadTurnsListRelaySanitizeContext,
@@ -393,6 +394,7 @@ test("thread turns-list first-page singleflight isolates request shapes and rebi
 
 test("thread turns-list fast page keeps an immediate canonical response authoritative", async () => {
   let deadlineWasScheduled = false;
+  let jsonlReads = 0;
   const coordinator = createThreadTurnsListFastPageCoordinator({
     setTimeoutImpl() {
       deadlineWasScheduled = true;
@@ -412,19 +414,23 @@ test("thread turns-list fast page keeps an immediate canonical response authorit
         nextCursor: null,
       },
     }),
-    readJsonl: async () => ({
-      response: {
-        id: "req-fast-canonical",
-        result: {
-          data: [{ id: "turn-jsonl", items: [{ id: "jsonl-item", type: "user_message", role: "user" }] }],
-          nextCursor: "remodex-jsonl-fallback-older-unavailable",
+    readJsonl: async () => {
+      jsonlReads += 1;
+      return {
+        response: {
+          id: "req-fast-canonical",
+          result: {
+            data: [{ id: "turn-jsonl", items: [{ id: "jsonl-item", type: "user_message", role: "user" }] }],
+            nextCursor: "remodex-jsonl-fallback-older-unavailable",
+          },
         },
-      },
-      usesJsonl: true,
-    }),
+        usesJsonl: true,
+      };
+    },
   });
 
   assert.equal(deadlineWasScheduled, true);
+  assert.equal(jsonlReads, 0);
   assert.equal(selection.source, "canonical");
   assert.equal(selection.response.result.data[0].id, "turn-canonical");
 });
@@ -496,7 +502,8 @@ test("thread turns-list refuses an assistant and file-change-only running JSONL 
   assert.equal(selection.response.result.data[0].id, "turn-canonical");
 });
 
-test("thread turns-list fast page prefers a newer running JSONL turn over stale canonical history", async () => {
+test("thread turns-list fast page does not build JSONL when canonical wins the deadline", async () => {
+  let jsonlReads = 0;
   const coordinator = createThreadTurnsListFastPageCoordinator({
     createToken: () => "newer-jsonl-token",
     setTimeoutImpl: () => 1,
@@ -514,21 +521,24 @@ test("thread turns-list fast page prefers a newer running JSONL turn over stale 
         nextCursor: "cursor-after-canonical-older",
       },
     }),
-    readJsonl: async () => ({
-      response: {
-        id: "req-newer-jsonl",
-        result: {
-          data: [{ id: "turn-jsonl-running", status: "running", items: [{ id: "jsonl-running-item", type: "user_message", role: "user" }] }],
-          nextCursor: "remodex-jsonl-fallback-older-unavailable",
+    readJsonl: async () => {
+      jsonlReads += 1;
+      return {
+        response: {
+          id: "req-newer-jsonl",
+          result: {
+            data: [{ id: "turn-jsonl-running", status: "running", items: [{ id: "jsonl-running-item", type: "user_message", role: "user" }] }],
+            nextCursor: "remodex-jsonl-fallback-older-unavailable",
+          },
         },
-      },
-      usesJsonl: true,
-    }),
+        usesJsonl: true,
+      };
+    },
   });
 
-  assert.equal(selection.source, "jsonl");
-  assert.equal(selection.response.result.data[0].id, "turn-jsonl-running");
-  assert.equal(selection.response.result.remodexCanonicalHandoff, true);
+  assert.equal(jsonlReads, 0);
+  assert.equal(selection.source, "canonical");
+  assert.equal(selection.response.result.data[0].id, "turn-canonical-older");
 });
 
 test("thread turns-list handoff never returns newer canonical turns as older history", async () => {
@@ -3113,7 +3123,7 @@ test("sanitizeThreadHistoryImagesForRelay restores JSONL cwd without file change
   assert.equal(sanitized.result.thread.turns[0].items.length, 1);
 });
 
-test("sanitizeThreadHistoryImagesForRelay refreshes JSONL cwd when a newer same-thread rollout appears", (t) => {
+test("sanitizeThreadHistoryImagesForRelay refreshes JSONL cwd after a newer rollout invalidates lookup", (t) => {
   const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-history-cwd-newer-"));
   const previousCodexHome = process.env.CODEX_HOME;
   process.env.CODEX_HOME = codexHome;
@@ -3145,6 +3155,10 @@ test("sanitizeThreadHistoryImagesForRelay refreshes JSONL cwd when a newer same-
     );
     const timestamp = new Date(mtime);
     fs.utimesSync(rolloutPath, timestamp, timestamp);
+    invalidateRolloutLookupCache({
+      root: path.join(codexHome, "sessions"),
+      threadId,
+    });
   };
 
   const readThreadCwd = () => JSON.parse(sanitizeThreadHistoryImagesForRelay(JSON.stringify({

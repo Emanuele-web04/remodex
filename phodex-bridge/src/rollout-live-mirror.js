@@ -56,6 +56,8 @@ function createRolloutLiveMirrorController({
   now = () => Date.now(),
   setIntervalFn = setInterval,
   clearIntervalFn = clearInterval,
+  setImmediateFn = setImmediate,
+  clearImmediateFn = clearImmediate,
   pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
   lookupTimeoutMs = DEFAULT_LOOKUP_TIMEOUT_MS,
   idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS,
@@ -110,6 +112,8 @@ function createRolloutLiveMirrorController({
       now,
       setIntervalFn,
       clearIntervalFn,
+      setImmediateFn,
+      clearImmediateFn,
       pollIntervalMs,
       lookupTimeoutMs,
       idleTimeoutMs,
@@ -157,6 +161,8 @@ function createThreadRolloutLiveMirror({
   now,
   setIntervalFn,
   clearIntervalFn,
+  setImmediateFn,
+  clearImmediateFn,
   pollIntervalMs,
   lookupTimeoutMs,
   idleTimeoutMs,
@@ -166,6 +172,7 @@ function createThreadRolloutLiveMirror({
   onStop = () => {},
 }) {
   const startedAt = now();
+  let lookupStartedAt = startedAt;
   const state = createMirrorState(threadId);
 
   let isStopped = false;
@@ -182,7 +189,10 @@ function createThreadRolloutLiveMirror({
   let wasSuppressed = false;
 
   const intervalId = setIntervalFn(tick, pollIntervalMs);
-  tick();
+  let initialTickId = setImmediateFn(() => {
+    initialTickId = null;
+    tick();
+  });
 
   function tick() {
     if (isStopped) {
@@ -191,9 +201,30 @@ function createThreadRolloutLiveMirror({
 
     try {
       const currentTime = now();
+      const suppressedBeforeScan = isSuppressed();
+      if (suppressedBeforeScan) {
+        if (!wasSuppressed) {
+          rolloutPath = null;
+          lastSize = 0;
+          partialLine = "";
+          didBootstrap = false;
+          resetRunState(state);
+        }
+        wasSuppressed = true;
+        return;
+      }
+      if (wasSuppressed) {
+        rolloutPath = null;
+        lastSize = 0;
+        partialLine = "";
+        didBootstrap = false;
+        resetRunState(state);
+        lookupStartedAt = currentTime;
+        wasSuppressed = false;
+      }
 
       if (!rolloutPath) {
-        if (currentTime - startedAt >= lookupTimeoutMs) {
+        if (currentTime - lookupStartedAt >= lookupTimeoutMs) {
           stop();
           return;
         }
@@ -209,20 +240,21 @@ function createThreadRolloutLiveMirror({
 
       const rolloutStat = fsModule.statSync(rolloutPath);
       const fileSize = rolloutStat.size;
-      // While another live source streams this thread the tail keeps consuming
-      // rollout lines with its emissions muted. Compare per-thread activity so
-      // a quiet Desktop turn stays owned, while newer rollout growth can recover
-      // from a stale connected snapshot.
+      // Re-check ownership with the rollout's activity time before bootstrapping.
+      // If another source owns the thread, leave the file untouched until that
+      // ownership expires.
       const suppressed = isSuppressed({
         fallbackActivityAt: Number(rolloutStat.mtimeMs) || 0,
       });
-      if (wasSuppressed && !suppressed && didBootstrap) {
+      if (suppressed) {
+        rolloutPath = null;
         lastSize = 0;
         partialLine = "";
         didBootstrap = false;
         resetRunState(state);
+        wasSuppressed = true;
+        return;
       }
-      wasSuppressed = suppressed;
       if (!didBootstrap) {
         didBootstrap = true;
         bootstrapFromExistingRollout({
@@ -354,6 +386,10 @@ function createThreadRolloutLiveMirror({
     // final partial-line flush must never leak the poll interval.
     isStopped = true;
     clearIntervalFn(intervalId);
+    if (initialTickId != null) {
+      clearImmediateFn(initialTickId);
+      initialTickId = null;
+    }
     if (partialLine) {
       const flushLine = partialLine;
       partialLine = "";
@@ -369,8 +405,8 @@ function createThreadRolloutLiveMirror({
   // Only a healthy, actively-tailed run with a real id counts: synthetic ids
   // are not actionable app-server turn ids, and suppressed/awaiting states
   // mean the mirror does not actually know what is running. While another live
-  // source owns the thread the tail keeps parsing with its emissions muted, so
-  // reporting that turn id would resurrect exactly the state the bridge muted.
+  // source owns the thread the mirror has no parsed file state, so reporting a
+  // turn id would resurrect exactly the state the bridge muted.
   function getActiveTurnId() {
     if (
       isStopped

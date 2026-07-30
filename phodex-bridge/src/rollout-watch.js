@@ -20,6 +20,13 @@ const DEFAULT_CONTEXT_READ_SCAN_BYTES = 512 * 1024;
 const DEFAULT_CONTEXT_READ_CANDIDATE_LIMIT = 128;
 const DEFAULT_RECENT_ROLLOUT_CANDIDATE_LIMIT = 24;
 const DEFAULT_RECENT_ROLLOUT_LOOKBACK_MS = 15 * 60 * 1000;
+const ROLLOUT_CANDIDATE_CACHE_TTL_MS = 2_000;
+const ROLLOUT_THREAD_POSITIVE_CACHE_TTL_MS = 2_000;
+const ROLLOUT_THREAD_NEGATIVE_CACHE_TTL_MS = 1_500;
+const ROLLOUT_LOOKUP_CACHE_MAX_ROOTS = 32;
+const ROLLOUT_THREAD_MEMO_MAX_SIZE = 2_000;
+const ROLLOUT_THREAD_CONTENT_CACHE_MAX_SIZE = 4_000;
+const rolloutLookupCachesByFsModule = new WeakMap();
 
 // Polls one rollout file until it materializes and then reports size growth.
 function createThreadRolloutActivityWatcher({
@@ -350,12 +357,35 @@ function findRecentRolloutFileForContextRead(
     threadLookupScanBytes = DEFAULT_THREAD_LOOKUP_SCAN_BYTES,
   } = {}
 ) {
+  const currentTime = now();
+  const cache = rolloutLookupCacheForFsModule(fsModule);
+  const threadMemoKey = threadId && !turnId
+    ? rolloutThreadMemoKey(root, threadId)
+    : "";
+  if (threadMemoKey) {
+    const positive = cache.positiveThreadPaths.get(threadMemoKey);
+    if (positive) {
+      if (positive.expiresAt > currentTime && fsModule.existsSync(positive.filePath)) {
+        return positive.filePath;
+      }
+      cache.positiveThreadPaths.delete(threadMemoKey);
+    }
+
+    const negativeExpiresAt = cache.negativeThreadLookups.get(threadMemoKey) || 0;
+    if (negativeExpiresAt > currentTime) {
+      return null;
+    }
+    cache.negativeThreadLookups.delete(threadMemoKey);
+  }
+
   const candidates = collectRecentRolloutFiles(root, {
     fsModule,
     candidateLimit,
     modifiedAfterMs: 0,
+    now,
   });
   if (candidates.length === 0) {
+    rememberNegativeThreadLookup(cache, threadMemoKey, currentTime);
     return null;
   }
 
@@ -373,8 +403,10 @@ function findRecentRolloutFileForContextRead(
   if (threadId) {
     const threadScopedRollout = findPreferredRolloutFileForThread(root, candidates, threadId, {
       fsModule,
+      now,
     });
     if (threadScopedRollout) {
+      rememberPositiveThreadPath(cache, threadMemoKey, threadScopedRollout, currentTime);
       return threadScopedRollout;
     }
 
@@ -383,23 +415,33 @@ function findRecentRolloutFileForContextRead(
         fsModule,
         scanBytes: threadLookupScanBytes,
       })) {
+        rememberPositiveThreadPath(cache, threadMemoKey, candidate.filePath, currentTime);
         return candidate.filePath;
       }
     }
   }
 
+  rememberNegativeThreadLookup(cache, threadMemoKey, currentTime);
   return null;
 }
 
 // Keeps the fast "recent files first" path, but falls back to a full-tree scan
 // so older valid thread rollouts still recover after many newer sessions exist.
-function findPreferredRolloutFileForThread(root, candidates, threadId, { fsModule = fs } = {}) {
+function findPreferredRolloutFileForThread(
+  root,
+  candidates,
+  threadId,
+  {
+    fsModule = fs,
+    now = () => Date.now(),
+  } = {}
+) {
   const recentMatch = findMostRecentRolloutFileForThread(candidates, threadId);
   if (recentMatch) {
     return recentMatch;
   }
 
-  return findNewestRolloutFileForThread(root, threadId, { fsModule });
+  return findNewestRolloutFileForThread(root, threadId, { fsModule, now });
 }
 
 // Prefers the newest filename-scoped rollout for a thread instead of the first
@@ -413,45 +455,29 @@ function findMostRecentRolloutFileForThread(candidates, threadId) {
   return match?.filePath || null;
 }
 
-// Scans the whole sessions tree only when the recent candidate window missed the
+// Uses the complete sorted candidate set when the recent slice missed the
 // thread, still preferring the newest matching rollout instead of the first hit.
-function findNewestRolloutFileForThread(root, threadId, { fsModule = fs } = {}) {
-  if (!threadId || !fsModule.existsSync(root)) {
+function findNewestRolloutFileForThread(
+  root,
+  threadId,
+  {
+    fsModule = fs,
+    now = () => Date.now(),
+  } = {}
+) {
+  if (!threadId) {
     return null;
   }
 
-  const stack = [root];
-  let newestMatch = null;
-
-  while (stack.length > 0) {
-    const current = stack.pop();
-    const entries = fsModule.readdirSync(current, { withFileTypes: true });
-
-    for (const entry of entries) {
-      const fullPath = path.join(current, entry.name);
-      if (entry.isDirectory()) {
-        stack.push(fullPath);
-        continue;
-      }
-
-      if (!entry.isFile()
-        || !entry.name.startsWith("rollout-")
-        || !entry.name.endsWith(".jsonl")
-        || !entry.name.includes(threadId)) {
-        continue;
-      }
-
-      const stat = fsModule.statSync(fullPath);
-      if (!newestMatch || stat.mtimeMs > newestMatch.mtimeMs) {
-        newestMatch = {
-          filePath: fullPath,
-          mtimeMs: stat.mtimeMs,
-        };
-      }
-    }
-  }
-
-  return newestMatch?.filePath || null;
+  return findMostRecentRolloutFileForThread(
+    collectRecentRolloutFiles(root, {
+      fsModule,
+      candidateLimit: Number.POSITIVE_INFINITY,
+      modifiedAfterMs: 0,
+      now,
+    }),
+    threadId
+  );
 }
 
 function collectRecentRolloutFiles(
@@ -460,12 +486,33 @@ function collectRecentRolloutFiles(
     fsModule = fs,
     candidateLimit = DEFAULT_RECENT_ROLLOUT_CANDIDATE_LIMIT,
     modifiedAfterMs = 0,
+    now = () => Date.now(),
   } = {}
 ) {
+  const cache = rolloutLookupCacheForFsModule(fsModule);
+  const currentTime = now();
+  const cached = cache.candidatesByRoot.get(root);
+  let candidates = cached?.candidates;
+  if (!cached || currentTime - cached.createdAt >= ROLLOUT_CANDIDATE_CACHE_TTL_MS) {
+    candidates = scanRolloutFiles(root, fsModule);
+    cache.candidatesByRoot.delete(root);
+    cache.candidatesByRoot.set(root, {
+      candidates,
+      createdAt: currentTime,
+    });
+    evictOldestCacheEntries(cache.candidatesByRoot, ROLLOUT_LOOKUP_CACHE_MAX_ROOTS);
+  }
+
+  const filtered = modifiedAfterMs > 0
+    ? candidates.filter(({ mtimeMs }) => mtimeMs >= modifiedAfterMs)
+    : candidates;
+  return filtered.slice(0, candidateLimit);
+}
+
+function scanRolloutFiles(root, fsModule) {
   if (!fsModule.existsSync(root)) {
     return [];
   }
-
   const stack = [root];
   const candidates = [];
 
@@ -487,10 +534,6 @@ function collectRecentRolloutFiles(
       }
 
       const stat = fsModule.statSync(fullPath);
-      if (modifiedAfterMs > 0 && stat.mtimeMs < modifiedAfterMs) {
-        continue;
-      }
-
       candidates.push({
         filePath: fullPath,
         mtimeMs: stat.mtimeMs,
@@ -503,7 +546,7 @@ function collectRecentRolloutFiles(
       || path.basename(rhs.filePath).localeCompare(path.basename(lhs.filePath))
       || rhs.filePath.localeCompare(lhs.filePath)
   );
-  return candidates.slice(0, candidateLimit);
+  return candidates;
 }
 
 function rolloutFileContainsTurnId(
@@ -545,6 +588,11 @@ function rolloutFileContainsThreadId(
   }
 
   const stat = fsModule.statSync(filePath);
+  const cache = rolloutLookupCacheForFsModule(fsModule);
+  const cacheKey = `${filePath}\0${threadId}\0${stat.size}\0${scanBytes}`;
+  if (cache.threadContentMatches.has(cacheKey)) {
+    return cache.threadContentMatches.get(cacheKey);
+  }
   const chunk = readFileSlice(
     filePath,
     Math.max(0, stat.size - Math.min(stat.size, scanBytes)),
@@ -552,15 +600,98 @@ function rolloutFileContainsThreadId(
     fsModule
   );
   if (!chunk) {
+    rememberThreadContentMatch(cache, cacheKey, false);
     return false;
   }
 
-  return (
+  const matches = (
     chunk.includes(`"thread_id":"${threadId}"`)
       || chunk.includes(`"threadId":"${threadId}"`)
       || chunk.includes(`"conversation_id":"${threadId}"`)
       || chunk.includes(`"conversationId":"${threadId}"`)
   );
+  rememberThreadContentMatch(cache, cacheKey, matches);
+  return matches;
+}
+
+function rolloutLookupCacheForFsModule(fsModule) {
+  let cache = rolloutLookupCachesByFsModule.get(fsModule);
+  if (!cache) {
+    cache = {
+      candidatesByRoot: new Map(),
+      positiveThreadPaths: new Map(),
+      negativeThreadLookups: new Map(),
+      threadContentMatches: new Map(),
+    };
+    rolloutLookupCachesByFsModule.set(fsModule, cache);
+  }
+  return cache;
+}
+
+function rolloutThreadMemoKey(root, threadId) {
+  return `${root}\0${threadId}`;
+}
+
+function rememberPositiveThreadPath(cache, memoKey, filePath, currentTime) {
+  if (!memoKey) {
+    return;
+  }
+  cache.negativeThreadLookups.delete(memoKey);
+  cache.positiveThreadPaths.delete(memoKey);
+  cache.positiveThreadPaths.set(memoKey, {
+    filePath,
+    expiresAt: currentTime + ROLLOUT_THREAD_POSITIVE_CACHE_TTL_MS,
+  });
+  evictOldestCacheEntries(cache.positiveThreadPaths, ROLLOUT_THREAD_MEMO_MAX_SIZE);
+}
+
+function rememberNegativeThreadLookup(cache, memoKey, currentTime) {
+  if (!memoKey) {
+    return;
+  }
+  cache.negativeThreadLookups.delete(memoKey);
+  cache.negativeThreadLookups.set(
+    memoKey,
+    currentTime + ROLLOUT_THREAD_NEGATIVE_CACHE_TTL_MS
+  );
+  evictOldestCacheEntries(cache.negativeThreadLookups, ROLLOUT_THREAD_MEMO_MAX_SIZE);
+}
+
+function rememberThreadContentMatch(cache, cacheKey, matches) {
+  cache.threadContentMatches.set(cacheKey, matches);
+  evictOldestCacheEntries(
+    cache.threadContentMatches,
+    ROLLOUT_THREAD_CONTENT_CACHE_MAX_SIZE
+  );
+}
+
+function evictOldestCacheEntries(cache, maxSize) {
+  while (cache.size > maxSize) {
+    cache.delete(cache.keys().next().value);
+  }
+}
+
+function invalidateRolloutLookupCache({
+  root = "",
+  threadId = "",
+  fsModule = fs,
+} = {}) {
+  const cache = rolloutLookupCachesByFsModule.get(fsModule);
+  if (!cache) {
+    return;
+  }
+  if (!root) {
+    rolloutLookupCachesByFsModule.delete(fsModule);
+    return;
+  }
+
+  cache.candidatesByRoot.delete(root);
+  if (!threadId) {
+    return;
+  }
+  const memoKey = rolloutThreadMemoKey(root, threadId);
+  cache.positiveThreadPaths.delete(memoKey);
+  cache.negativeThreadLookups.delete(memoKey);
 }
 
 function formatRolloutLine(rawLine) {
@@ -835,4 +966,5 @@ module.exports = {
   resolveSessionsRoot,
   findRolloutFileForThread,
   findRecentRolloutFileForContextRead,
+  invalidateRolloutLookupCache,
 };

@@ -476,12 +476,88 @@ final class TurnTimelineReducerTests: XCTestCase {
         )
 
         guard items.count == 2,
-              case .toolBurst(let group) = items[1] else {
-            return XCTFail("Expected user plus one live turnless burst")
+              case .commandGroup(let group) = items[1] else {
+            return XCTFail("Expected user plus one grouped turnless tool run")
         }
 
-        XCTAssertEqual(group.hiddenCount, 4)
-        XCTAssertEqual(group.latestMessage?.id, "turnless-tool-5")
+        XCTAssertEqual(group.commandCount, 0)
+        XCTAssertEqual(group.toolCallCount, 5)
+        XCTAssertEqual(
+            group.orderedMessages.map(\.id),
+            ["turnless-tool-1", "turnless-tool-2", "turnless-tool-3", "turnless-tool-4", "turnless-tool-5"]
+        )
+    }
+
+    func testTimelineRenderProjectionGroupsSettledToolCallsWithoutCommands() {
+        // Apply-patch / terminal-write turns often contain no shell command at all;
+        // their settled tool rows must share one disclosure with reasoning
+        // interstitials instead of scattering one standalone row per tool call.
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "user",
+                threadID: "thread",
+                role: .user,
+                text: "Apply the fix",
+                createdAt: now,
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "patch-tool",
+                threadID: "thread",
+                role: .system,
+                kind: .toolActivity,
+                text: "Applied patch",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "patch-item"
+            ),
+            makeMessage(
+                id: "trace",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "Verifying the patch",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "trace-item"
+            ),
+            makeMessage(
+                id: "terminal-tool",
+                threadID: "thread",
+                role: .system,
+                kind: .toolActivity,
+                text: "Wrote to terminal",
+                createdAt: now.addingTimeInterval(3),
+                turnID: "turn-1",
+                itemID: "terminal-item"
+            ),
+            makeMessage(
+                id: "final",
+                threadID: "thread",
+                role: .assistant,
+                text: "Done.",
+                createdAt: now.addingTimeInterval(4),
+                turnID: "turn-1",
+                itemID: "final-item"
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(messages: messages)
+
+        guard items.count == 3,
+              case .message(let user) = items[0],
+              case .commandGroup(let group) = items[1],
+              case .message(let final) = items[2] else {
+            return XCTFail("Expected user, tool-call disclosure, final answer")
+        }
+
+        XCTAssertEqual(user.id, "user")
+        XCTAssertEqual(final.id, "final")
+        XCTAssertEqual(group.commandCount, 0)
+        XCTAssertEqual(group.toolCallCount, 2)
+        XCTAssertEqual(group.orderedMessages.map(\.id), ["patch-tool", "trace", "terminal-tool"])
+        XCTAssertEqual(group.collapsedDetailMessages.map(\.id), ["trace"])
     }
 
     func testTimelineRenderProjectionKeepsUpToFourToolRunsExpanded() {

@@ -274,7 +274,93 @@ test("rollout mirror suppression silences threads owned by another live source",
 
   await wait(30);
   assert.deepEqual(outbound, []);
-  assert.ok(fallbackActivityAt > 0, "source arbitration should receive rollout activity time");
+  assert.equal(fallbackActivityAt, 0, "suppressed mirrors should not stat the rollout");
+});
+
+test("rollout mirror defers its first filesystem scan until after observeInbound returns", (t) => {
+  const { homeDir } = createTemporaryRolloutHome({
+    threadId: "thread-deferred-scan",
+    originator: "Codex Desktop",
+    source: "desktop",
+    lines: [taskStarted("turn-deferred-scan")],
+  });
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = homeDir;
+  const trackedFs = createTrackedMirrorFs();
+  let firstTick = null;
+  const controller = createRolloutLiveMirrorController({
+    sendApplicationResponse() {},
+    fsModule: trackedFs,
+    setIntervalFn() {
+      return 1;
+    },
+    clearIntervalFn() {},
+    setImmediateFn(callback) {
+      firstTick = callback;
+      return 2;
+    },
+    clearImmediateFn() {},
+  });
+  t.after(() => {
+    controller.stopAll();
+    restoreCodexHome(previousCodexHome);
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  controller.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-deferred-scan" },
+  }));
+
+  assert.equal(trackedFs.readdirCalls, 0);
+  assert.ok(firstTick);
+  firstTick();
+  assert.ok(trackedFs.readdirCalls > 0);
+});
+
+test("rollout mirror performs no filesystem scan or bootstrap while suppressed", (t) => {
+  const { homeDir } = createTemporaryRolloutHome({
+    threadId: "thread-suppressed-scan",
+    originator: "Codex Desktop",
+    source: "desktop",
+    lines: [taskStarted("turn-suppressed-scan")],
+  });
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = homeDir;
+  const trackedFs = createTrackedMirrorFs();
+  let firstTick = null;
+  let intervalTick = null;
+  const controller = createRolloutLiveMirrorController({
+    sendApplicationResponse() {},
+    fsModule: trackedFs,
+    shouldSuppressThread: () => true,
+    setIntervalFn(callback) {
+      intervalTick = callback;
+      return 1;
+    },
+    clearIntervalFn() {},
+    setImmediateFn(callback) {
+      firstTick = callback;
+      return 2;
+    },
+    clearImmediateFn() {},
+  });
+  t.after(() => {
+    controller.stopAll();
+    restoreCodexHome(previousCodexHome);
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  controller.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-suppressed-scan" },
+  }));
+  firstTick();
+  intervalTick();
+
+  assert.equal(trackedFs.readdirCalls, 0);
+  assert.equal(trackedFs.statCalls, 0);
+  assert.equal(trackedFs.readCalls, 0);
 });
 
 test("suppression lift re-bootstraps the muted tail so a running thread recovers", async (t) => {
@@ -314,9 +400,8 @@ test("suppression lift re-bootstraps the muted tail so a running thread recovers
     },
   }));
 
-  // The muted tail consumes the whole rollout without mirroring anything, and
-  // must not leak its parsed turn through the turn-state probe either: that is
-  // the very state the bridge decided another live source owns.
+  // A muted tail does not scan or parse the rollout, and must not leak a turn
+  // through the state probe: that is the state another live source owns.
   await wait(30);
   assert.deepEqual(outbound, []);
   assert.equal(controller.getActiveTurnId("thread-unmute"), null);
@@ -2496,6 +2581,27 @@ function createTemporaryRolloutHome({ threadId, originator, source, lines }) {
 
 function appendRolloutLines(rolloutPath, lines) {
   fs.appendFileSync(rolloutPath, `${lines.join("\n")}\n`);
+}
+
+function createTrackedMirrorFs() {
+  return {
+    ...fs,
+    readdirCalls: 0,
+    statCalls: 0,
+    readCalls: 0,
+    readdirSync(...args) {
+      this.readdirCalls += 1;
+      return fs.readdirSync(...args);
+    },
+    statSync(...args) {
+      this.statCalls += 1;
+      return fs.statSync(...args);
+    },
+    readSync(...args) {
+      this.readCalls += 1;
+      return fs.readSync(...args);
+    },
+  };
 }
 
 function taskStarted(turnId) {
