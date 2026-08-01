@@ -4078,6 +4078,32 @@ extension CodexService {
             return
         }
 
+        if let resolvedTurnId,
+           let explicitItemId,
+           let canonicalFinalMessageId = reconcileCanonicalFinalAnswerReplay(
+               threadId: threadId,
+               turnId: resolvedTurnId,
+               providerItemId: explicitItemId,
+               sourceItemKey: normalizedSourceItemKey,
+               assistantPhase: normalizedPhase,
+               canonicalText: trimmedText
+           ) {
+            assistantCompletionFingerprintByThread[threadId] = (text: trimmedText, timestamp: now)
+            _ = mergeGeneratedImageArtifactsIntoAssistantMessage(
+                threadId: threadId,
+                turnId: resolvedTurnId,
+                assistantMessageId: canonicalFinalMessageId
+            )
+            persistMessages()
+            noteAssistantMessage(
+                threadId: threadId,
+                turnId: resolvedTurnId,
+                assistantMessageId: canonicalFinalMessageId
+            )
+            updateCurrentOutput(for: threadId)
+            return
+        }
+
         if let replayTerminalMessageId = absorbAssistantBlockReplayCompletion(
             threadId: threadId,
             turnId: resolvedTurnId,
@@ -4423,8 +4449,83 @@ extension CodexService {
         messagesByThread[threadId]?[messageIndex].sourceItemKey = sourceItemKey
     }
 
-    // A canonical provider id replaces a synthetic mirror id. Move every live lookup and queued
-    // delta to the new identity in the same mutation so a late chunk cannot revive a second row.
+    // Desktop live mirroring and the canonical completion stream can expose the
+    // same final answer under different provider ids. Reconcile only a proven
+    // same-turn final row; commentary and distinct completed prose stay separate.
+    func reconcileCanonicalFinalAnswerReplay(
+        threadId: String,
+        turnId: String,
+        providerItemId: String,
+        sourceItemKey: String?,
+        assistantPhase: String?,
+        canonicalText: String
+    ) -> String? {
+        guard Self.isFinalAnswerAssistantPhase(assistantPhase),
+              let candidateIndex = messagesByThread[threadId]?.indices.reversed().first(where: { index in
+                  guard let candidate = messagesByThread[threadId]?[index],
+                        candidate.role == .assistant,
+                        candidate.kind == .chat,
+                        candidate.turnId == turnId,
+                        candidate.itemId != providerItemId else {
+                      return false
+                  }
+
+                  let textMatches = Self.assistantFinalReplayTextsMatch(
+                      candidate.text,
+                      canonicalText
+                  )
+                  if Self.isFinalAnswerAssistantPhase(candidate.assistantPhase) {
+                      return candidate.isStreaming || textMatches
+                  }
+
+                  let hasProvisionalIdentity = candidate.itemId.map {
+                      CodexSyntheticIdentifiers.isMirrorMintedItemID($0)
+                  } ?? true
+                  return candidate.assistantPhase == nil
+                      && textMatches
+                      && (candidate.isStreaming || hasProvisionalIdentity)
+              }),
+              let existingText = messagesByThread[threadId]?[candidateIndex].text,
+              let messageId = messagesByThread[threadId]?[candidateIndex].id else {
+            return nil
+        }
+
+        messagesByThread[threadId]?[candidateIndex].text = Self.assistantCompletionTextPreservingImages(
+            existingText: existingText,
+            canonicalText: canonicalText
+        )
+        messagesByThread[threadId]?[candidateIndex].isStreaming = false
+        applyAssistantPhaseIfNeeded(
+            threadId: threadId,
+            messageIndex: candidateIndex,
+            assistantPhase: assistantPhase
+        )
+        applyAssistantSourceItemKeyIfNeeded(
+            threadId: threadId,
+            messageIndex: candidateIndex,
+            sourceItemKey: sourceItemKey
+        )
+        promoteAssistantItemIdentity(
+            threadId: threadId,
+            turnId: turnId,
+            messageIndex: candidateIndex,
+            providerItemId: providerItemId
+        )
+        refreshDerivedPlanMetadata(threadId: threadId, messageIndex: candidateIndex)
+        return messageId
+    }
+
+    private static func assistantFinalReplayTextsMatch(_ existing: String, _ incoming: String) -> Bool {
+        guard existing.utf8.count <= MessageTextProcessingPolicy.largeTextByteLimit,
+              incoming.utf8.count <= MessageTextProcessingPolicy.largeTextByteLimit else {
+            return existing == incoming
+        }
+        return existing.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+            == incoming.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+    }
+
+    // A canonical provider id replaces a synthetic or source-rotated live id. Move every live
+    // lookup and queued delta in the same mutation so a late chunk cannot revive a second row.
     func promoteAssistantItemIdentity(
         threadId: String,
         turnId: String,

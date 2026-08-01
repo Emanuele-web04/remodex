@@ -1976,6 +1976,106 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertEqual(assistantMessages.map(\.text), ["First final", "Second current"])
     }
 
+    func testCanonicalFinalAnswerReplacesSourceRotatedLiveRow() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let liveText = """
+        Test completed.
+
+        1. First result
+        2. Second result
+        """
+        let canonicalText = """
+        Test completed.
+
+        1. First result
+
+        2. Second result
+        """
+
+        service.appendAssistantDelta(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: "desktop-live-final",
+            assistantPhase: "final_answer",
+            delta: liveText
+        )
+        service.flushPendingAssistantDeltas(for: threadID, turnId: turnID)
+
+        service.completeAssistantMessage(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: "msg-canonical-final",
+            sourceItemKey: "source-final-answer",
+            assistantPhase: "final_answer",
+            text: canonicalText
+        )
+
+        let assistantMessages = service.messages(for: threadID).filter { $0.role == .assistant }
+        XCTAssertEqual(assistantMessages.count, 1)
+        XCTAssertEqual(assistantMessages.first?.text, canonicalText)
+        XCTAssertEqual(assistantMessages.first?.itemId, "msg-canonical-final")
+        XCTAssertEqual(assistantMessages.first?.sourceItemKey, "source-final-answer")
+        XCTAssertEqual(assistantMessages.first?.assistantPhase, "final_answer")
+        XCTAssertFalse(assistantMessages.first?.isStreaming ?? true)
+    }
+
+    func testCanonicalFinalAnswerReconcilesClosedExactReplayAcrossProviderIDs() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let finalText = "The same canonical final answer arrived through two sources."
+
+        service.completeAssistantMessage(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: "desktop-final-item",
+            assistantPhase: "final_answer",
+            text: finalText
+        )
+        service.completeAssistantMessage(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: "msg-canonical-final",
+            assistantPhase: "final_answer",
+            text: finalText
+        )
+
+        let assistantMessages = service.messages(for: threadID).filter { $0.role == .assistant }
+        XCTAssertEqual(assistantMessages.count, 1)
+        XCTAssertEqual(assistantMessages.first?.itemId, "msg-canonical-final")
+        XCTAssertEqual(assistantMessages.first?.text, finalText)
+    }
+
+    func testDistinctClosedFinalAnswersInSameTurnRemainSeparate() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        service.completeAssistantMessage(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: "first-final-item",
+            assistantPhase: "final_answer",
+            text: "First completed final item."
+        )
+        service.completeAssistantMessage(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: "second-final-item",
+            assistantPhase: "final_answer",
+            text: "A genuinely different completed final item."
+        )
+
+        let assistantMessages = service.messages(for: threadID).filter { $0.role == .assistant }
+        XCTAssertEqual(assistantMessages.map(\.itemId), ["first-final-item", "second-final-item"])
+        XCTAssertEqual(assistantMessages.map(\.text), [
+            "First completed final item.",
+            "A genuinely different completed final item.",
+        ])
+    }
+
     func testUnseenItemCompletionDoesNotStealTurnFallbackStream() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"

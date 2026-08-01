@@ -475,17 +475,19 @@ final class TurnTimelineReducerTests: XCTestCase {
             isThreadRunning: true
         )
 
-        guard items.count == 2,
-              case .commandGroup(let group) = items[1] else {
-            return XCTFail("Expected user plus one grouped turnless tool run")
+        guard items.count == 3,
+              case .commandGroup(let group) = items[1],
+              case .message(let latestToolCall) = items[2] else {
+            return XCTFail("Expected the latest turnless tool call after the earlier-call group")
         }
 
         XCTAssertEqual(group.commandCount, 0)
-        XCTAssertEqual(group.toolCallCount, 5)
+        XCTAssertEqual(group.toolCallCount, 4)
         XCTAssertEqual(
             group.orderedMessages.map(\.id),
-            ["turnless-tool-1", "turnless-tool-2", "turnless-tool-3", "turnless-tool-4", "turnless-tool-5"]
+            ["turnless-tool-1", "turnless-tool-2", "turnless-tool-3", "turnless-tool-4"]
         )
+        XCTAssertEqual(latestToolCall.id, "turnless-tool-5")
     }
 
     func testTimelineRenderProjectionGroupsSettledToolCallsWithoutCommands() {
@@ -700,6 +702,34 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(items.map(\.id), ["command-group:command-1"])
     }
 
+    func testTimelineRenderProjectionKeepsLatestFinishedCallVisibleWhileTurnRuns() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "command-1",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git status",
+                createdAt: now,
+                turnID: "turn-1",
+                itemID: "command-1"
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(
+            messages: messages,
+            activeTurnID: "turn-1",
+            isThreadRunning: true
+        )
+
+        XCTAssertEqual(items.map(\.id), ["command-1"])
+        guard case .message(let latestToolCall) = items.first else {
+            return XCTFail("Expected the latest completed call to remain visible")
+        }
+        XCTAssertEqual(latestToolCall.id, "command-1")
+    }
+
     func testTimelineRenderProjectionGroupsCommandsAcrossLiveReasoningTrace() {
         let now = Date()
         let messages = [
@@ -761,25 +791,27 @@ final class TurnTimelineReducerTests: XCTestCase {
             isThreadRunning: true
         )
 
-        XCTAssertEqual(items.map(\.id), ["command-group:command-1"])
+        XCTAssertEqual(items.map(\.id), ["command-group:command-1", "command-4"])
         guard case .commandGroup(let group) = items.first else {
-            return XCTFail("Expected one command disclosure across the reasoning trace")
+            return XCTFail("Expected earlier calls behind one command disclosure")
         }
         XCTAssertEqual(group.messages.map(\.id), [
             "command-1",
             "command-2",
             "command-3",
-            "command-4",
         ])
-        XCTAssertEqual(group.commandCount, 4)
+        XCTAssertEqual(group.commandCount, 3)
         XCTAssertEqual(group.traceMessages.map(\.id), ["reasoning"])
         XCTAssertEqual(group.orderedMessages.map(\.id), [
             "command-1",
             "command-2",
             "reasoning",
             "command-3",
-            "command-4",
         ])
+        guard case .message(let latestToolCall) = items.last else {
+            return XCTFail("Expected the latest command to remain visible")
+        }
+        XCTAssertEqual(latestToolCall.id, "command-4")
     }
 
     func testTimelineProjectionPreservesCommandTraceOrderBeforeGrouping() {
@@ -1080,7 +1112,7 @@ final class TurnTimelineReducerTests: XCTestCase {
         ])
     }
 
-    func testTimelineRenderProjectionStillSplitsCommandsAcrossAssistantCommentary() {
+    func testTimelineRenderProjectionClosesCommandGroupAtAssistantCommentary() {
         let now = Date()
         let messages = [
             makeMessage(
@@ -1100,7 +1132,8 @@ final class TurnTimelineReducerTests: XCTestCase {
                 text: "I found the relevant files.",
                 createdAt: now.addingTimeInterval(1),
                 turnID: "turn-1",
-                itemID: "commentary"
+                itemID: "commentary",
+                isStreaming: true
             ),
             makeMessage(
                 id: "command-2",
@@ -1114,12 +1147,16 @@ final class TurnTimelineReducerTests: XCTestCase {
             ),
         ]
 
-        let items = TurnTimelineRenderProjection.project(messages: messages)
+        let items = TurnTimelineRenderProjection.project(
+            messages: messages,
+            activeTurnID: "turn-1",
+            isThreadRunning: true
+        )
 
         XCTAssertEqual(items.map(\.id), [
             "command-group:command-1",
             "commentary",
-            "command-group:command-2",
+            "command-2",
         ])
     }
 
