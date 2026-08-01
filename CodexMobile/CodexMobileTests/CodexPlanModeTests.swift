@@ -1100,6 +1100,45 @@ final class CodexPlanModeTests: XCTestCase {
         XCTAssertEqual(promptMessages[0].structuredUserInputRequest?.questions.first?.isOther, true)
     }
 
+    func testDesktopRequestUserInputDefaultsSparseQuestionMetadata() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let requestID: JSONValue = .integer(36)
+
+        service.handleIncomingRPCMessage(
+            RPCMessage(
+                id: requestID,
+                method: "item/tool/requestUserInput",
+                params: .object([
+                    "threadId": .string(threadID),
+                    "questions": .array([
+                        .object([
+                            "id": .string("pairing_scope"),
+                            "question": .string("Which pairing scope should be used?"),
+                            "options": .array([
+                                .object([
+                                    "label": .string("Dev pairing now"),
+                                ]),
+                            ]),
+                        ]),
+                    ]),
+                ]),
+                includeJSONRPC: false
+            )
+        )
+
+        let question = service.messages(for: threadID)
+            .last(where: { $0.kind == .userInputPrompt })?
+            .structuredUserInputRequest?
+            .questions
+            .first
+
+        XCTAssertEqual(question?.id, "pairing_scope")
+        XCTAssertEqual(question?.header, "")
+        XCTAssertEqual(question?.options.first?.description, "")
+        XCTAssertEqual(question?.isOther, true)
+    }
+
     func testToolRequestUserInputWithoutThreadIDUsesTurnMapping() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"

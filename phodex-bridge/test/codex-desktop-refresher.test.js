@@ -127,22 +127,39 @@ test("readBridgeConfig keeps safe defaults and explicit overrides", () => {
       },
     },
   });
+  const explicitAutoFollowOffConfig = readBridgeConfig({
+    env: {
+      REMODEX_DESKTOP_AUTO_FOLLOW: "false",
+    },
+    platform: "darwin",
+    runtimeRoot: "/tmp/remodex-package",
+    fsImpl: {
+      existsSync: () => false,
+      readFileSync: () => {
+        throw new Error("unexpected read");
+      },
+    },
+  });
   assert.equal(macConfig.refreshEnabled, false);
   assert.equal(macConfig.keepMacAwakeEnabled, false);
   assert.equal(macConfig.relayUrl, "");
   assert.equal(macConfig.pushServiceUrl, "");
   assert.equal(macConfig.desktopIpcLiveSyncEnabled, true);
+  assert.equal(macConfig.desktopAutoFollowEnabled, true);
   assert.equal(macConfig.desktopIpcSnapshotDebounceMs, 75);
   assert.equal(persistedKeepAwakeConfig.keepMacAwakeEnabled, false);
   assert.equal(macEndpointConfig.refreshEnabled, false);
   assert.equal(linuxConfig.refreshEnabled, false);
+  assert.equal(linuxConfig.desktopAutoFollowEnabled, false);
   assert.equal(linuxCommandConfig.refreshEnabled, false);
   assert.equal(explicitOnConfig.refreshEnabled, true);
   assert.equal(explicitOnConfig.desktopIpcSocketPath, "/tmp/remodex-ipc.sock");
   assert.equal(explicitOffConfig.refreshEnabled, false);
   assert.equal(explicitOffConfig.desktopIpcLiveSyncEnabled, false);
+  assert.equal(explicitOffConfig.desktopAutoFollowEnabled, false);
   assert.equal(explicitOffConfig.desktopIpcSnapshotDebounceMs, 25);
   assert.equal(explicitOffConfig.keepMacAwakeEnabled, false);
+  assert.equal(explicitAutoFollowOffConfig.desktopAutoFollowEnabled, false);
 });
 
 test("readBridgeConfig uses only the packaged relay default outside a source checkout", () => {
@@ -348,8 +365,131 @@ test("navigation-only mode refreshes phone turn starts but skips watchers and co
 
   // One navigation deep link for the phone turn; no rollout watcher and no
   // completion-driven refresh because IPC live sync owns content updates.
-  assert.deepEqual(refreshCalls, ["codex://threads/thread-nav-only"]);
+  assert.equal(refreshCalls.length, 1);
+  assert.match(
+    refreshCalls[0],
+    /^codex:\/\/threads\/thread-nav-only\?remodex-follow=\d+-1$/
+  );
   assert.deepEqual(watchedThreads, []);
+  refresher.handleTransportReset();
+});
+
+test("navigation-only follow retries remount an already-open route with a unique query", async () => {
+  const refreshCalls = [];
+  const refresher = new CodexDesktopRefresher({
+    enabled: true,
+    navigationOnly: true,
+    debounceMs: 0,
+    followConfirmTimeoutMs: 5,
+    followMaxAttempts: 3,
+    now: () => 123,
+    refreshExecutor: async (targetUrl) => {
+      refreshCalls.push(targetUrl);
+    },
+  });
+
+  refresher.handleInbound(JSON.stringify({
+    method: "turn/start",
+    params: {
+      threadId: "thread-already-open",
+      input: [{ type: "text", text: "hello" }],
+    },
+  }));
+  await waitFor(() => refreshCalls.length === 2);
+
+  assert.deepEqual(refreshCalls, [
+    "codex://threads/thread-already-open?remodex-follow=123-1",
+    "codex://threads/thread-already-open?remodex-follow=123-2",
+  ]);
+
+  refresher.handleFollowerStateChanged("thread-already-open", true);
+  await wait(15);
+  assert.equal(refreshCalls.length, 2);
+  refresher.handleTransportReset();
+});
+
+test("navigation-only mode waits for a new thread rollout before activating its route", async () => {
+  const refreshCalls = [];
+  let watcherHooks = null;
+  const refresher = new CodexDesktopRefresher({
+    enabled: true,
+    navigationOnly: true,
+    debounceMs: 0,
+    fallbackNewThreadMs: 5,
+    refreshExecutor: async (targetUrl) => {
+      refreshCalls.push(targetUrl);
+    },
+    watchThreadRolloutFactory: (hooks) => {
+      watcherHooks = hooks;
+      return { stop() {} };
+    },
+  });
+
+  refresher.handleInbound(JSON.stringify({
+    method: "thread/start",
+    params: {},
+  }));
+  await wait(15);
+  assert.deepEqual(refreshCalls, [], "auto-follow must not open the generic new-thread route");
+
+  refresher.handleOutbound(JSON.stringify({
+    method: "thread/started",
+    params: {
+      thread: { id: "thread-materializing" },
+    },
+  }));
+  assert.ok(watcherHooks);
+  assert.deepEqual(refreshCalls, []);
+
+  watcherHooks.onEvent({
+    reason: "materialized",
+    threadId: "thread-materializing",
+    size: 100,
+  });
+  await waitFor(() => refreshCalls.length === 1);
+
+  assert.equal(refreshCalls.length, 1);
+  assert.match(
+    refreshCalls[0],
+    /^codex:\/\/threads\/thread-materializing\?remodex-follow=\d+-1$/
+  );
+  refresher.handleFollowerStateChanged("thread-materializing", true);
+  refresher.handleTransportReset();
+});
+
+test("confirmed Desktop followers skip redundant activation until the route unmounts", async () => {
+  const refreshCalls = [];
+  const refresher = new CodexDesktopRefresher({
+    enabled: true,
+    navigationOnly: true,
+    debounceMs: 0,
+    refreshExecutor: async (targetUrl) => {
+      refreshCalls.push(targetUrl);
+    },
+  });
+  const turnStart = JSON.stringify({
+    method: "turn/start",
+    params: {
+      threadId: "thread-followed",
+      input: [{ type: "text", text: "hello" }],
+    },
+  });
+
+  refresher.handleFollowerStateChanged("thread-followed", true);
+  refresher.handleInbound(turnStart);
+  await wait(15);
+  assert.deepEqual(refreshCalls, []);
+
+  refresher.handleFollowerStateChanged("thread-followed", false);
+  refresher.handleInbound(turnStart);
+  await waitFor(() => refreshCalls.length === 1);
+  assert.equal(refreshCalls.length, 1);
+  assert.match(
+    refreshCalls[0],
+    /^codex:\/\/threads\/thread-followed\?remodex-follow=\d+-1$/
+  );
+
+  refresher.handleFollowerStateChanged("thread-followed", true);
   refresher.handleTransportReset();
 });
 

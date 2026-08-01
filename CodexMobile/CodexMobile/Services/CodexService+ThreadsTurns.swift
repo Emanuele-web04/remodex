@@ -1189,6 +1189,9 @@ extension CodexService {
                 // Avoid the server's narrower default sourceKinds so multi-project history
                 // includes threads started from the app-server flow as well.
                 "sourceKinds": .array(threadListSourceKinds.map(JSONValue.string)),
+                // The app-server defaults to created_at, which can exclude an old thread
+                // with recent activity from this capped sidebar window.
+                "sortKey": .string("updated_at"),
                 "cursor": nextCursor,
             ]
             if let limit {

@@ -174,6 +174,90 @@ test("desktop turns/list private cursors never fall through to app-server", (t) 
   assert.equal(outbound[0].error.code, -32602);
 });
 
+test("desktop-owned follow handshakes notify the navigation controller", async (t) => {
+  const { socketPath, state } = await startInitializedIpcTestServer(
+    t,
+    "remodex-action-follower-follow-"
+  );
+  const followerChanges = [];
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse() {},
+    onFollowerStateChanged(threadId, following) {
+      followerChanges.push({ threadId, following });
+    },
+  });
+  t.after(() => follower.stopAll());
+
+  follower.observeInbound(JSON.stringify({
+    method: "thread/list",
+    params: {},
+  }));
+  await waitFor(() => state.socket);
+
+  writeFrame(state.socket, {
+    type: "broadcast",
+    method: "thread-stream-following-changed",
+    sourceClientId: "desktop-renderer",
+    version: 1,
+    params: {
+      hostId: "local",
+      conversationId: "thread-desktop-follow",
+      following: true,
+    },
+  });
+  await waitFor(() => followerChanges.length === 1);
+  assert.deepEqual(followerChanges[0], {
+    threadId: "thread-desktop-follow",
+    following: true,
+  });
+
+  writeFrame(state.socket, {
+    type: "broadcast",
+    method: "client-status-changed",
+    sourceClientId: "router",
+    version: 1,
+    params: {
+      clientId: "desktop-renderer",
+      status: "disconnected",
+    },
+  });
+  await waitFor(() => followerChanges.length === 2);
+  assert.deepEqual(followerChanges[1], {
+    threadId: "thread-desktop-follow",
+    following: false,
+  });
+});
+
+test("phone thread reads subscribe the bridge to Desktop-owned state patches", async (t) => {
+  const { socketPath, state } = await startInitializedIpcTestServer(
+    t,
+    "remodex-action-follower-phone-follow-"
+  );
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse() {},
+  });
+  t.after(() => follower.stopAll());
+
+  follower.observeInbound(JSON.stringify({
+    id: "phone-read",
+    method: "thread/read",
+    params: { threadId: "thread-open-on-phone" },
+  }));
+
+  await waitFor(() => state.frames.some((frame) => (
+    frame.method === "thread-stream-following-changed"
+      && frame.params?.conversationId === "thread-open-on-phone"
+      && frame.params?.following === true
+  )));
+  const follow = state.frames.find((frame) => (
+    frame.method === "thread-stream-following-changed"
+      && frame.params?.conversationId === "thread-open-on-phone"
+  ));
+  assert.equal(follow.sourceClientId, "remodex-test");
+});
+
 test("projects desktop pending user input as an app-server request shape", () => {
   const actions = projectPendingDesktopActions("thread-1", {
     requests: [{
@@ -214,6 +298,54 @@ test("projects desktop pending user input as an app-server request shape", () =>
       }],
     },
   }]);
+});
+
+test("preserves numeric app-server ids for desktop user-input replies", () => {
+  const [action] = projectPendingDesktopActions("thread-numeric-input", {
+    requests: [{
+      // Codex Desktop currently uses numeric app-server ids for request_user_input.
+      id: 36,
+      method: "item/tool/requestUserInput",
+      params: {
+        turnId: "turn-numeric-input",
+        questions: [{
+          id: "pairing_scope",
+          header: "Pairing",
+          question: "Which pairing scope should be used?",
+          options: [{ label: "Dev pairing now", description: "Connect now" }],
+        }],
+      },
+    }],
+  });
+
+  assert.equal(action.id, 36);
+  assert.deepEqual(
+    desktopFollowerPayloadForResponse({
+      requestId: "36",
+      desktopRequestId: action.id,
+      method: action.method,
+      threadId: "thread-numeric-input",
+    }, {
+      id: 36,
+      result: {
+        answers: {
+          pairing_scope: { answers: ["Dev pairing now"] },
+        },
+      },
+    }),
+    {
+      method: "thread-follower-submit-user-input",
+      params: {
+        conversationId: "thread-numeric-input",
+        requestId: 36,
+        response: {
+          answers: {
+            pairing_scope: { answers: ["Dev pairing now"] },
+          },
+        },
+      },
+    }
+  );
 });
 
 test("projects command, file, and permission approvals while ignoring completed requests", () => {
@@ -991,6 +1123,93 @@ test("desktop IPC follower projects first add patch-only action updates without 
   assert.equal(baselineReads, 0);
   assert.equal(outbound[0].id, "req-patch");
   assert.equal(outbound[0].method, "item/tool/requestUserInput");
+});
+
+test("desktop IPC follower projects a request patch after restart before the phone rereads the thread", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-restart-action-");
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "desktop",
+          result: { clientId: "remodex-restarted" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    requestTimeoutMs: 500,
+  });
+  t.after(() => follower.stopAll());
+
+  // A sidebar refresh connects the restarted bridge, but intentionally does
+  // not mark this already-open phone thread active via thread/read or resume.
+  follower.observeInbound(JSON.stringify({ method: "thread/list", params: {} }));
+  await waitFor(() => serverSocket);
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-following-changed",
+    sourceClientId: "desktop",
+    version: 1,
+    params: {
+      conversationId: "thread-open-before-restart",
+      following: true,
+    },
+  });
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop",
+    version: 11,
+    params: {
+      conversationId: "thread-open-before-restart",
+      change: {
+        type: "patches",
+        patches: [{
+          op: "add",
+          path: ["requests", 0],
+          value: {
+            id: 50,
+            method: "item/tool/requestUserInput",
+            params: {
+              threadId: "thread-open-before-restart",
+              turnId: "turn-after-restart",
+              questions: [{
+                id: "restart_question",
+                header: "Restart",
+                question: "Does the question survive a bridge restart?",
+                options: [{ label: "Yes", description: "It does." }],
+              }],
+            },
+          },
+        }],
+      },
+    },
+  });
+
+  await waitFor(() => outbound.some((message) => message.id === 50));
+  const prompt = outbound.find((message) => message.id === 50);
+  assert.equal(prompt.method, "item/tool/requestUserInput");
+  assert.equal(prompt.params.questions[0].id, "restart_question");
 });
 
 test("desktop IPC follower uses baseline recovery for patch-only updates that need existing state", async (t) => {
@@ -6913,7 +7132,7 @@ function createIpcTestSocket(prefix) {
 
 async function startInitializedIpcTestServer(t, prefix) {
   const { tempDir, socketPath } = createIpcTestSocket(prefix);
-  const state = { socket: null, connectionCount: 0 };
+  const state = { socket: null, connectionCount: 0, frames: [] };
   const server = net.createServer((socket) => {
     state.socket = socket;
     state.connectionCount += 1;
@@ -6923,6 +7142,7 @@ async function startInitializedIpcTestServer(t, prefix) {
       }
     });
     attachFrameReader(socket, (frame) => {
+      state.frames.push(frame);
       if (frame.method === "initialize") {
         writeFrame(socket, {
           type: "response",

@@ -122,7 +122,7 @@ test("bridge forwards desktop IPC actions to the phone and routes replies back t
         type: "snapshot",
         conversationState: {
           requests: [{
-            id: "req-ipc",
+            id: 36,
             method: "item/tool/requestUserInput",
             params: {
               threadId: "thread-ipc",
@@ -136,11 +136,11 @@ test("bridge forwards desktop IPC actions to the phone and routes replies back t
     },
   });
 
-  const actionMessage = await waitForMessage(relayMessages, (message) => message.id === "req-ipc");
+  const actionMessage = await waitForMessage(relayMessages, (message) => message.id === 36);
   assert.equal(actionMessage.method, "item/tool/requestUserInput");
 
   relaySocket.send(JSON.stringify({
-    id: "req-ipc",
+    id: 36,
     result: {
       answers: {
         q1: { answers: ["Yes"] },
@@ -154,19 +154,19 @@ test("bridge forwards desktop IPC actions to the phone and routes replies back t
   );
   assert.deepEqual(ipcReply.params, {
     conversationId: "thread-ipc",
-    requestId: "req-ipc",
+    requestId: 36,
     response: {
       answers: {
         q1: { answers: ["Yes"] },
       },
     },
   });
-  assert.equal(fakeCodex.sent.some((message) => message.id === "req-ipc"), false);
+  assert.equal(fakeCodex.sent.some((message) => message.id === 36), false);
 
   const resolvedMessage = await waitForMessage(
     relayMessages,
     (message) => message.method === "serverRequest/resolved"
-      && message.params?.requestId === "req-ipc"
+      && message.params?.requestId === 36
   );
   assert.equal(resolvedMessage.params.threadId, "thread-ipc");
 });
@@ -672,6 +672,7 @@ test("bridge observes held desktop IPC turns only after local fallback", async (
   let fakeCodex = null;
   let followerOptions = null;
   let heldTurnStart = null;
+  let liveOwnerOptions = null;
   const liveOwnerInbound = [];
 
   await new Promise((resolve) => relayServer.once("listening", resolve));
@@ -704,7 +705,8 @@ test("bridge observes held desktop IPC turns only after local fallback", async (
       },
     },
     desktopIpcLiveOwnerModule: {
-      createDesktopIpcLiveOwner() {
+      createDesktopIpcLiveOwner(options) {
+        liveOwnerOptions = options;
         return {
           observeInbound(rawMessage) {
             liveOwnerInbound.push(JSON.parse(rawMessage));
@@ -740,6 +742,15 @@ test("bridge observes held desktop IPC turns only after local fallback", async (
   });
 
   await waitFor(() => relaySocket && relaySocket.readyState === WebSocket.OPEN);
+  assert.equal(typeof liveOwnerOptions?.onFollowerStateChanged, "function");
+  await followerOptions.readConversationState("thread-complete-baseline");
+  assert.deepEqual(
+    fakeCodex.sent.find((message) => message.method === "thread/read")?.params,
+    {
+      threadId: "thread-complete-baseline",
+      includeTurns: true,
+    }
+  );
   relaySocket.send(JSON.stringify({
     id: "held-turn-start",
     method: "turn/start",
@@ -791,6 +802,13 @@ function loadBridgeWithTestDoubles({
     }
     if (parent?.filename === bridgePath && request === "./secure-device-state") {
       return createSecureDeviceStateDouble();
+    }
+    if (parent?.filename === bridgePath && request === "./session-state") {
+      return {
+        rememberActiveThread() {
+          return true;
+        },
+      };
     }
     return originalLoad.call(this, request, parent, isMain);
   };

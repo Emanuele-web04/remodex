@@ -82,6 +82,129 @@ test("desktop-origin active runs replay thinking and exec command activity on re
   assert.equal(outbound[5].params.remodexRolloutBootstrapReplay, undefined);
 });
 
+test("desktop-origin exec wrappers mirror nested commands and hide cell waits", async (t) => {
+  const { homeDir } = createTemporaryRolloutHome({
+    threadId: "thread-wrapped-command",
+    originator: "Codex Desktop",
+    source: "desktop",
+    lines: [
+      taskStarted("turn-wrapped-command"),
+      customToolCall("outer-exec", "exec", [
+        "const result = await tools.exec_command({",
+        "  cmd: \"gh run view 30709849174 --json status,conclusion\",",
+        "  workdir: \"/repo\",",
+        "});",
+        "text(result.output);",
+      ].join("\n")),
+      customToolCallOutput("outer-exec", [
+        { type: "input_text", text: "Script completed\nWall time 0.2 seconds\nOutput:\n" },
+        { type: "input_text", text: "{\"status\":\"completed\"}" },
+      ]),
+      functionCall("outer-wait", "wait", {
+        cell_id: "382",
+        yield_time_ms: 30000,
+      }),
+      functionCallOutput("outer-wait", "completed"),
+    ],
+  });
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = homeDir;
+  t.after(() => {
+    restoreCodexHome(previousCodexHome);
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  const controller = createRolloutLiveMirrorController({
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    pollIntervalMs: 5,
+    idleTimeoutMs: 50,
+  });
+  t.after(() => controller.stopAll());
+
+  controller.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-wrapped-command" },
+  }));
+
+  await wait(30);
+
+  assert.deepEqual(outbound.map((message) => message.method), [
+    "turn/started",
+    "item/reasoning/textDelta",
+    "codex/event/exec_command_begin",
+    "codex/event/exec_command_output_delta",
+    "codex/event/exec_command_end",
+    "turn/activity",
+  ]);
+  assert.equal(outbound[2].params.command, "gh run view 30709849174 --json status,conclusion");
+  assert.equal(outbound[2].params.cwd, "/repo");
+  assert.equal(outbound[3].params.chunk, "{\"status\":\"completed\"}");
+  assert.equal(outbound.some((message) => /(?:exec|wait)/i.test(message.params?.message || "")), false);
+});
+
+test("desktop-origin exec wrappers complete every nested parallel tool", async (t) => {
+  const { homeDir } = createTemporaryRolloutHome({
+    threadId: "thread-wrapped-parallel",
+    originator: "Codex Desktop",
+    source: "desktop",
+    lines: [
+      taskStarted("turn-wrapped-parallel"),
+      customToolCall("outer-parallel", "exec", [
+        "const results = await Promise.all([",
+        "  tools.exec_command({cmd: \"git status --short\", workdir: \"/repo\"}),",
+        "  tools.write_stdin({session_id: 33518, chars: \"\"}),",
+        "]);",
+        "for (const result of results) text(result.output);",
+      ].join("\n")),
+      customToolCallOutput("outer-parallel", [
+        { type: "input_text", text: "Script completed\nWall time 0.2 seconds\nOutput:\n" },
+        { type: "input_text", text: "clean" },
+      ]),
+    ],
+  });
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = homeDir;
+  t.after(() => {
+    restoreCodexHome(previousCodexHome);
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  const controller = createRolloutLiveMirrorController({
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    pollIntervalMs: 5,
+    idleTimeoutMs: 50,
+  });
+  t.after(() => controller.stopAll());
+
+  controller.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-wrapped-parallel" },
+  }));
+
+  await wait(30);
+
+  assert.deepEqual(outbound.map((message) => message.method), [
+    "turn/started",
+    "item/reasoning/textDelta",
+    "codex/event/exec_command_begin",
+    "codex/event/background_event",
+    "codex/event/exec_command_output_delta",
+    "codex/event/exec_command_end",
+    "codex/event/background_event",
+    "turn/activity",
+  ]);
+  assert.equal(outbound[2].params.command, "git status --short");
+  assert.equal(outbound[3].params.message, "Writing to terminal");
+  assert.equal(outbound[4].params.chunk, "clean");
+  assert.equal(outbound[6].params.message, "Wrote to terminal");
+});
+
 test("desktop-origin active runs emit activity heartbeat while rollout is quiet", async (t) => {
   const { homeDir } = createTemporaryRolloutHome({
     threadId: "thread-heartbeat",
@@ -2780,6 +2903,18 @@ function customToolCall(callId, name, input) {
       call_id: callId,
       name,
       input,
+    },
+  });
+}
+
+function customToolCallOutput(callId, output) {
+  return JSON.stringify({
+    timestamp: "2026-03-15T19:47:39.000Z",
+    type: "response_item",
+    payload: {
+      type: "custom_tool_call_output",
+      call_id: callId,
+      output,
     },
   });
 }

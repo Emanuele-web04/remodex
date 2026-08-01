@@ -14,16 +14,20 @@ struct RunningThreadSpinner: View {
 
     @State private var isSpinning = false
 
+    private var strokeWidth: CGFloat {
+        lineWidth * 2 / 3
+    }
+
     var body: some View {
         ZStack {
             Circle()
-                .stroke(color.opacity(0.22), lineWidth: lineWidth * 0.7)
+                .stroke(color.opacity(0.22), lineWidth: strokeWidth)
 
             Circle()
                 .trim(from: 0.16, to: 0.72)
                 .stroke(
                     color,
-                    style: StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round)
+                    style: StrokeStyle(lineWidth: strokeWidth, lineCap: .round, lineJoin: .round)
                 )
                 .rotationEffect(.degrees(isSpinning ? 360 : 0))
                 .animation(
@@ -38,4 +42,3 @@ struct RunningThreadSpinner: View {
         .accessibilityHidden(true)
     }
 }
-

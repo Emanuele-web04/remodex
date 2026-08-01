@@ -14,6 +14,10 @@ const {
 const { resolveCodexGeneratedImagesRoot } = require("./codex-home");
 const { buildApplyPatchFileChangeItem } = require("./apply-patch-changes");
 const {
+  expandExecWrapperToolCall,
+  isOrchestrationWaitCall,
+} = require("./codex-tool-wrapper");
+const {
   TERMINAL_TASK_EVENT_TYPES,
   terminalEventClosesTrackedTurn,
 } = require("./rollout-turn-semantics");
@@ -986,6 +990,7 @@ function synthesizeNotificationsFromRolloutEntry(entry, state, { nowMs = Date.no
       state.commandCalls.clear();
       state.applyPatchCalls.clear();
       state.emittedPatchApplyEndCalls.clear();
+      state.wrappedExecCallIdsByOuterId.clear();
 
       const startedParams = {
         threadId: state.threadId,
@@ -1117,12 +1122,12 @@ function synthesizeNotificationsFromRolloutEntry(entry, state, { nowMs = Date.no
   }
 
   if (itemType === "functioncall") {
-    notifications.push(...toolStartNotifications(state, payload));
+    notifications.push(...projectedToolStartNotifications(state, payload));
     return notifications;
   }
 
   if (itemType === "customtoolcall") {
-    notifications.push(...customToolStartNotifications(state, payload));
+    notifications.push(...projectedToolStartNotifications(state, payload));
     return notifications;
   }
 
@@ -1362,6 +1367,29 @@ function extractResponseItemMessageText(payload) {
   return responseItemMessageText(payload);
 }
 
+function projectedToolStartNotifications(state, payload) {
+  if (isOrchestrationWaitCall(payload)) {
+    return [];
+  }
+
+  const projectedPayloads = expandExecWrapperToolCall(payload);
+  const outerCallId = projectedPayloads[0]?.remodexWrappedExecCallId;
+  if (outerCallId && projectedPayloads.length > 1) {
+    state.wrappedExecCallIdsByOuterId.set(
+      outerCallId,
+      projectedPayloads.map((projectedPayload) => (
+        readString(projectedPayload.call_id) || readString(projectedPayload.callId)
+      )).filter(Boolean)
+    );
+  }
+
+  return projectedPayloads.flatMap((projectedPayload) => (
+    normalizeRolloutItemType(projectedPayload.type) === "customtoolcall"
+      ? customToolStartNotifications(state, projectedPayload)
+      : toolStartNotifications(state, projectedPayload)
+  ));
+}
+
 function toolStartNotifications(state, payload) {
   if (!state.activeTurnId) {
     return [];
@@ -1419,6 +1447,7 @@ function toolStartNotifications(state, payload) {
     toolName,
     command: resolveToolCommand(toolName, argumentsObject),
     cwd: resolveToolWorkingDirectory(argumentsObject, state),
+    wrappedExecCall: Boolean(payload.remodexWrappedExecCallId),
   });
 
   if (isCommandToolName(toolName)) {
@@ -1497,6 +1526,7 @@ function customToolStartNotifications(state, payload) {
       toolName,
       command: toolName,
       cwd: readString(state.sessionMeta?.cwd) || "",
+      wrappedExecCall: Boolean(payload.remodexWrappedExecCallId),
     });
   }
 
@@ -1580,8 +1610,28 @@ function toolOutputNotifications(state, payload) {
     return [];
   }
 
+  const wrappedCallIds = state.wrappedExecCallIdsByOuterId.get(callId);
+  if (Array.isArray(wrappedCallIds) && wrappedCallIds.length > 0) {
+    state.wrappedExecCallIdsByOuterId.delete(callId);
+    const outputRecipientId = wrappedCallIds.find((nestedCallId) => (
+      isCommandToolName(state.commandCalls.get(nestedCallId)?.toolName)
+    )) || wrappedCallIds[0];
+    return wrappedCallIds.flatMap((nestedCallId) => toolOutputNotifications(state, {
+      ...payload,
+      call_id: nestedCallId,
+      callId: nestedCallId,
+      output: nestedCallId === outputRecipientId ? payload.output : "",
+    }));
+  }
+
   const toolCall = state.commandCalls.get(callId);
   if (!toolCall) {
+    if (state.applyPatchCalls.has(callId)) {
+      return patchApplyEndNotifications(state, {
+        ...payload,
+        status: readString(payload.status) || "completed",
+      });
+    }
     return [];
   }
 
@@ -1597,7 +1647,8 @@ function toolOutputNotifications(state, payload) {
     return notifications;
   }
 
-  const output = readString(payload.output);
+  const rawOutput = extractToolOutputText(payload.output);
+  const output = toolCall.wrappedExecCall ? stripExecOutputEnvelope(rawOutput) : rawOutput;
   const notifications = [...ensureThinkingNotifications(state)];
   if (output) {
     notifications.push(createNotification("codex/event/exec_command_output_delta", {
@@ -1621,6 +1672,38 @@ function toolOutputNotifications(state, payload) {
   }));
   state.commandCalls.delete(callId);
   return notifications;
+}
+
+function extractToolOutputText(value) {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map(extractToolOutputText).join("");
+  }
+  if (!value || typeof value !== "object") {
+    return "";
+  }
+
+  for (const key of ["text", "output_text", "outputText"]) {
+    if (typeof value[key] === "string") {
+      return value[key];
+    }
+  }
+  for (const key of ["content", "output", "result"]) {
+    const text = extractToolOutputText(value[key]);
+    if (text) {
+      return text;
+    }
+  }
+  return "";
+}
+
+function stripExecOutputEnvelope(output) {
+  return readString(output).replace(
+    /^Script [^\n]*\nWall time [^\n]*\nOutput:\n?/,
+    ""
+  );
 }
 
 function imageGenerationNotifications(state, payload, { preferCallId = false } = {}) {
@@ -1795,6 +1878,7 @@ function createMirrorState(threadId) {
     commandCalls: new Map(),
     applyPatchCalls: new Map(),
     emittedPatchApplyEndCalls: new Set(),
+    wrappedExecCallIdsByOuterId: new Map(),
     emittedAgentMessageKeys: new Set(),
     agentMessageOccurrencesByBaseKey: new Map(),
     pendingEventAgentMessageOccurrencesByBaseKey: new Map(),
@@ -2127,6 +2211,7 @@ function resetRunState(state) {
   state.commandCalls.clear();
   state.applyPatchCalls.clear();
   state.emittedPatchApplyEndCalls.clear();
+  state.wrappedExecCallIdsByOuterId.clear();
   state.emittedAgentMessageKeys.clear();
   state.agentMessageOccurrencesByBaseKey.clear();
   state.pendingEventAgentMessageOccurrencesByBaseKey.clear();

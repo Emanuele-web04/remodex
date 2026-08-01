@@ -18,7 +18,7 @@ struct SidebarThreadRunBadgeView: View {
         case .running:
             RunningThreadSpinner(size: 13)
         case .waitingOnUser:
-            statusDot(color: .yellow, label: "Waiting for your approval")
+            statusDot(color: .yellow, label: "Waiting for your response")
         case .ready:
             statusDot(color: .blue, label: "Finished, not opened yet")
         case .failed:

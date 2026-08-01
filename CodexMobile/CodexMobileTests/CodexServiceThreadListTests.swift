@@ -44,6 +44,7 @@ final class CodexServiceThreadListTests: XCTestCase {
 
         XCTAssertEqual(activeRequestParams?["limit"]?.intValue, 70)
         XCTAssertNil(activeRequestParams?["archived"])
+        XCTAssertEqual(activeRequestParams?["sortKey"]?.stringValue, "updated_at")
         XCTAssertEqual(requestCount, 1)
         XCTAssertEqual(
             activeRequestParams?["sourceKinds"]?.arrayValue?.compactMap(\.stringValue),
@@ -292,6 +293,7 @@ final class CodexServiceThreadListTests: XCTestCase {
 
         XCTAssertEqual(activeRequestParams?["limit"]?.intValue, 70)
         XCTAssertNil(activeRequestParams?["archived"])
+        XCTAssertEqual(activeRequestParams?["sortKey"]?.stringValue, "updated_at")
         XCTAssertEqual(requestCount, 1)
     }
 

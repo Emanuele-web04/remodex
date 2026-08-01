@@ -22,6 +22,8 @@ const DESKTOP_IPC_METHOD_VERSIONS = new Map([
   [CLIENT_STATUS_CHANGED, 1],
   // Desktop pins thread-stream-state-changed at version 11 and drops mismatches.
   ["thread-stream-state-changed", 11],
+  ["thread-stream-following-changed", 1],
+  ["thread-stream-following-status-requested", 1],
   ["thread-archived", 2],
   ["thread-unarchived", 1],
   ["thread-read-state-changed", 2],
@@ -570,6 +572,16 @@ function buildIpcRequestEnvelope({ requestId, method, params, clientId, initiali
   };
 }
 
+// Newer app-server builds omit every turn unless thread/read opts in explicitly.
+// Internal hydration callers always need a complete baseline: publishing the
+// metadata-only default as a Desktop snapshot would replace the visible history.
+function buildCompleteThreadReadParams(threadId) {
+  return {
+    threadId: readString(threadId),
+    includeTurns: true,
+  };
+}
+
 function resolveIpcSocketPathCandidates() {
   if (process.platform === "win32") {
     return ["\\\\.\\pipe\\codex-ipc"];
@@ -655,6 +667,7 @@ function responseItemMessageText(payload) {
 
 module.exports = {
   CLIENT_STATUS_CHANGED,
+  buildCompleteThreadReadParams,
   buildIpcRequestEnvelope,
   buildRemodexSourceItemKey,
   createFrameReader,

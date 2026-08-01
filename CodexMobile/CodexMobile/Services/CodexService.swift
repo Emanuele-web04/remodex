@@ -239,7 +239,7 @@ struct CodexExternalThreadOpenRequest: Identifiable, Equatable, Sendable {
 
 enum CodexThreadRunBadgeState: Hashable, Sendable {
     case running
-    // Run is parked on an approval prompt: it only moves again once the user answers.
+    // Run is parked on an approval or question: it moves once the user responds.
     case waitingOnUser
     case ready
     case failed

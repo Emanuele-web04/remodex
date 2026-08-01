@@ -18,6 +18,8 @@ const DEFAULT_MID_RUN_REFRESH_THROTTLE_MS = 3_000;
 const DEFAULT_ROLLOUT_LOOKUP_TIMEOUT_MS = 5_000;
 const DEFAULT_ROLLOUT_IDLE_TIMEOUT_MS = 10_000;
 const DEFAULT_CUSTOM_REFRESH_FAILURE_THRESHOLD = 3;
+const DEFAULT_FOLLOW_CONFIRM_TIMEOUT_MS = 1_500;
+const DEFAULT_FOLLOW_MAX_ATTEMPTS = 3;
 const REFRESH_SCRIPT_PATH = path.join(__dirname, "scripts", "codex-refresh.applescript");
 const NEW_THREAD_DEEP_LINK = "codex://threads/new";
 
@@ -44,6 +46,8 @@ class CodexDesktopRefresher {
     watchThreadRolloutFactory = createThreadRolloutActivityWatcher,
     refreshBackend = null,
     customRefreshFailureThreshold = DEFAULT_CUSTOM_REFRESH_FAILURE_THRESHOLD,
+    followConfirmTimeoutMs = DEFAULT_FOLLOW_CONFIRM_TIMEOUT_MS,
+    followMaxAttempts = DEFAULT_FOLLOW_MAX_ATTEMPTS,
   } = {}) {
     this.enabled = enabled;
     this.navigationOnly = navigationOnly;
@@ -62,6 +66,8 @@ class CodexDesktopRefresher {
     this.refreshBackend = refreshBackend
       || (this.refreshCommand ? "command" : (this.refreshExecutor ? "command" : "applescript"));
     this.customRefreshFailureThreshold = customRefreshFailureThreshold;
+    this.followConfirmTimeoutMs = followConfirmTimeoutMs;
+    this.followMaxAttempts = followMaxAttempts;
 
     this.mode = "idle";
     this.pendingNewThread = false;
@@ -84,6 +90,11 @@ class CodexDesktopRefresher {
     this.watchStartAt = 0;
     this.lastRolloutSize = null;
     this.stopWatcherAfterRefreshThreadId = null;
+    this.materializationPendingThreadIds = new Set();
+    this.followedThreadIds = new Set();
+    this.followAttemptsByThreadId = new Map();
+    this.followConfirmationTimersByThreadId = new Map();
+    this.followActivationSerial = 0;
     this.runtimeRefreshAvailable = enabled;
     this.consecutiveRefreshFailures = 0;
     this.unavailableLogged = false;
@@ -117,8 +128,19 @@ class CodexDesktopRefresher {
         return;
       }
 
+      if (this.navigationOnly && target.threadId) {
+        if (this.followedThreadIds.has(target.threadId)) {
+          this.log(`desktop follow already active thread=${target.threadId}`);
+          return;
+        }
+        if (this.materializationPendingThreadIds.has(target.threadId)) {
+          this.ensureWatcher(target.threadId);
+          return;
+        }
+      }
+
       this.queueRefresh("phone", target, `phone ${method}`);
-      if (target.threadId) {
+      if (target.threadId && !this.navigationOnly) {
         this.ensureWatcher(target.threadId);
       }
     }
@@ -149,13 +171,48 @@ class CodexDesktopRefresher {
 
     if (method === "thread/started") {
       const target = resolveOutboundTarget(method, parsed);
+      const shouldWaitForMaterialization = Boolean(
+        this.navigationOnly
+        && this.pendingNewThread
+        && target?.threadId
+      );
       this.pendingNewThread = false;
       this.clearFallbackTimer();
+      if (shouldWaitForMaterialization) {
+        this.materializationPendingThreadIds.add(target.threadId);
+        this.mode = "waiting_for_materialization";
+        this.ensureWatcher(target.threadId);
+        return;
+      }
       this.queueRefresh("phone", target, `codex ${method}`);
-      if (target?.threadId) {
+      if (target?.threadId && !this.navigationOnly) {
         this.mode = "watching_thread";
         this.ensureWatcher(target.threadId);
       }
+    }
+  }
+
+  // Codex emits this only after the thread route mounts and its renderer calls
+  // set-active-conversation. That is the authoritative proof that Desktop will
+  // accept the owner's snapshots instead of dropping them as unfollowed.
+  handleFollowerStateChanged(threadId, following) {
+    const normalizedThreadId = readString(threadId);
+    if (!normalizedThreadId) {
+      return;
+    }
+    if (!following) {
+      this.followedThreadIds.delete(normalizedThreadId);
+      return;
+    }
+
+    this.followedThreadIds.add(normalizedThreadId);
+    this.materializationPendingThreadIds.delete(normalizedThreadId);
+    this.followAttemptsByThreadId.delete(normalizedThreadId);
+    this.clearFollowConfirmationTimer(normalizedThreadId);
+    this.log(`desktop follow confirmed thread=${normalizedThreadId}`);
+    if (this.activeWatchedThreadId === normalizedThreadId) {
+      this.stopWatcher();
+      this.mode = "idle";
     }
   }
 
@@ -168,6 +225,9 @@ class CodexDesktopRefresher {
     this.mode = "idle";
     this.clearFallbackTimer();
     this.stopWatcher();
+    this.materializationPendingThreadIds.clear();
+    this.followedThreadIds.clear();
+    this.clearAllFollowConfirmationTimers();
   }
 
   queueRefresh(kind, target, reason) {
@@ -283,12 +343,29 @@ class CodexDesktopRefresher {
         && this.now() - this.lastRefreshAt < this.debounceMs
       ) {
         this.log(`refresh skipped (duplicate target): ${refreshSignature}`);
+      } else if (
+        this.navigationOnly
+        && targetThreadId
+        && this.followedThreadIds.has(targetThreadId)
+      ) {
+        this.log(`desktop follow confirmed before navigation thread=${targetThreadId}`);
       } else {
-        await this.executeRefresh(targetUrl);
+        const refreshTargetUrl = this.followActivationTargetUrl(
+          targetUrl,
+          targetThreadId
+        );
+        await this.executeRefresh(refreshTargetUrl);
         this.lastRefreshAt = this.now();
         this.lastRefreshSignature = refreshSignature;
         this.consecutiveRefreshFailures = 0;
         didRefresh = true;
+        if (
+          this.navigationOnly
+          && targetThreadId
+          && !this.followedThreadIds.has(targetThreadId)
+        ) {
+          this.scheduleFollowConfirmation(targetThreadId, targetUrl);
+        }
       }
       if (completionTurnId && didRefresh) {
         this.lastTurnIdRefreshed = completionTurnId;
@@ -355,7 +432,7 @@ class CodexDesktopRefresher {
 
   // Schedules a single low-cost fallback when a brand new thread id is still unknown.
   scheduleNewThreadFallback() {
-    if (!this.canRefresh()) {
+    if (!this.canRefresh() || this.navigationOnly) {
       return;
     }
 
@@ -386,7 +463,7 @@ class CodexDesktopRefresher {
 
   // Keeps one lightweight rollout watcher alive for the current Remodex-controlled thread.
   ensureWatcher(threadId) {
-    if (this.navigationOnly || !this.canRefresh() || !threadId) {
+    if (!this.canRefresh() || !threadId) {
       return;
     }
 
@@ -406,16 +483,19 @@ class CodexDesktopRefresher {
       onEvent: (event) => this.handleWatcherEvent(event),
       onIdle: () => {
         this.log(`rollout watcher idle thread=${threadId}`);
+        this.activateAfterMaterializationWait(threadId, "rollout watcher idle");
         this.stopWatcher();
         this.mode = this.pendingNewThread ? "pending_new_thread" : "idle";
       },
       onTimeout: () => {
         this.log(`rollout watcher timeout thread=${threadId}`);
+        this.activateAfterMaterializationWait(threadId, "rollout watcher timeout");
         this.stopWatcher();
         this.mode = this.pendingNewThread ? "pending_new_thread" : "idle";
       },
       onError: (error) => {
         this.log(`rollout watcher failed thread=${threadId}: ${error.message}`);
+        this.activateAfterMaterializationWait(threadId, "rollout watcher error");
         this.stopWatcher();
         this.mode = this.pendingNewThread ? "pending_new_thread" : "idle";
       },
@@ -451,10 +531,19 @@ class CodexDesktopRefresher {
     });
 
     if (event.reason === "materialized") {
+      this.materializationPendingThreadIds.delete(event.threadId);
       this.queueRefresh("rollout_materialized", {
         threadId: event.threadId,
         url: buildThreadDeepLink(event.threadId),
       }, `rollout ${event.reason}`);
+      if (this.navigationOnly) {
+        this.stopWatcher();
+        this.mode = "idle";
+      }
+      return;
+    }
+
+    if (this.navigationOnly) {
       return;
     }
 
@@ -513,6 +602,9 @@ class CodexDesktopRefresher {
     this.clearFallbackTimer();
     this.stopWatcher();
     this.clearPendingState();
+    this.materializationPendingThreadIds.clear();
+    this.followedThreadIds.clear();
+    this.clearAllFollowConfirmationTimers();
     this.mode = "idle";
 
     if (!this.unavailableLogged) {
@@ -528,6 +620,69 @@ class CodexDesktopRefresher {
   // Tells the debounce loop whether any phone/completion refresh is still waiting to run.
   hasPendingRefreshWork() {
     return this.pendingCompletionRefresh || this.pendingRefreshKinds.size > 0;
+  }
+
+  activateAfterMaterializationWait(threadId, reason) {
+    if (!this.navigationOnly || !this.materializationPendingThreadIds.delete(threadId)) {
+      return;
+    }
+    this.queueRefresh("materialization_fallback", {
+      threadId,
+      url: buildThreadDeepLink(threadId),
+    }, reason);
+  }
+
+  // Opening an already-active deep link is a no-op in Codex, so the route's
+  // set-active-conversation effect never re-announces following after an IPC
+  // reconnect. Every activation gets a unique query value: waiting for a failed
+  // plain attempt first leaves the first 1.5s of a phone turn invisible.
+  followActivationTargetUrl(targetUrl, threadId) {
+    if (!this.navigationOnly || !threadId) {
+      return targetUrl;
+    }
+    const resolvedTargetUrl = targetUrl || buildThreadDeepLink(threadId);
+    const separator = resolvedTargetUrl.includes("?") ? "&" : "?";
+    this.followActivationSerial += 1;
+    return `${resolvedTargetUrl}${separator}remodex-follow=${this.now()}-${this.followActivationSerial}`;
+  }
+
+  scheduleFollowConfirmation(threadId, targetUrl) {
+    this.clearFollowConfirmationTimer(threadId);
+    const attempts = (this.followAttemptsByThreadId.get(threadId) || 0) + 1;
+    this.followAttemptsByThreadId.set(threadId, attempts);
+    if (attempts >= this.followMaxAttempts) {
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      this.followConfirmationTimersByThreadId.delete(threadId);
+      if (this.followedThreadIds.has(threadId) || !this.canRefresh()) {
+        return;
+      }
+      this.queueRefresh("follow_retry", {
+        threadId,
+        url: targetUrl || buildThreadDeepLink(threadId),
+      }, `desktop follow not confirmed (attempt ${attempts + 1})`);
+    }, Math.max(0, this.followConfirmTimeoutMs));
+    timer.unref?.();
+    this.followConfirmationTimersByThreadId.set(threadId, timer);
+  }
+
+  clearFollowConfirmationTimer(threadId) {
+    const timer = this.followConfirmationTimersByThreadId.get(threadId);
+    if (!timer) {
+      return;
+    }
+    clearTimeout(timer);
+    this.followConfirmationTimersByThreadId.delete(threadId);
+  }
+
+  clearAllFollowConfirmationTimers() {
+    for (const timer of this.followConfirmationTimersByThreadId.values()) {
+      clearTimeout(timer);
+    }
+    this.followConfirmationTimersByThreadId.clear();
+    this.followAttemptsByThreadId.clear();
   }
 }
 
@@ -568,6 +723,7 @@ function readBridgeConfig({
   );
   const explicitRefreshEnabled = readOptionalBooleanEnv(["REMODEX_REFRESH_ENABLED"], env);
   const explicitDesktopIpcLiveSyncEnabled = readOptionalBooleanEnv(["REMODEX_DESKTOP_IPC_LIVE_SYNC"], env);
+  const explicitDesktopAutoFollowEnabled = readOptionalBooleanEnv(["REMODEX_DESKTOP_AUTO_FOLLOW"], env);
   const explicitKeepMacAwakeEnabled = readOptionalBooleanEnv(["REMODEX_KEEP_MAC_AWAKE"], env);
   const persistedKeepMacAwakeEnabled = typeof daemonConfig.keepMacAwakeEnabled === "boolean"
     ? daemonConfig.keepMacAwakeEnabled
@@ -580,6 +736,14 @@ function readBridgeConfig({
     ? daemonConfig.refreshEnabled
     : null;
   const defaultRefreshEnabled = persistedRefreshEnabled == null ? false : persistedRefreshEnabled;
+  const desktopIpcLiveSyncEnabled = explicitDesktopIpcLiveSyncEnabled == null
+    ? true
+    : explicitDesktopIpcLiveSyncEnabled;
+  const defaultDesktopAutoFollowEnabled = (
+    platform === "darwin"
+    && !codexEndpoint
+    && desktopIpcLiveSyncEnabled
+  );
   return {
     relayUrl,
     pushServiceUrl: readFirstDefinedEnv(
@@ -603,9 +767,10 @@ function readBridgeConfig({
       : explicitKeepMacAwakeEnabled,
     codexEndpoint,
     desktopIpcSocketPath: readFirstDefinedEnv(["REMODEX_DESKTOP_IPC_SOCKET"], "", env),
-    desktopIpcLiveSyncEnabled: explicitDesktopIpcLiveSyncEnabled == null
-      ? true
-      : explicitDesktopIpcLiveSyncEnabled,
+    desktopIpcLiveSyncEnabled,
+    desktopAutoFollowEnabled: explicitDesktopAutoFollowEnabled == null
+      ? defaultDesktopAutoFollowEnabled
+      : explicitDesktopAutoFollowEnabled,
     desktopIpcSnapshotDebounceMs: parseIntegerEnv(
       readFirstDefinedEnv(["REMODEX_DESKTOP_IPC_SNAPSHOT_DEBOUNCE_MS"], "75", env),
       75

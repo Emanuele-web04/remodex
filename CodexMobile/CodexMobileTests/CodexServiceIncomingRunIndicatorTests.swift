@@ -1264,6 +1264,51 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertEqual(service.threadRunBadgeState(for: waitingThreadID), .running)
     }
 
+    func testPendingStructuredQuestionBadgeOutranksRunningUntilResolved() {
+        let service = makeService()
+        let threadID = "thread-question-\(UUID().uuidString)"
+        let turnID = "turn-question-\(UUID().uuidString)"
+        let requestID = JSONValue.integer(36)
+
+        sendTurnStarted(service: service, threadID: threadID, turnID: turnID)
+        service.handleIncomingRPCMessage(
+            RPCMessage(
+                id: requestID,
+                method: "item/tool/requestUserInput",
+                params: .object([
+                    "threadId": .string(threadID),
+                    "turnId": .string(turnID),
+                    "questions": .array([
+                        .object([
+                            "id": .string("pairing_scope"),
+                            "header": .string("Pairing"),
+                            "question": .string("Which pairing scope should be used?"),
+                            "options": .array([
+                                .object([
+                                    "label": .string("Dev pairing now"),
+                                    "description": .string("Connect now"),
+                                ]),
+                            ]),
+                        ]),
+                    ]),
+                ]),
+                includeJSONRPC: false
+            )
+        )
+
+        XCTAssertEqual(service.threadRunBadgeState(for: threadID), .waitingOnUser)
+
+        service.handleNotification(
+            method: "serverRequest/resolved",
+            params: .object([
+                "threadId": .string(threadID),
+                "requestId": requestID,
+            ])
+        )
+
+        XCTAssertEqual(service.threadRunBadgeState(for: threadID), .running)
+    }
+
     func testPrepareThreadForDisplayClearsOutcomeBadge() async {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"

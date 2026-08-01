@@ -190,17 +190,17 @@ private extension CodexService {
         return items.compactMap { value in
             guard let object = value.objectValue,
                   let id = normalizedPlanIdentifier(object["id"]?.stringValue),
-                  let header = normalizedOptionalPlanText(object["header"]?.stringValue) ?? object["header"]?.stringValue,
                   let question = normalizedOptionalPlanText(object["question"]?.stringValue) ?? object["question"]?.stringValue else {
                 return nil
             }
+            let header = normalizedOptionalPlanText(object["header"]?.stringValue) ?? ""
 
             let options = (object["options"]?.arrayValue ?? []).compactMap { optionValue -> CodexStructuredUserInputOption? in
                 guard let optionObject = optionValue.objectValue,
-                      let label = normalizedPlanIdentifier(optionObject["label"]?.stringValue),
-                      let description = normalizedOptionalPlanText(optionObject["description"]?.stringValue) ?? optionObject["description"]?.stringValue else {
+                      let label = normalizedPlanIdentifier(optionObject["label"]?.stringValue) else {
                     return nil
                 }
+                let description = normalizedOptionalPlanText(optionObject["description"]?.stringValue) ?? ""
                 return CodexStructuredUserInputOption(label: label, description: description)
             }
 
@@ -208,7 +208,9 @@ private extension CodexService {
                 id: id,
                 header: header,
                 question: question,
-                isOther: object["isOther"]?.boolValue ?? false,
+                // The request_user_input tool adds a free-form Other choice in
+                // the client even though its wire payload usually omits this flag.
+                isOther: object["isOther"]?.boolValue ?? object["is_other"]?.boolValue ?? true,
                 isSecret: object["isSecret"]?.boolValue ?? false,
                 selectionLimit: object["selectionLimit"]?.intValue ?? object["selection_limit"]?.intValue,
                 options: options

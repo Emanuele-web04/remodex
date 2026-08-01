@@ -214,6 +214,119 @@ test("live owner broadcasts Remodex-owned thread snapshots over Desktop IPC", as
   assert.equal(broadcast.params.change.conversationState.turns[0].items[0].text, "Hello");
 });
 
+test("live owner confirms Desktop follow handshakes and sends an immediate baseline", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-follow-");
+  const frames = [];
+  const followerChanges = [];
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      frames.push(frame);
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "router",
+          result: { clientId: "remodex-owner-follow" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+
+  const owner = createDesktopIpcLiveOwner({
+    socketPath,
+    snapshotDebounceMs: 1,
+    sendCodexRequest: async () => ({ ok: true }),
+    sendRawCodexMessage() {},
+    onFollowerStateChanged(threadId, following) {
+      followerChanges.push({ threadId, following });
+    },
+  });
+  t.after(() => {
+    owner.stopAll();
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  owner.observeInbound(JSON.stringify({
+    id: "thread-follow-start",
+    method: "thread/start",
+    params: {
+      cwd: "/tmp/project",
+    },
+  }));
+  owner.observeOutbound(JSON.stringify({
+    id: "thread-follow-start",
+    result: {
+      thread: {
+        id: "thread-follow-handshake",
+        sessionId: "thread-follow-handshake",
+        preview: "hello",
+        ephemeral: false,
+        modelProvider: "openai",
+        createdAt: 1,
+        updatedAt: 1,
+        status: { type: "idle" },
+        cwd: "/tmp/project",
+        turns: [],
+      },
+    },
+  }));
+  await waitForMessage(frames, (frame) => frame.method === "initialize");
+  await waitForMessage(
+    frames,
+    (frame) => frame.method === "thread-stream-following-status-requested"
+      && frame.params?.conversationId === "thread-follow-handshake"
+  );
+
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-following-changed",
+    sourceClientId: "desktop-follower",
+    version: 1,
+    params: {
+      hostId: "local",
+      conversationId: "thread-follow-handshake",
+      following: true,
+    },
+  });
+
+  await waitFor(() => followerChanges.length === 1);
+  assert.deepEqual(followerChanges, [{
+    threadId: "thread-follow-handshake",
+    following: true,
+  }]);
+  await waitForMessage(
+    frames,
+    (frame) => frame.method === "thread-stream-state-changed"
+      && frame.params?.conversationId === "thread-follow-handshake"
+  );
+
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-following-changed",
+    sourceClientId: "desktop-follower",
+    version: 1,
+    params: {
+      hostId: "local",
+      conversationId: "thread-follow-handshake",
+      following: false,
+    },
+  });
+
+  await waitFor(() => followerChanges.length === 2);
+  assert.deepEqual(followerChanges[1], {
+    threadId: "thread-follow-handshake",
+    following: false,
+  });
+});
+
 test("live owner broadcasts patches after the first owned thread snapshot", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-patches-");
   const frames = [];
@@ -1485,9 +1598,18 @@ test("live owner hydrates existing threads before first mobile-owned snapshot", 
   assert.equal(codexRequests.length, 1);
   assert.deepEqual(codexRequests[0], {
     method: "thread/read",
-    params: { threadId: "thread-hydrate" },
+    params: {
+      threadId: "thread-hydrate",
+      includeTurns: true,
+    },
   });
-  assert.equal(frames.some((frame) => frame.type === "broadcast"), false);
+  assert.equal(
+    frames.some((frame) => (
+      frame.type === "broadcast"
+      && frame.method === "thread-stream-state-changed"
+    )),
+    false
+  );
 
   resolveThreadRead({
     thread: {
@@ -2756,6 +2878,7 @@ test("live owner applies Desktop runtime overrides to later follower turn starts
 test("live owner serves follower load-complete-history with a fresh snapshot revision", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-load-history-");
   const frames = [];
+  const codexRequests = [];
   let serverSocket = null;
 
   const server = net.createServer((socket) => {
@@ -2786,6 +2909,7 @@ test("live owner serves follower load-complete-history with a fresh snapshot rev
     socketPath,
     snapshotDebounceMs: 1,
     async sendCodexRequest(method, params) {
+      codexRequests.push({ method, params });
       if (method === "thread/read") {
         return {
           thread: {
@@ -2831,6 +2955,11 @@ test("live owner serves follower load-complete-history with a fresh snapshot rev
   );
   assert.equal(response.resultType, "success");
   assert.equal(typeof response.result.revision, "number");
+  assert.ok(codexRequests.some((request) => (
+    request.method === "thread/read"
+    && request.params?.threadId === "thread-history"
+    && request.params?.includeTurns === true
+  )));
 
   // The snapshot carrying that revision must have been broadcast, complete
   // with hydrated history, so the Desktop follower can render it.

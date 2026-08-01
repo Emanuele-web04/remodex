@@ -54,6 +54,7 @@ const {
 const { createBridgeSecureTransport } = require("./secure-transport");
 const { createRolloutLiveMirrorController } = require("./rollout-live-mirror");
 const {
+  buildCompleteThreadReadParams,
   isContextualUserText,
   isThreadTurnStateProbeRequest,
   isUserRoleItem,
@@ -736,7 +737,10 @@ function startBridge({
   const relaySessionUrl = `${relayBaseUrl}/${sessionId}`;
   const notificationSecret = randomBytes(24).toString("hex");
   const desktopRefresher = new CodexDesktopRefresher({
-    enabled: config.refreshEnabled,
+    // IPC snapshots are accepted only after Codex mounts the route and
+    // announces itself as a follower. Auto-follow performs that one-time
+    // activation; refreshEnabled still controls the legacy reload workaround.
+    enabled: config.refreshEnabled || config.desktopAutoFollowEnabled === true,
     // With IPC live sync streaming content, deep-link refreshes are only needed
     // to navigate Desktop onto the phone-driven thread, not to reload content.
     navigationOnly: config.desktopIpcLiveSyncEnabled,
@@ -846,7 +850,7 @@ function startBridge({
     ? createDesktopIpcActionFollower({
       sendApplicationResponse,
       readConversationState: async (threadId) => seedConversationStateFromThreadRead(
-        await sendCodexRequest("thread/read", { threadId })
+        await sendCodexRequest("thread/read", buildCompleteThreadReadParams(threadId))
       ),
       forwardToLocalCodex: (rawMessage) => {
         observeDesktopIpcLiveOwnerInbound(rawMessage);
@@ -859,6 +863,9 @@ function startBridge({
       runtimeSettingsStore: threadRuntimeSettingsStore,
       socketPath: config.desktopIpcSocketPath || undefined,
       snapshotDebounceMs: config.desktopIpcSnapshotDebounceMs,
+      onFollowerStateChanged(threadId, following) {
+        desktopRefresher.handleFollowerStateChanged(threadId, following);
+      },
     })
     : null;
   const desktopIpcLiveOwner = !config.codexEndpoint
@@ -871,6 +878,9 @@ function startBridge({
       runtimeSettingsStore: threadRuntimeSettingsStore,
       socketPath: config.desktopIpcSocketPath || undefined,
       snapshotDebounceMs: config.desktopIpcSnapshotDebounceMs,
+      onFollowerStateChanged(threadId, following) {
+        desktopRefresher.handleFollowerStateChanged(threadId, following);
+      },
     })
     : null;
   let contextUsageWatcher = null;
@@ -1124,7 +1134,6 @@ function startBridge({
       stopContextUsageWatcher();
       // Relay reconnects are transport-only: keep local live observers running
       // so their output can enter secure replay and catch up on the next resume.
-      desktopRefresher.handleTransportReset();
       scheduleRelayReconnect(code);
     });
 

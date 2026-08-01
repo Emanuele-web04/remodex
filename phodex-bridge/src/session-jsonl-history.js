@@ -4,6 +4,10 @@
 
 const fs = require("fs");
 const { buildApplyPatchFileChangeItem } = require("./apply-patch-changes");
+const {
+  expandExecWrapperToolCall,
+  isOrchestrationWaitCall,
+} = require("./codex-tool-wrapper");
 const { terminalEventClosesTrackedTurn } = require("./rollout-turn-semantics");
 const {
   buildRemodexSourceItemKey,
@@ -585,36 +589,39 @@ function parseSessionJsonlTurns(content, {
       if (!payload) {
         continue;
       }
-      rememberToolCallForHistory(payload, toolCallsByCallId);
-      if (shouldSkipResponseItemForHistory(payload, skippedCallIds)) {
-        continue;
-      }
-      const turn = ensureTurn(
-        turns,
-        turnsById,
-        responseItemTurnId(payload) || activeTurnId || `turn-line-${sourceLineNumber}`,
-        sessionThreadId,
-        entry.timestamp
-      );
-      applyHistoryTimeZone(turn, sessionTimeZone);
-      const item = normalizeResponseItemForHistory(payload, sourceLineNumber, {
-        cwd: sessionCwd,
-        toolCallsByCallId,
-      });
-      if (item) {
-        if (shouldSkipDuplicateProposedPlanMessage(turn, item)) {
+      const projectedPayloads = expandExecWrapperToolCall(payload);
+      for (const projectedPayload of projectedPayloads) {
+        rememberToolCallForHistory(projectedPayload, toolCallsByCallId);
+        if (shouldSkipResponseItemForHistory(projectedPayload, skippedCallIds)) {
           continue;
         }
-        const itemTimestamp = historyItemTimestamp(item, entry.timestamp);
-        if (itemTimestamp && !item.createdAt) {
-          item.createdAt = itemTimestamp;
+        const turn = ensureTurn(
+          turns,
+          turnsById,
+          responseItemTurnId(projectedPayload) || activeTurnId || `turn-line-${sourceLineNumber}`,
+          sessionThreadId,
+          entry.timestamp
+        );
+        applyHistoryTimeZone(turn, sessionTimeZone);
+        const item = normalizeResponseItemForHistory(projectedPayload, sourceLineNumber, {
+          cwd: sessionCwd,
+          toolCallsByCallId,
+        });
+        if (item) {
+          if (shouldSkipDuplicateProposedPlanMessage(turn, item)) {
+            continue;
+          }
+          const itemTimestamp = historyItemTimestamp(item, entry.timestamp);
+          if (itemTimestamp && !item.createdAt) {
+            item.createdAt = itemTimestamp;
+          }
+          if (itemTimestamp && !item.timestamp) {
+            item.timestamp = itemTimestamp;
+          }
+          applyHistoryTimeZone(item, sessionTimeZone);
+          applyHistoryAssistantSourceAlias(item, turn.id, assistantAliasOccurrencesByBaseKey);
+          addHistoryItemToTurn(turn, item);
         }
-        if (itemTimestamp && !item.timestamp) {
-          item.timestamp = itemTimestamp;
-        }
-        applyHistoryTimeZone(item, sessionTimeZone);
-        applyHistoryAssistantSourceAlias(item, turn.id, assistantAliasOccurrencesByBaseKey);
-        addHistoryItemToTurn(turn, item);
       }
     }
   }
@@ -1333,6 +1340,13 @@ function shouldSkipResponseItemForHistory(payload, skippedCallIds) {
   const callId = normalizeString(payload.call_id) || normalizeString(payload.callId);
 
   if (type === "tool_call_output" && callId && skippedCallIds.has(callId)) {
+    return true;
+  }
+
+  if (type === "tool_call" && isOrchestrationWaitCall(payload)) {
+    if (callId) {
+      skippedCallIds.add(callId);
+    }
     return true;
   }
 
