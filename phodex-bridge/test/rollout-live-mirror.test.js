@@ -201,8 +201,12 @@ test("desktop-origin exec wrappers complete every nested parallel tool", async (
   ]);
   assert.equal(outbound[2].params.command, "git status --short");
   assert.equal(outbound[3].params.message, "Writing to terminal");
+  assert.equal(outbound[3].params.itemId, "outer-parallel:nested:2");
+  assert.equal(outbound[3].params.status, "inProgress");
   assert.equal(outbound[4].params.chunk, "clean");
   assert.equal(outbound[6].params.message, "Wrote to terminal");
+  assert.equal(outbound[6].params.itemId, "outer-parallel:nested:2");
+  assert.equal(outbound[6].params.status, "completed");
 });
 
 test("desktop-origin active runs emit activity heartbeat while rollout is quiet", async (t) => {
@@ -2410,6 +2414,8 @@ test("desktop-origin rollouts mirror custom apply_patch as file-change lifecycle
   assert.equal(outbound[2].params.itemId, "call-patch");
   assert.equal(outbound[2].params.status, "inProgress");
   assert.equal(outbound[2].params.changes[0].path, "Sources/App.swift");
+  assert.equal(outbound[3].params.itemId, undefined);
+  assert.equal(outbound[3].params.status, undefined);
   assert.equal(outbound[4].params.itemId, "call-patch");
   assert.equal(outbound[4].params.changes[0].path, "Sources/App.swift");
   assert.equal(outbound[4].params.changes[0].kind, "update");

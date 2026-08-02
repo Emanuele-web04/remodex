@@ -542,9 +542,11 @@ struct TurnComposerInputTextView: UIViewRepresentable {
                 }
             } else if !shouldBeFocused || !isEditable {
                 guard textView.isFirstResponder else { return }
-                DispatchQueue.main.async { [weak textView] in
-                    textView?.resignFirstResponder()
-                }
+                // Resign in the same update that flips the SwiftUI focus binding.
+                // Deferring this by one run-loop turn lets the composer begin its
+                // collapse while the keyboard still owns the bottom safe area,
+                // producing a second layout correction when UIKit catches up.
+                textView.resignFirstResponder()
             }
         }
     }

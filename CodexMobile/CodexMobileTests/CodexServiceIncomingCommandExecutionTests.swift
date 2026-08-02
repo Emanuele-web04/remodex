@@ -642,6 +642,60 @@ final class CodexServiceIncomingCommandExecutionTests: XCTestCase {
         XCTAssertTrue(toolRows.isEmpty)
     }
 
+    func testBackgroundToolActivityLifecycleCompletesMatchingRow() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let callID = "call-\(UUID().uuidString)"
+
+        service.handleNotification(
+            method: "turn/started",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+            ])
+        )
+        service.handleNotification(
+            method: "codex/event/background_event",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "call_id": .string(callID),
+                "itemId": .string(callID),
+                "status": .string("inProgress"),
+                "message": .string("Writing to terminal"),
+            ])
+        )
+
+        var toolRows = service.messages(for: threadID).filter {
+            $0.role == .system && $0.kind == .toolActivity
+        }
+        XCTAssertEqual(toolRows.count, 1)
+        XCTAssertEqual(toolRows[0].itemId, callID)
+        XCTAssertEqual(toolRows[0].text, "Writing to terminal")
+        XCTAssertTrue(toolRows[0].isStreaming)
+
+        service.handleNotification(
+            method: "codex/event/background_event",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "call_id": .string(callID),
+                "itemId": .string(callID),
+                "status": .string("completed"),
+                "message": .string("Wrote to terminal"),
+            ])
+        )
+
+        toolRows = service.messages(for: threadID).filter {
+            $0.role == .system && $0.kind == .toolActivity
+        }
+        XCTAssertEqual(toolRows.count, 1)
+        XCTAssertEqual(toolRows[0].itemId, callID)
+        XCTAssertEqual(toolRows[0].text, "Wrote to terminal")
+        XCTAssertFalse(toolRows[0].isStreaming)
+    }
+
     func testEssentialReadEventUsesToolActivityInsteadOfThinking() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"

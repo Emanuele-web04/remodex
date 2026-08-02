@@ -265,7 +265,7 @@ enum TurnTimelineRenderProjection {
             bufferedCommandPendingToolActivity.removeAll(keepingCapacity: true)
         }
 
-        func belongsToActiveTurn(_ message: CodexMessage) -> Bool {
+        func belongsToActiveTurn(_ message: CodexMessage, at messageIndex: Int? = nil) -> Bool {
             guard isThreadRunning else { return false }
 
             let messageTurnID = normalizedIdentifier(message.turnId)
@@ -277,10 +277,24 @@ enum TurnTimelineRenderProjection {
 
             guard messageTurnID == nil,
                   let latestUserMessageIndex,
-                  let messageIndex = messages.lastIndex(where: { $0.id == message.id }) else {
+                  let messageIndex = messageIndex ?? messages.lastIndex(where: { $0.id == message.id }) else {
                 return false
             }
             return messageIndex > latestUserMessageIndex
+        }
+
+        let latestActiveToolCallIndex = messages.indices.last(where: { index in
+            isToolBurstCandidate(messages[index])
+                && belongsToActiveTurn(messages[index], at: index)
+        })
+
+        func isOlderActiveToolActivity(_ message: CodexMessage, at messageIndex: Int) -> Bool {
+            guard isCommandGroupingToolActivity(message),
+                  belongsToActiveTurn(message, at: messageIndex),
+                  let latestActiveToolCallIndex else {
+                return false
+            }
+            return messageIndex != latestActiveToolCallIndex
         }
 
         func flushBufferedCommandMessages(keepsLatestToolCallVisible: Bool = false) {
@@ -417,7 +431,10 @@ enum TurnTimelineRenderProjection {
             // the completed-turn previous-message projection below.
             let opensCommandGroup = isFinishedCommandToolCall(renderedMessage)
             let anchorsToolOnlyGroup = !opensCommandGroup
-                && isFinishedGroupAnchorToolActivity(renderedMessage)
+                && (
+                    isFinishedGroupAnchorToolActivity(renderedMessage)
+                        || isOlderActiveToolActivity(renderedMessage, at: index)
+                )
                 && (
                     !bufferedCommandOrderedMessages.isEmpty
                         || bufferedToolMessages.isEmpty

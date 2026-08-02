@@ -1476,6 +1476,8 @@ function toolStartNotifications(state, payload) {
       threadId: state.threadId,
       turnId: state.activeTurnId,
       call_id: callId,
+      itemId: callId,
+      status: "inProgress",
       message: activityMessage,
     }),
   ];
@@ -1536,6 +1538,10 @@ function customToolStartNotifications(state, payload) {
       threadId: state.threadId,
       turnId: state.activeTurnId,
       call_id: callId,
+      ...(!state.applyPatchCalls.has(callId) ? {
+        itemId: callId,
+        status: "inProgress",
+      } : {}),
       message: activityMessage,
     }),
   ];
@@ -1641,6 +1647,8 @@ function toolOutputNotifications(state, payload) {
       threadId: state.threadId,
       turnId: state.activeTurnId,
       call_id: callId,
+      itemId: callId,
+      status: "completed",
       message: genericToolCompletionMessage(toolCall.toolName),
     }));
     state.commandCalls.delete(callId);

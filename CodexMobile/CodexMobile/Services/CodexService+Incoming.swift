@@ -2090,6 +2090,41 @@ extension CodexService {
             return false
         }
 
+        if eventType == "background_event",
+           let itemId = firstNonEmptyString([
+               firstStringValue(in: payload, keys: ["itemId", "item_id", "call_id", "callId"]),
+               firstStringValue(in: paramsObject, keys: ["itemId", "item_id", "call_id", "callId"]),
+           ]),
+           let rawStatus = firstNonEmptyString([
+               firstStringValue(in: payload, keys: ["status"]),
+               firstStringValue(in: paramsObject, keys: ["status"]),
+           ]) {
+            let isCompleted = normalizedToolActivityStatus(
+                rawStatus,
+                isCompleted: false
+            ) != "Running"
+
+            if isCompleted {
+                completeStreamingSystemItemMessage(
+                    threadId: threadId,
+                    turnId: turnId,
+                    itemId: itemId,
+                    kind: .toolActivity,
+                    text: line
+                )
+            } else {
+                upsertStreamingSystemItemMessage(
+                    threadId: threadId,
+                    turnId: turnId,
+                    itemId: itemId,
+                    kind: .toolActivity,
+                    text: line,
+                    isStreaming: true
+                )
+            }
+            return true
+        }
+
         appendEssentialActivityLine(threadId: threadId, turnId: turnId, line: line)
         return true
     }

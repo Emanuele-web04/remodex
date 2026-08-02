@@ -562,6 +562,95 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(group.collapsedDetailMessages.map(\.id), ["trace"])
     }
 
+    func testTimelineRenderProjectionCollapsesOlderStreamingToolActivitiesAcrossReasoning() {
+        // Older rollout mirrors left generic activities streaming for the whole
+        // turn. Only the newest call should remain visible even when reasoning
+        // rows separate the calls.
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "user",
+                threadID: "thread",
+                role: .user,
+                text: "Run the checks",
+                createdAt: now,
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "tool-1",
+                threadID: "thread",
+                role: .system,
+                kind: .toolActivity,
+                text: "Running first tool",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "tool-item-1",
+                isStreaming: true
+            ),
+            makeMessage(
+                id: "reasoning-1",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "Checking the first result",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "reasoning-item-1"
+            ),
+            makeMessage(
+                id: "tool-2",
+                threadID: "thread",
+                role: .system,
+                kind: .toolActivity,
+                text: "Running second tool",
+                createdAt: now.addingTimeInterval(3),
+                turnID: "turn-1",
+                itemID: "tool-item-2",
+                isStreaming: true
+            ),
+            makeMessage(
+                id: "reasoning-2",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "Checking the second result",
+                createdAt: now.addingTimeInterval(4),
+                turnID: "turn-1",
+                itemID: "reasoning-item-2"
+            ),
+            makeMessage(
+                id: "tool-3",
+                threadID: "thread",
+                role: .system,
+                kind: .toolActivity,
+                text: "Running current tool",
+                createdAt: now.addingTimeInterval(5),
+                turnID: "turn-1",
+                itemID: "tool-item-3",
+                isStreaming: true
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(
+            messages: messages,
+            activeTurnID: "turn-1",
+            isThreadRunning: true
+        )
+
+        XCTAssertEqual(items.map(\.id), ["user", "command-group:tool-1", "tool-3"])
+        guard case .commandGroup(let group) = items[1],
+              case .message(let latestToolCall) = items[2] else {
+            return XCTFail("Expected older generic activities to collapse before the latest call")
+        }
+        XCTAssertEqual(group.commandCount, 0)
+        XCTAssertEqual(group.toolCallCount, 2)
+        XCTAssertEqual(
+            group.orderedMessages.map(\.id),
+            ["tool-1", "reasoning-1", "tool-2", "reasoning-2"]
+        )
+        XCTAssertEqual(latestToolCall.id, "tool-3")
+    }
+
     func testTimelineRenderProjectionKeepsUpToFourToolRunsExpanded() {
         let now = Date()
         let toolMessages = (1...4).map { index in
