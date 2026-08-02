@@ -861,8 +861,12 @@ enum TurnTimelineRenderProjection {
     private static func isPriorityVisibleMessage(_ message: CodexMessage, finalMessage: CodexMessage? = nil) -> Bool {
         if message.role == .system {
             switch message.kind {
-            case .fileChange, .subagentAction, .userInputPrompt, .autoApprovalReview:
+            case .fileChange, .subagentAction, .userInputPrompt:
                 return true
+            case .autoApprovalReview:
+                // Approved reviews are settled tool history. Keep reviews that
+                // failed or may still need attention beside the final answer.
+                return message.autoApprovalReview?.status != .approved
             case .plan:
                 return message.shouldDisplayInlinePlanResult
             case .thinking, .toolActivity, .commandExecution, .chat:
