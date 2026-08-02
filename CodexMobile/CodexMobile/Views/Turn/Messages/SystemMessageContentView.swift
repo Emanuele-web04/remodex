@@ -85,8 +85,8 @@ struct SystemMessageContentView: View {
         .transaction { transaction in
             transaction.animation = nil
         }
-        .contextMenu {
-            selectableTextActions(text: actionText)
+        .uiKitContextMenu {
+            selectableTextMenu(text: actionText)
         }
     }
 
@@ -118,8 +118,8 @@ struct SystemMessageContentView: View {
                 )
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .contextMenu {
-                selectableTextActions(text: actionText)
+            .uiKitContextMenu {
+                selectableTextMenu(text: actionText)
             }
         }
     }
@@ -153,8 +153,8 @@ struct SystemMessageContentView: View {
 
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .contextMenu {
-            selectableTextActions(text: actionText)
+        .uiKitContextMenu {
+            selectableTextMenu(text: actionText)
         }
     }
 
@@ -224,8 +224,8 @@ struct SystemMessageContentView: View {
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 2)
-            .contextMenu {
-                selectableTextActions(text: actionText)
+            .uiKitContextMenu {
+                selectableTextMenu(text: actionText)
             }
     }
 
@@ -250,8 +250,8 @@ struct SystemMessageContentView: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 12)
-        .contextMenu {
-            selectableTextActions(text: actionText)
+        .uiKitContextMenu {
+            selectableTextMenu(text: actionText)
         }
     }
 
@@ -267,25 +267,29 @@ struct SystemMessageContentView: View {
         text.trimmingCharacters(in: .whitespacesAndNewlines) == "Context compacted"
     }
 
-    @ViewBuilder
-    private func selectableTextActions(text: String) -> some View {
-        if let selectableText = timelineSelectableActionText(text) {
-            Button {
+    private func selectableTextMenu(text: String) -> UIMenu {
+        guard let selectableText = timelineSelectableActionText(text) else {
+            return UIMenu()
+        }
+
+        return UIMenu(children: [
+            UIAction(
+                title: "Select Text",
+                image: RemodexIcon.menuUIImage(systemName: "text.cursor")
+            ) { _ in
                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
                 onSelectText(SelectableMessageTextSheetState(
                     contentKind: .systemPlainText,
                     text: selectableText
                 ))
-            } label: {
-                Label("Select Text", systemImage: "text.cursor")
-            }
-
-            Button {
+            },
+            UIAction(
+                title: "Copy",
+                image: RemodexIcon.menuUIImage(systemName: "doc.on.doc")
+            ) { _ in
                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
                 UIPasteboard.general.string = selectableText
-            } label: {
-                RemodexIcon.menuLabel("Copy", systemName: "doc.on.doc")
-            }
-        }
+            },
+        ])
     }
 }

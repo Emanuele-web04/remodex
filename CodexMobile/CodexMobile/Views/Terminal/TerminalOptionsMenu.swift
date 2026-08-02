@@ -5,6 +5,7 @@
 // Depends on: SwiftUI, TerminalUIModels
 
 import SwiftUI
+import UIKit
 
 struct TerminalOptionsMenu: View {
     let statusLabel: String
@@ -31,13 +32,7 @@ struct TerminalOptionsMenu: View {
     let onAdjustFontSize: (Double) -> Void
 
     var body: some View {
-        Menu {
-            statusSection
-            textSizeSection
-            sessionSection
-            clipboardSection
-            connectionSection
-        } label: {
+        UIKitMenuButton {
             // No fixed frame / background — the icon sits in the toolbar like
             // a stock nav-bar button. A small status dot floats just above the
             // glyph so we keep the running/error glance without a pill.
@@ -54,85 +49,87 @@ struct TerminalOptionsMenu: View {
                         )
                         .offset(x: 4, y: -4)
                 }
+        } menu: {
+            terminalMenu()
         }
         .accessibilityLabel("Terminal options")
         .accessibilityValue(statusLabel)
     }
 
-    private var statusSection: some View {
-        Section {
-            Text(statusLabel)
-            if let errorDetail {
-                Text(errorDetail)
-            }
+    private func terminalMenu() -> UIMenu {
+        var statusActions: [UIMenuElement] = [
+            menuAction(title: statusLabel, isEnabled: false) {},
+        ]
+        if let errorDetail {
+            statusActions.append(menuAction(title: errorDetail, isEnabled: false) {})
         }
-    }
 
-    private var textSizeSection: some View {
-        Section("Text size") {
-            Button("A- \(String(format: "%.1f", nextSmallerFontSize)) pt") {
+        let textSizeActions: [UIMenuElement] = [
+            menuAction(
+                title: "A- \(String(format: "%.1f", nextSmallerFontSize)) pt",
+                isEnabled: fontSize > remodexTerminalMinFontSize
+            ) {
                 onAdjustFontSize(-remodexTerminalFontSizeStep)
-            }
-            .disabled(fontSize <= remodexTerminalMinFontSize)
-
-            Button("A+ \(String(format: "%.1f", nextLargerFontSize)) pt") {
+            },
+            menuAction(
+                title: "A+ \(String(format: "%.1f", nextLargerFontSize)) pt",
+                isEnabled: fontSize < remodexTerminalMaxFontSize
+            ) {
                 onAdjustFontSize(remodexTerminalFontSizeStep)
-            }
-            .disabled(fontSize >= remodexTerminalMaxFontSize)
-        }
-    }
+            },
+        ]
 
-    private var sessionSection: some View {
-        Section {
-            ForEach(sessions) { session in
-                Button {
-                    onSelectSession(session.terminalId)
-                } label: {
-                    RemodexIcon.menuLabel(
-                        session.displayLabel,
-                        systemName: session.terminalId == activeTerminalId ? "checkmark" : "terminal"
-                    )
-                }
-            }
-
-            Button(action: onOpenNewTerminal) {
-                Label("Open new terminal", systemImage: "plus")
+        var sessionActions: [UIMenuElement] = sessions.map { session in
+            menuAction(
+                title: session.displayLabel,
+                systemName: "terminal",
+                state: session.terminalId == activeTerminalId ? .on : .off
+            ) {
+                onSelectSession(session.terminalId)
             }
         }
+        sessionActions.append(menuAction(title: "Open new terminal", systemName: "plus", handler: onOpenNewTerminal))
+
+        let clipboardActions: [UIMenuElement] = [
+            menuAction(title: "Paste", systemName: "doc.on.clipboard", isEnabled: canPaste, handler: onPaste),
+            menuAction(title: "Select text", systemName: "text.cursor", isEnabled: canSelectText, handler: onSelectText),
+        ]
+
+        let connectionActions: [UIMenuElement] = [
+            menuAction(
+                title: isRunning ? "Disconnect" : "Connect",
+                systemName: isRunning ? "xmark" : "terminal",
+                isEnabled: hasConnectionConfiguration || isRunning,
+                handler: onToggleConnection
+            ),
+            menuAction(title: "SSH connection", systemName: "lock.shield", handler: onOpenConnectionEditor),
+            menuAction(title: "Clear", systemName: "trash", isEnabled: canClear, handler: onClear),
+            menuAction(title: "Reset host key", systemName: "key", isEnabled: canResetKnownHost, handler: onResetKnownHost),
+        ]
+
+        return UIMenu(children: [
+            UIMenu(options: [.displayInline], children: statusActions),
+            UIMenu(title: "Text size", options: [.displayInline], children: textSizeActions),
+            UIMenu(options: [.displayInline], children: sessionActions),
+            UIMenu(options: [.displayInline], children: clipboardActions),
+            UIMenu(options: [.displayInline], children: connectionActions),
+        ])
     }
 
-    private var clipboardSection: some View {
-        Section {
-            Button(action: onPaste) {
-                RemodexIcon.menuLabel("Paste", systemName: "doc.on.clipboard")
-            }
-            .disabled(!canPaste)
-
-            Button(action: onSelectText) {
-                RemodexIcon.menuLabel("Select text", systemName: "text.cursor")
-            }
-            .disabled(!canSelectText)
-        }
-    }
-
-    private var connectionSection: some View {
-        Section {
-            Button(action: onToggleConnection) {
-                RemodexIcon.menuLabel(isRunning ? "Disconnect" : "Connect", systemName: isRunning ? "xmark" : "terminal")
-            }
-            .disabled(!hasConnectionConfiguration && !isRunning)
-
-            Button(action: onOpenConnectionEditor) {
-                RemodexIcon.menuLabel("SSH connection", systemName: "lock.shield")
-            }
-
-            Button("Clear", systemImage: "trash", action: onClear)
-                .disabled(!canClear)
-
-            Button(action: onResetKnownHost) {
-                RemodexIcon.menuLabel("Reset host key", systemName: "key")
-            }
-                .disabled(!canResetKnownHost)
+    private func menuAction(
+        title: String,
+        systemName: String? = nil,
+        isEnabled: Bool = true,
+        state: UIMenuElement.State = .off,
+        handler: @escaping () -> Void
+    ) -> UIAction {
+        UIAction(
+            title: title,
+            image: systemName.flatMap { RemodexIcon.menuUIImage(systemName: $0) },
+            attributes: isEnabled ? [] : .disabled,
+            state: state
+        ) { _ in
+            handler()
         }
     }
 

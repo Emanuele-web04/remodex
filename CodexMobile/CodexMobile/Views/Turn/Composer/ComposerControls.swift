@@ -7,6 +7,7 @@
 // Depends on: SwiftUI, RemodexIcon, CircularIconBadge, TurnComposerRuntimeState
 
 import SwiftUI
+import UIKit
 
 // MARK: - Attachment ("+") menu
 
@@ -29,58 +30,68 @@ struct ComposerAttachmentMenu: View {
     private let metaLabelColor = Color(.secondaryLabel)
 
     var body: some View {
-        Menu {
-            // `RemodexIcon.menuLabel` keeps Central artwork in SwiftUI Menus
-            // by routing through `Label(_, image:)` for mapped assets and
-            // falling back to `Label(_, systemImage:)` for plain SF Symbols.
-            Toggle(isOn: Binding(
-                get: { isPlanModeArmed },
-                set: { newValue in
-                    HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                    onSetPlanModeArmed(newValue)
-                }
-            )) {
-                RemodexIcon.menuLabel("Plan mode", systemName: "remodex.plan-mode")
-            }
-
-            if runtimeState.supportsFastMode {
-                Button {
-                    HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                    toggleFastMode()
-                } label: {
-                    // Central zap pair (outline = off, solid = on), matching
-                    // the pill badge and the runtime slider overlay's toggle.
-                    RemodexIcon.menuLabel("Fast Mode", systemName: fastModePlusMenuIconName)
-                }
-            }
-
-            Section {
-                Button {
-                    HapticFeedback.shared.triggerImpactFeedback()
-                    onTapAddImage()
-                } label: {
-                    RemodexIcon.menuLabel("Photo library", systemName: "photo")
-                }
-                .disabled(remainingAttachmentSlots == 0)
-
-                Button {
-                    HapticFeedback.shared.triggerImpactFeedback()
-                    onTapTakePhoto()
-                } label: {
-                    RemodexIcon.menuLabel("Take a photo", systemName: "camera.fill")
-                }
-                .disabled(remainingAttachmentSlots == 0)
-            }
-        } label: {
+        UIKitMenuButton {
             RemodexIcon.image(systemName: "plus")
                 .font(AppFont.title3(weight: .regular))
                 .foregroundStyle(Color.primary)
                 .frame(width: tapTargetSide ?? iconSide, height: tapTargetSide ?? iconSide)
                 .contentShape(Circle())
+        } menu: {
+            attachmentMenu()
         }
         .tint(metaLabelColor)
         .disabled(isInteractionLocked)
         .accessibilityLabel("Composer options")
+    }
+
+    private func attachmentMenu() -> UIMenu {
+        var modeActions: [UIMenuElement] = [
+            UIAction(
+                title: "Plan mode",
+                image: RemodexIcon.menuUIImage(systemName: "remodex.plan-mode"),
+                state: isPlanModeArmed ? .on : .off
+            ) { _ in
+                HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                onSetPlanModeArmed(!isPlanModeArmed)
+            },
+        ]
+
+        if runtimeState.supportsFastMode {
+            modeActions.append(
+                UIAction(
+                    title: "Fast Mode",
+                    image: RemodexIcon.menuUIImage(systemName: fastModePlusMenuIconName),
+                    state: runtimeState.isSelectedServiceTier(.fast) ? .on : .off
+                ) { _ in
+                    HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                    toggleFastMode()
+                }
+            )
+        }
+
+        let attachmentActions: [UIMenuElement] = [
+            UIAction(
+                title: "Photo library",
+                image: RemodexIcon.menuUIImage(systemName: "photo"),
+                attributes: remainingAttachmentSlots == 0 ? .disabled : []
+            ) { _ in
+                HapticFeedback.shared.triggerImpactFeedback()
+                onTapAddImage()
+            },
+            UIAction(
+                title: "Take a photo",
+                image: RemodexIcon.menuUIImage(systemName: "camera.fill"),
+                attributes: remainingAttachmentSlots == 0 ? .disabled : []
+            ) { _ in
+                HapticFeedback.shared.triggerImpactFeedback()
+                onTapTakePhoto()
+            },
+        ]
+
+        return UIMenu(children: [
+            UIMenu(options: [.displayInline], children: modeActions),
+            UIMenu(options: [.displayInline], children: attachmentActions),
+        ])
     }
 
     // Toggling Fast Mode from the plus menu mirrors the runtime speed menu without adding another visible pill.

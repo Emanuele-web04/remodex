@@ -202,14 +202,9 @@ enum RemodexIcon {
         return resized.withRenderingMode(.alwaysTemplate)
     }
 
-    // Larger than the ~17pt body-equivalent SF Symbol menu glyph: the
-    // Central artwork's thin stroke reads visually smaller than an SF Symbol
-    // at the same point size, so bumping to 20pt gives the custom glyphs
-    // the "a little bolder than native" feel the design calls for without
-    // going back to the original 24pt mismatch this helper was introduced
-    // to fix.
+    // Keep custom menu artwork on the same compact metric as native symbols.
     private static var menuGlyphPointSize: CGFloat {
-        UIFontMetrics.default.scaledValue(for: 20)
+        AppMenuPresentation.glyphPointSize
     }
 }
 

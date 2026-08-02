@@ -104,7 +104,7 @@ private struct UIKitContextMenuHost<Content: View>: UIViewControllerRepresentabl
                 identifier: nil,
                 previewProvider: nil
             ) { _ in
-                builder()
+                AppMenuPresentation.style(builder())
             }
         }
     }

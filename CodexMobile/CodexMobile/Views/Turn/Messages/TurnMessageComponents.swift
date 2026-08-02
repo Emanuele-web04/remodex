@@ -769,32 +769,36 @@ struct MessageRow: View, Equatable {
                 constrainsToAvailableWidth: true,
                 animatesReveal: showsStreamingAnimations
             )
-            .contextMenu {
-                streamingAssistantTextActions(text: actionText)
+            .uiKitContextMenu {
+                streamingAssistantTextMenu(text: actionText)
             }
         }
     }
 
-    @ViewBuilder
-    private func streamingAssistantTextActions(text: String) -> some View {
-        if let selectableText = timelineSelectableActionText(text) {
-            Button {
+    private func streamingAssistantTextMenu(text: String) -> UIMenu {
+        guard let selectableText = timelineSelectableActionText(text) else {
+            return UIMenu()
+        }
+
+        return UIMenu(children: [
+            UIAction(
+                title: "Select Text",
+                image: RemodexIcon.menuUIImage(systemName: "text.cursor")
+            ) { _ in
                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
                 selectableTextSheet = SelectableMessageTextSheetState(
                     contentKind: .streamingAssistantMarkdown,
                     text: selectableText
                 )
-            } label: {
-                Label("Select Text", systemImage: "text.cursor")
-            }
-
-            Button {
+            },
+            UIAction(
+                title: "Copy",
+                image: RemodexIcon.menuUIImage(systemName: "doc.on.doc")
+            ) { _ in
                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
                 UIPasteboard.general.string = selectableText
-            } label: {
-                RemodexIcon.menuLabel("Copy", systemName: "doc.on.doc")
-            }
-        }
+            },
+        ])
     }
 
     private func expandVisibleText() {

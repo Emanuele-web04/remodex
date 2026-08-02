@@ -766,7 +766,7 @@ final class GhosttyTerminalView: UIView, UITextFieldDelegate, UIGestureRecognize
         let copyAction = UIAction(title: "Copy", image: RemodexIcon.menuUIImage(systemName: "doc.on.doc")) { [weak self] _ in
             self?.copyCurrentSelectionToPasteboard()
         }
-        return UIMenu(children: [copyAction])
+        return AppMenuPresentation.style(UIMenu(children: [copyAction]))
     }
 
     func editMenuInteraction(

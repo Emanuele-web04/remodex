@@ -6,6 +6,7 @@
 // Depends on: SwiftUI, AppFont
 
 import SwiftUI
+import UIKit
 
 // Keep native switch rails distinct from primary text tint in dark mode.
 let settingsToggleTintColor = Color.green
@@ -123,19 +124,7 @@ struct SettingsMenuPickerRow<Value: Hashable>: View {
     var isDisabled = false
 
     var body: some View {
-        Menu {
-            ForEach(options) { option in
-                Button {
-                    selection = option.value
-                } label: {
-                    if option.value == selection {
-                        Label(option.title, systemImage: "checkmark")
-                    } else {
-                        Text(option.title)
-                    }
-                }
-            }
-        } label: {
+        UIKitMenuButton {
             HStack(alignment: .firstTextBaseline, spacing: 12) {
                 Text(title)
                     .font(AppFont.body())
@@ -156,6 +145,18 @@ struct SettingsMenuPickerRow<Value: Hashable>: View {
                 }
             }
             .contentShape(Rectangle())
+        } menu: {
+            UIMenu(
+                options: [.singleSelection],
+                children: options.map { option in
+                    UIAction(
+                        title: option.title,
+                        state: option.value == selection ? .on : .off
+                    ) { _ in
+                        selection = option.value
+                    }
+                }
+            )
         }
         .buttonStyle(.plain)
         .disabled(isDisabled || options.isEmpty)

@@ -55,23 +55,8 @@ struct UserMessageBubble: View {
                     .foregroundStyle(message.deliveryState == .failed ? .red : .secondary)
             }
         }
-        .contextMenu {
-            if !actionText.isEmpty {
-                Button {
-                    HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                    UIPasteboard.general.string = actionText
-                } label: {
-                    RemodexIcon.menuLabel("Copy", systemName: "doc.on.doc")
-                }
-            }
-            if isRetryAvailable, !actionText.isEmpty {
-                Button {
-                    HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                    onRetryUserMessage(actionText)
-                } label: {
-                    Label("Retry", systemImage: "arrow.clockwise")
-                }
-            }
+        .uiKitContextMenu {
+            userMessageMenu()
         }
         .fullScreenCover(item: $previewImage) { payload in
             ZoomableImagePreviewScreen(
@@ -80,6 +65,32 @@ struct UserMessageBubble: View {
             )
         }
         .modifier(UserBubbleSendAppearance(isEnabled: isFreshLocalSend))
+    }
+
+    private func userMessageMenu() -> UIMenu {
+        var actions: [UIMenuElement] = []
+
+        if !actionText.isEmpty {
+            actions.append(UIAction(
+                title: "Copy",
+                image: RemodexIcon.menuUIImage(systemName: "doc.on.doc")
+            ) { _ in
+                HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                UIPasteboard.general.string = actionText
+            })
+        }
+
+        if isRetryAvailable, !actionText.isEmpty {
+            actions.append(UIAction(
+                title: "Retry",
+                image: RemodexIcon.menuUIImage(systemName: "arrow.clockwise")
+            ) { _ in
+                HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                onRetryUserMessage(actionText)
+            })
+        }
+
+        return UIMenu(children: actions)
     }
 
     // Only a just-sent optimistic row animates in. History rows arrive confirmed

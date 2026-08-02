@@ -8,7 +8,8 @@ import SwiftUI
 import UIKit
 
 extension TurnGitActionKind {
-    func menuIcon(pointSize: CGFloat = 20) -> UIImage {
+    func menuIcon(pointSize: CGFloat? = nil) -> UIImage {
+        let pointSize = pointSize ?? AppMenuPresentation.glyphPointSize
         let cgSize = CGSize(width: pointSize, height: pointSize)
         switch self {
         case .initialize:
@@ -202,7 +203,7 @@ private struct UIKitGitActionsMenuButton: UIViewRepresentable {
                     completion([])
                     return
                 }
-                completion(coordinator.buildMenu().children)
+                completion(AppMenuPresentation.style(coordinator.buildMenu()).children)
             },
         ])
         return button
@@ -258,7 +259,7 @@ private struct UIKitGitActionsMenuButton: UIViewRepresentable {
             // sync state itself is known.
             if snapshot.gitSyncState != nil, let completion = pendingChangesCompletion {
                 pendingChangesCompletion = nil
-                completion(resolvedChangesElements())
+                completion(AppMenuPresentation.style(resolvedChangesElements()))
             }
         }
 
@@ -320,7 +321,7 @@ private struct UIKitGitActionsMenuButton: UIViewRepresentable {
                     return
                 }
                 if self.snapshot.gitSyncState != nil {
-                    completion(self.resolvedChangesElements())
+                    completion(AppMenuPresentation.style(self.resolvedChangesElements()))
                 } else {
                     self.pendingChangesCompletion = completion
                 }

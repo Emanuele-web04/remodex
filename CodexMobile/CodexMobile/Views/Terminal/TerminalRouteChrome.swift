@@ -5,6 +5,7 @@
 // Depends on: SwiftUI, RemodexTerminalTheme, TerminalUIModels, AdaptiveGlassModifier
 
 import SwiftUI
+import UIKit
 
 // MARK: - Navigation title
 
@@ -221,32 +222,29 @@ private struct TerminalRouteKeySegment: View {
     // Tap = toggle pending modifier; long-press surfaces the system menu so the
     // user can switch between cmd/shift/alt/ctrl without remembering a gesture.
     private var modifierSegment: some View {
-        Menu {
-            Picker(
-                selection: Binding<TerminalPendingModifier>(
-                    get: { action.modifier ?? .ctrl },
-                    set: { newValue in
-                        HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                        onSelectModifier(newValue)
-                    }
-                ),
-                label: Text("Modifier key")
-            ) {
-                ForEach(TerminalPendingModifier.allCases, id: \.self) { modifier in
-                    RemodexIcon.menuLabel(modifier.menuTitle, systemName: modifier.menuSymbolName)
-                        .tag(modifier)
-                }
-            }
-            .pickerStyle(.inline)
-        } label: {
-            segmentLabel
-        } primaryAction: {
+        Button {
             HapticFeedback.shared.triggerImpactFeedback(style: .light)
             onAction(action)
+        } label: {
+            segmentLabel
         }
-        .menuOrder(.fixed)
         .buttonStyle(.plain)
         .disabled(!isEnabled)
+        .uiKitContextMenu {
+            UIMenu(
+                options: [.singleSelection],
+                children: TerminalPendingModifier.allCases.map { modifier in
+                    UIAction(
+                        title: modifier.menuTitle,
+                        image: RemodexIcon.menuUIImage(systemName: modifier.menuSymbolName),
+                        state: modifier == (action.modifier ?? .ctrl) ? .on : .off
+                    ) { _ in
+                        HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                        onSelectModifier(modifier)
+                    }
+                }
+            )
+        }
         .accessibilityLabel("\(action.label) modifier")
         .accessibilityHint("Tap to arm. Long-press to choose between cmd, shift, alt, and ctrl.")
     }

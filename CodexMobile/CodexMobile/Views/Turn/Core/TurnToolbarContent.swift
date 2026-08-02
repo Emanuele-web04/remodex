@@ -395,11 +395,11 @@ private struct UIKitThreadActionsToolbarButton: UIViewRepresentable {
 
         // Builds fresh rows at presentation time so disabled/loading state stays current.
         func makeMenu() -> UIMenu {
-            UIMenu(
+            AppMenuPresentation.style(UIMenu(
                 title: "",
                 options: [.displayInline],
                 children: actions.map { $0.uiAction() }
-            )
+            ))
         }
     }
 }

@@ -80,7 +80,7 @@ private struct UIKitMenuButtonBacker: UIViewControllerRepresentable {
         let coordinator = context.coordinator
         button.menu = UIMenu(children: [
             UIDeferredMenuElement.uncached { completion in
-                completion(coordinator.menu().children)
+                completion(AppMenuPresentation.style(coordinator.menu()).children)
             },
         ])
 

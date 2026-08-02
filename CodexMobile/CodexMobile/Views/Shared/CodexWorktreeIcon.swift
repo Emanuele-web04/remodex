@@ -48,8 +48,7 @@ struct CodexWorktreeIcon: View {
 
     // Matches the UIKit menu glyph metric used by `RemodexIcon.menuUIImage`.
     static func toolbarMenuUIImage() -> UIImage {
-        let pointSize = UIFontMetrics.default.scaledValue(for: 20)
-        return menuImage(pointSize: pointSize, weight: .regular)
+        menuImage(pointSize: AppMenuPresentation.glyphPointSize, weight: .regular)
     }
 }
 
