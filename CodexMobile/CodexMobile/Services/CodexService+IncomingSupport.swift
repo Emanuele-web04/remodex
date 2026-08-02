@@ -142,6 +142,89 @@ func toolActivitySummaryLine(
     return "\(statusLabel) \(descriptorLabel)"
 }
 
+// A tool result may legitimately contain fields named `diff`, `patch`, or
+// `changes` without having mutated the workspace (for example, GitHub PR reads).
+// Classify generic tool calls from their identity plus change evidence instead
+// of treating those common result-field names as proof of a file edit.
+func toolCallIdentityDescriptors(from itemObject: IncomingParamsObject) -> [String] {
+    let nestedTool = itemObject["tool"]?.objectValue
+    let nestedCall = itemObject["call"]?.objectValue
+    let nestedInvocation = itemObject["invocation"]?.objectValue
+    let candidates = [
+        itemObject["kind"]?.stringValue,
+        itemObject["name"]?.stringValue,
+        itemObject["tool"]?.stringValue,
+        itemObject["tool_name"]?.stringValue,
+        itemObject["toolName"]?.stringValue,
+        itemObject["tool_title"]?.stringValue,
+        itemObject["toolTitle"]?.stringValue,
+        itemObject["title"]?.stringValue,
+        nestedTool?["kind"]?.stringValue,
+        nestedTool?["name"]?.stringValue,
+        nestedTool?["type"]?.stringValue,
+        nestedTool?["title"]?.stringValue,
+        nestedCall?["kind"]?.stringValue,
+        nestedCall?["name"]?.stringValue,
+        nestedCall?["type"]?.stringValue,
+        nestedCall?["title"]?.stringValue,
+        nestedInvocation?["tool"]?.stringValue,
+        nestedInvocation?["name"]?.stringValue,
+    ]
+
+    var seen: Set<String> = []
+    return candidates.compactMap { candidate in
+        guard let descriptor = trimmedNonEmptyString(candidate) else {
+            return nil
+        }
+        let key = descriptor.lowercased()
+        return seen.insert(key).inserted ? descriptor : nil
+    }
+}
+
+func toolCallIdentityDescriptor(from itemObject: IncomingParamsObject) -> String {
+    toolCallIdentityDescriptors(from: itemObject).joined(separator: " ")
+}
+
+func isWorkspaceFileMutationToolCall(_ itemObject: IncomingParamsObject) -> Bool {
+    let exactMutationNames: Set<String> = [
+        "applypatch",
+        "patch",
+        "edit",
+        "write",
+        "rename",
+        "delete",
+        "remove",
+        "create",
+        "move",
+        "strreplace",
+    ]
+    let mutationFilePairs = [
+        "editfile", "fileedit",
+        "writefile", "filewrite",
+        "renamefile", "filerename",
+        "deletefile", "filedelete",
+        "removefile", "fileremove",
+        "createfile", "filecreate",
+        "movefile", "filemove",
+    ]
+
+    return toolCallIdentityDescriptors(from: itemObject).contains { descriptor in
+        let token = descriptor
+            .lowercased()
+            .replacingOccurrences(of: #"[^a-z0-9]"#, with: "", options: .regularExpression)
+        guard !token.isEmpty else { return false }
+
+        if exactMutationNames.contains(token)
+            || token.contains("filechange")
+            || token.contains("applypatch")
+            || token.contains("patchapply")
+            || token.contains("strreplace") {
+            return true
+        }
+        return mutationFilePairs.contains(where: token.contains)
+    }
+}
+
 func extractContextWindowUsage(from object: IncomingParamsObject?) -> ContextWindowUsage? {
     guard let object else { return nil }
 

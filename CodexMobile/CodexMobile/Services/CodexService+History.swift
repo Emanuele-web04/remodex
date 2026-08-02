@@ -940,6 +940,29 @@ extension CodexService {
         }
 
         var merged = existing
+
+        // Older builds could persist a read-only connector result as a file-change
+        // row merely because its result contained a `diff` field. Once canonical
+        // history decodes that same stable item as tool activity, discard the stale
+        // kind so it cannot survive every relaunch beside the corrected row.
+        let canonicalToolActivityItemIDs = Set(history.compactMap { message -> String? in
+            guard message.role == .system,
+                  message.kind == .toolActivity else {
+                return nil
+            }
+            return normalizedHistoryIdentifier(message.itemId)
+        })
+        if !canonicalToolActivityItemIDs.isEmpty {
+            merged.removeAll { candidate in
+                guard candidate.role == .system,
+                      candidate.kind == .fileChange,
+                      let itemID = normalizedHistoryIdentifier(candidate.itemId) else {
+                    return false
+                }
+                return canonicalToolActivityItemIDs.contains(itemID)
+            }
+        }
+
         canonicalizeUniqueProvisionalTurnMappings(in: &merged, history: history)
         let originalMessageIDs = Set(existing.map(\.id))
         let assistantHistoryCountByTurn = Dictionary(
@@ -3968,10 +3991,17 @@ extension CodexService {
     }
 
     func decodeHistoryDiffItemText(from itemObject: [String: JSONValue]) -> String? {
-        decodeHistoryToolCallFileChangeText(from: itemObject)
+        decodeHistoryFileChangeToolPayload(from: itemObject)
     }
 
     func decodeHistoryToolCallFileChangeText(from itemObject: [String: JSONValue]) -> String? {
+        guard isWorkspaceFileMutationToolCall(itemObject) else {
+            return nil
+        }
+        return decodeHistoryFileChangeToolPayload(from: itemObject)
+    }
+
+    private func decodeHistoryFileChangeToolPayload(from itemObject: [String: JSONValue]) -> String? {
         let status = decodeHistoryNestedStatus(from: itemObject) ?? "completed"
 
         var synthetic = itemObject
