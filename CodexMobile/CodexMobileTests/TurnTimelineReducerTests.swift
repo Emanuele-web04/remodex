@@ -2616,6 +2616,49 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(previousGroup.messages.map(\.id), ["thinking", "approved-review"])
     }
 
+    func testTimelineProjectionNeverShowsDetachedApprovedAutoReviewAtLiveTail() {
+        let now = Date()
+        var approvedReview = makeMessage(
+            id: "approved-review",
+            threadID: "thread",
+            role: .system,
+            kind: .autoApprovalReview,
+            text: "Approved automatically",
+            createdAt: now,
+            turnID: "older-turn"
+        )
+        approvedReview.autoApprovalReview = makeAutoApprovalReview(
+            id: "approved-review",
+            status: .approved
+        )
+
+        var deniedReview = makeMessage(
+            id: "denied-review",
+            threadID: "thread",
+            role: .system,
+            kind: .autoApprovalReview,
+            text: "Approval denied",
+            createdAt: now.addingTimeInterval(1),
+            turnID: "older-turn"
+        )
+        deniedReview.autoApprovalReview = makeAutoApprovalReview(
+            id: "denied-review",
+            status: .denied
+        )
+
+        let items = TurnTimelineRenderProjection.project(
+            messages: [approvedReview, deniedReview]
+        )
+        let activeItems = TurnTimelineRenderProjection.project(
+            messages: [approvedReview, deniedReview],
+            activeTurnID: "older-turn",
+            isThreadRunning: true
+        )
+
+        XCTAssertEqual(items.map(\.id), ["denied-review"])
+        XCTAssertEqual(activeItems.map(\.id), ["approved-review", "denied-review"])
+    }
+
     func testTimelineProjectionKeepsCompletedPlanItemOutsidePreviousMessages() {
         let now = Date()
         var planMessage = makeMessage(

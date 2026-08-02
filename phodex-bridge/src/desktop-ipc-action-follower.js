@@ -443,7 +443,8 @@ function createDesktopIpcActionFollower({
             // stays idle after opening never delivers them.
             emitNormalizedReviewOverlays(
               threadId,
-              normalizedLiveIndexesByThreadId.get(threadId)
+              normalizedLiveIndexesByThreadId.get(threadId),
+              liveState
             );
             const output = conversationProjector.project(threadId, liveState, {
               includeAllActiveTurns: true,
@@ -1516,7 +1517,8 @@ function createDesktopIpcActionFollower({
       }));
       emitNormalizedReviewOverlays(
         threadId,
-        normalizedLiveIndexesByThreadId.get(threadId)
+        normalizedLiveIndexesByThreadId.get(threadId),
+        liveState
       );
       emitDesktopSnapshotLifecycleTransition(threadId, liveState);
       for (const notification of bootstrapOutput.notifications || []) {
@@ -1535,7 +1537,8 @@ function createDesktopIpcActionFollower({
       emitDesktopSnapshotLifecycleTransition(threadId, liveState);
       emitNormalizedReviewOverlays(
         threadId,
-        normalizedLiveIndexesByThreadId.get(threadId)
+        normalizedLiveIndexesByThreadId.get(threadId),
+        liveState
       );
       conversationProjector.seed(threadId, liveState);
       rememberDesktopLiveProjection(threadId, liveState);
@@ -1548,7 +1551,8 @@ function createDesktopIpcActionFollower({
     }
     emitNormalizedReviewOverlays(
       threadId,
-      normalizedLiveIndexesByThreadId.get(threadId)
+      normalizedLiveIndexesByThreadId.get(threadId),
+      liveState
     );
     const output = conversationProjector.project(threadId, liveState);
     if (resumedAfterStaleYield || output.type === "fullReplace" || output.type === "baseline") {
@@ -1605,11 +1609,16 @@ function createDesktopIpcActionFollower({
     rememberDesktopLiveProjection(threadId, liveState);
   }
 
-  function emitNormalizedReviewOverlays(threadId, index) {
+  function emitNormalizedReviewOverlays(threadId, index, projectedState) {
     if (!index || !Array.isArray(index.pendingReviewOverlays)) {
       return;
     }
     const overlays = index.pendingReviewOverlays.splice(0);
+    const projectedTurnIds = new Set(
+      (Array.isArray(projectedState?.turns) ? projectedState.turns : [])
+        .map(turnIdOf)
+        .filter(Boolean)
+    );
     const fingerprints = normalizedReviewFingerprintsByThreadId.get(threadId) || new Map();
     for (const overlay of overlays) {
       // Reviews on turns in the projected live tail may also be emitted by
@@ -1624,6 +1633,16 @@ function createDesktopIpcActionFollower({
         || readString(item?.id).replace(/^automatic-approval-review:/, "");
       const status = readString(review?.status);
       if (!reviewId || !status || !item?.action) {
+        continue;
+      }
+      // Completed approved reviews are ordinary tool history. Replaying every
+      // normalized-history review after a bounded canonical read appends old
+      // rows at the phone's live tail, detached from their original disclosure.
+      // The projected tail still emits its approvals so they reconcile in the
+      // owning turn; non-approved outcomes remain global because they may need
+      // the user's attention.
+      if (normalizeToken(status) === "approved"
+        && !projectedTurnIds.has(readString(overlay.turnId))) {
         continue;
       }
       const fingerprint = createHash("sha256")

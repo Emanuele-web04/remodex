@@ -241,6 +241,39 @@ final class CodexServiceIncomingCommandExecutionTests: XCTestCase {
         XCTAssertFalse(history[0].text.contains("Path: unknown"))
     }
 
+    func testHistoryMergeRemovesPersistedGitHubDiffCardFromCanonicalMCPToolCall() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let legacyCard = CodexMessage(
+            threadId: threadID,
+            role: .system,
+            kind: .fileChange,
+            text: "Status: completed\n\nPath: unknown\nKind: update\n\n```diff\n@@ -1 +1 @@\n-old\n+new\n```",
+            turnId: turnID,
+            itemId: "github-fetch-pr"
+        )
+        let history = service.decodeMessagesFromThreadRead(
+            threadId: threadID,
+            threadObject: [
+                "createdAt": .string("2026-08-02T01:17:41Z"),
+                "turns": .array([
+                    .object([
+                        "id": .string(turnID),
+                        "items": .array([.object(gitHubPullRequestToolItem())]),
+                    ]),
+                ]),
+            ]
+        )
+
+        let migrated = service.mergeHistoryMessages([legacyCard], history)
+
+        XCTAssertEqual(migrated.count, 1)
+        XCTAssertEqual(migrated[0].kind, .toolActivity)
+        XCTAssertEqual(migrated[0].itemId, "github-fetch-pr")
+        XCTAssertFalse(migrated[0].text.contains("Path: unknown"))
+    }
+
     func testHistoryApplyPatchToolStillRestoresFileChange() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"
@@ -4993,7 +5026,9 @@ final class CodexServiceIncomingCommandExecutionTests: XCTestCase {
     private func gitHubPullRequestToolItem() -> [String: JSONValue] {
         [
             "id": .string("github-fetch-pr"),
-            "type": .string("toolCall"),
+            // App-server history uses the concrete MCP item type. Desktop IPC
+            // may project the same item to `toolCall`, so production accepts both.
+            "type": .string("mcpToolCall"),
             "status": .string("completed"),
             "server": .string("codex_apps"),
             "tool": .string("github.fetch_pr"),

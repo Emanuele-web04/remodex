@@ -6619,6 +6619,7 @@ test("desktop IPC follower delivers normalized guardian reviews when an idle bac
   );
   const outbound = [];
   const threadId = "thread-background-open-review";
+  const olderTurnKey = "turn:turn-background-review-older";
   const turnKey = "turn:turn-background-review";
   const follower = createDesktopIpcActionFollower({
     socketPath,
@@ -6653,6 +6654,28 @@ test("desktop IPC follower delivers normalized guardian reviews when an idle bac
             kind: "canonical",
             history: {
               entitiesByKey: {
+                [olderTurnKey]: {
+                  turnId: "turn-background-review-older",
+                  status: "completed",
+                  items: [
+                    {
+                      id: "automatic-approval-review:review-background-old-approved",
+                      type: "automaticApprovalReview",
+                      reviewId: "review-background-old-approved",
+                      targetItemId: "command-background-old",
+                      startedAtMs: 50,
+                      completedAtMs: 75,
+                      review: { status: "approved", riskLevel: "low" },
+                      action: {
+                        type: "command",
+                        source: "shell",
+                        command: "pwd",
+                        cwd: "/tmp",
+                      },
+                    },
+                    { id: "assistant-background-old", type: "agentMessage", text: "Old" },
+                  ],
+                },
                 [turnKey]: {
                   turnId: "turn-background-review",
                   status: "completed",
@@ -6679,7 +6702,10 @@ test("desktop IPC follower delivers normalized guardian reviews when an idle bac
               },
               islands: [{
                 id: "tail:background-review",
-                entries: [{ key: turnKey, value: turnKey }],
+                entries: [
+                  { key: olderTurnKey, value: olderTurnKey },
+                  { key: turnKey, value: turnKey },
+                ],
               }],
               isComplete: true,
             },
@@ -6708,6 +6734,13 @@ test("desktop IPC follower delivers normalized guardian reviews when an idle bac
   assert.equal(reviewNotification.params.threadId, threadId);
   assert.equal(reviewNotification.params.reviewId, "review-background-open");
   assert.equal(reviewNotification.params.review.status, "denied");
+  assert.equal(
+    outbound.some((message) => (
+      message.params?.reviewId === "review-background-old-approved"
+    )),
+    false,
+    "approved reviews outside the bounded projected tail must not be appended as detached rows"
+  );
   assert.equal(
     reviewNotification.params.decisionSource,
     "agent",

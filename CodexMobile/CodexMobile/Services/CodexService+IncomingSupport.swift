@@ -185,6 +185,15 @@ func toolCallIdentityDescriptor(from itemObject: IncomingParamsObject) -> String
     toolCallIdentityDescriptors(from: itemObject).joined(separator: " ")
 }
 
+func isGenericToolCallItemType(_ itemType: String) -> Bool {
+    switch itemType {
+    case "toolcall", "mcptoolcall", "dynamictoolcall", "websearch":
+        return true
+    default:
+        return false
+    }
+}
+
 func isWorkspaceFileMutationToolCall(_ itemObject: IncomingParamsObject) -> Bool {
     let exactMutationNames: Set<String> = [
         "applypatch",

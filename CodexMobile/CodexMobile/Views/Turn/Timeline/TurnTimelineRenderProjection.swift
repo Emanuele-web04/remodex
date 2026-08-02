@@ -396,6 +396,16 @@ enum TurnTimelineRenderProjection {
                 continue
             }
 
+            // A historical Desktop review can arrive after its owning turn has
+            // fallen outside the bounded render page. Approved reviews are normal
+            // tool history: show them only through that turn's Previous messages
+            // disclosure, never as detached rows at the live tail. Denied and
+            // otherwise exceptional reviews remain visible for user attention.
+            if isApprovedAutoApprovalReview(renderedMessage),
+               !belongsToActiveTurn(renderedMessage, at: index) {
+                continue
+            }
+
             // Reasoning and inline file changes are command interstitials. File changes
             // remain pending until a later trace/command confirms that they bridge the
             // run; otherwise flush places them back after the command disclosure.
@@ -896,6 +906,12 @@ enum TurnTimelineRenderProjection {
             return false
         }
         return isAssistantPriorityArtifactOnly(message)
+    }
+
+    private static func isApprovedAutoApprovalReview(_ message: CodexMessage) -> Bool {
+        message.role == .system
+            && message.kind == .autoApprovalReview
+            && message.autoApprovalReview?.status == .approved
     }
 
     private static func isReplayOfFinalAssistant(_ message: CodexMessage, finalMessage: CodexMessage) -> Bool {
