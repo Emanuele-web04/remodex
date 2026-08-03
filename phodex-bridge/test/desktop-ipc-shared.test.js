@@ -13,6 +13,7 @@ const path = require("node:path");
 const {
   isContextualUserText,
   isThreadTurnStateProbeRequest,
+  normalizeDesktopTurnStartSandboxPolicy,
   resolveDefaultIpcSocketPath,
   resolveIpcSocketPathCandidates,
   responseItemMessageText,
@@ -29,6 +30,32 @@ test("response item text preserves nested data text parts", () => {
     }),
     "Nested assistant text"
   );
+});
+
+test("normalizes writable roots only for malformed Desktop workspace-write policies", () => {
+  const missingRoots = {
+    input: [],
+    sandboxPolicy: { type: "workspaceWrite", networkAccess: true },
+  };
+  assert.deepEqual(normalizeDesktopTurnStartSandboxPolicy(missingRoots), {
+    input: [],
+    sandboxPolicy: { type: "workspaceWrite", networkAccess: true, writableRoots: [] },
+  });
+
+  const malformedRoots = {
+    sandboxPolicy: { type: "workspaceWrite", writableRoots: "/tmp/project" },
+  };
+  assert.deepEqual(normalizeDesktopTurnStartSandboxPolicy(malformedRoots), {
+    sandboxPolicy: { type: "workspaceWrite", writableRoots: [] },
+  });
+
+  const validRoots = {
+    sandboxPolicy: { type: "workspaceWrite", writableRoots: ["/tmp/project"] },
+  };
+  assert.equal(normalizeDesktopTurnStartSandboxPolicy(validRoots), validRoots);
+
+  const fullAccess = { sandboxPolicy: { type: "dangerFullAccess" } };
+  assert.equal(normalizeDesktopTurnStartSandboxPolicy(fullAccess), fullAccess);
 });
 
 // Payload shapes below are lifted verbatim from real rollout files, so these

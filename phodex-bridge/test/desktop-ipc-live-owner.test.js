@@ -853,7 +853,7 @@ test("live owner does not rewind live state from a stale cached thread on later 
   );
 });
 
-test("live owner keeps phone turn input in snapshots when turn/started has no items", async (t) => {
+test("live owner keeps phone input and normalizes sandbox policy in Desktop snapshots", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-user-input-");
   const frames = [];
   let serverSocket = null;
@@ -907,8 +907,30 @@ test("live owner keeps phone turn input in snapshots when turn/started has no it
       threadId: "thread-user-input",
       cwd: "/tmp/user-input",
       input: [{ type: "input_text", text: "build the feature" }],
+      sandboxPolicy: {
+        type: "workspaceWrite",
+        networkAccess: true,
+      },
     },
   }));
+
+  const pendingBroadcast = await waitForMessage(
+    frames,
+    (frame) => frame.type === "broadcast"
+      && frame.method === "thread-stream-state-changed"
+      && frame.params?.conversationId === "thread-user-input"
+      && frame.params?.change?.type === "snapshot"
+      && frame.params.change.conversationState.turns?.[0]?.remodexOptimisticPendingTurn === true
+  );
+  assert.deepEqual(
+    pendingBroadcast.params.change.conversationState.turns[0].params.sandboxPolicy,
+    {
+      type: "workspaceWrite",
+      networkAccess: true,
+      writableRoots: [],
+    }
+  );
+
   owner.observeOutbound(JSON.stringify({
     method: "turn/started",
     params: {
@@ -925,19 +947,19 @@ test("live owner keeps phone turn input in snapshots when turn/started has no it
     },
   }));
 
-  const broadcast = await waitForMessage(
-    frames,
-    (frame) => frame.type === "broadcast"
-      && frame.method === "thread-stream-state-changed"
-      && frame.params?.conversationId === "thread-user-input"
-      && frame.params?.change?.type === "snapshot"
-      && frame.params.change.conversationState.turns?.[0]?.turnId === "turn-user-input"
-  );
-  const turn = broadcast.params.change.conversationState.turns[0];
+  await waitFor(() => (
+    owner._debugSnapshot("thread-user-input")?.turns?.[0]?.turnId === "turn-user-input"
+  ));
+  const turn = owner._debugSnapshot("thread-user-input").turns[0];
   assert.equal(turn.turnId, "turn-user-input");
   // Desktop renders the user bubble from params.input; a duplicate userMessage
   // item would be labelled "Steered conversation", so items must stay empty.
   assert.deepEqual(turn.params.input, [{ type: "input_text", text: "build the feature" }]);
+  assert.deepEqual(turn.params.sandboxPolicy, {
+    type: "workspaceWrite",
+    networkAccess: true,
+    writableRoots: [],
+  });
   assert.deepEqual(turn.items, []);
 });
 

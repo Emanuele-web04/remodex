@@ -1890,11 +1890,15 @@ test("desktop IPC follower routes phone turns to Desktop-owned threads", async (
     method: "turn/start",
     params: {
       threadId: "thread-desktop-owned",
-      input: [{ type: "input_text", text: "continue from phone" }],
+      input: [{ type: "text", text: "continue from phone" }],
       cwd: "/repo",
       model: "gpt-test",
       effort: "low",
       serviceTier: "fast",
+      sandboxPolicy: {
+        type: "workspaceWrite",
+        networkAccess: true,
+      },
     },
   }));
   assert.equal(handled, true);
@@ -1921,11 +1925,16 @@ test("desktop IPC follower routes phone turns to Desktop-owned threads", async (
     senderRequestId: "phone-turn-start-1",
     turnStartParams: {
       threadId: "thread-desktop-owned",
-      input: [{ type: "input_text", text: "continue from phone" }],
+      input: [{ type: "text", text: "continue from phone" }],
       cwd: "/repo",
       model: "gpt-test",
       effort: "low",
       serviceTier: "fast",
+      sandboxPolicy: {
+        type: "workspaceWrite",
+        networkAccess: true,
+        writableRoots: [],
+      },
     },
   });
 
@@ -1938,11 +1947,16 @@ test("desktop IPC follower routes phone turns to Desktop-owned threads", async (
     threadId: "thread-desktop-owned",
     params: {
       threadId: "thread-desktop-owned",
-      input: [{ type: "input_text", text: "continue from phone" }],
+      input: [{ type: "text", text: "continue from phone" }],
       cwd: "/repo",
       model: "gpt-test",
       effort: "low",
       serviceTier: "fast",
+      sandboxPolicy: {
+        type: "workspaceWrite",
+        networkAccess: true,
+        writableRoots: [],
+      },
     },
     metadata: {
       source: "phone",
