@@ -6,28 +6,80 @@
 
 import SwiftUI
 
-private let whatsNewItems: [String] = [
-    "New UI for sidebar, chats, projects, settings, composer, icons, and timelines",
-    "Better Projects with folder search, local picking, allowed roots, and clearer controls",
-    "Projectless Quick Chats, rootless general chats, and draft-first chat creation",
-    "Native SSH terminal with saved hosts, keys, known hosts, routing, and setup help",
-    "Pair with code when QR scanning is not convenient",
-    "More reliable QR pairing, trusted reconnect, saved-device recovery, and connection switching",
-    "Multiple Mac and multiple device support with better device management",
-    "Remodex CLI 2.0 support, bridge compatibility checks, legacy 1.5.1 path, and better bridge/menu bar status",
-    "Lower bridge memory and network usage",
-    "Stronger reconnects after sleep, relaunch, foregrounding, relay reconnects, and network changes",
-    "Better Windows host and relay compatibility",
-    "New markdown rendering for links, code, user bubbles, and message text",
-    "Better file previews, image previews, diffs, command output, tool calls, history items, and terminal output",
-    "Smoother streaming, queued turns, thinking states, timelines, long messages, history loading, sync, and hydration",
-    "Better composer drafts, scrolling, thumbnails, mentions, slash commands, runtime controls, spacing, and runtime recovery",
-    "Voice mode and voice transcription reliability improvements",
-    "Better Git actions, publish progress, branch/worktree controls, draft actions, and patch fallbacks",
-    "Improved Plan Mode display and completed-step handling",
-    "Pinned threads, auto titles, cleaner thread actions, and pending states",
-    "New `/compact` slash command",
-    "Better error reports, feedback details, timestamps, settings polish, app review prompts, and stability fixes",
+private struct WhatsNewItem {
+    let title: String
+    let detail: String
+}
+
+private let whatsNewItems: [WhatsNewItem] = [
+    .init(
+        title: "Live Desktop Sync",
+        detail: "Keep messages, models, queues, approvals, unread status, and active conversations synchronized between Remodex and Codex Desktop."
+    ),
+    .init(
+        title: "Approve for Me",
+        detail: "Let Codex review approval requests automatically, see what access is needed, and retry denied actions with one tap."
+    ),
+    .init(
+        title: "Goals",
+        detail: "Create long-running goals, track progress and token budgets, pause or resume work, and receive completion notifications."
+    ),
+    .init(
+        title: "Live Activities",
+        detail: "Follow running, completed, and failed chats from the Dynamic Island and Lock Screen, with shortcuts back to Remodex."
+    ),
+    .init(
+        title: "Smarter Worktrees",
+        detail: "Choose any base branch, carry configured project files into new worktrees, and keep worktree chats grouped under their original project."
+    ),
+    .init(
+        title: "Better Model Controls",
+        detail: "Use the redesigned model and intelligence picker with Fast Mode, an all-models browser, and automatic reloading."
+    ),
+    .init(
+        title: "Redesigned Composer",
+        detail: "Manage queued prompts, active plans, file changes, and skill mentions through cleaner, more compact controls."
+    ),
+    .init(
+        title: "Better Markdown",
+        detail: "Enjoy Markdown in your own messages and faster, smoother streaming responses."
+    ),
+    .init(
+        title: "Clearer Tool Activity",
+        detail: "Commands and tool calls are now grouped, expandable, and easier to follow with improved icons, statuses, history, and file changes."
+    ),
+    .init(
+        title: "Smarter Sidebar",
+        detail: "Find active and unread chats faster with improved sorting, status indicators, and automation labels."
+    ),
+    .init(
+        title: "Reliable Recovery",
+        detail: "Pairing, reconnects, and running chats now recover more reliably after sleep, relaunch, bridge restarts, or network loss."
+    ),
+    .init(
+        title: "Cleaner Timelines",
+        detail: "Duplicate messages, reasoning, final answers, and stale tool activity have been reduced, with smoother scrolling and history restoration."
+    ),
+    .init(
+        title: "Improved Terminal",
+        detail: "Select and copy terminal output, with refreshed native menus across Terminal, Settings, Git, and chat controls."
+    ),
+    .init(
+        title: "Better Voice Input",
+        detail: "Voice transcription is faster and more reliable, with smoother recording animations."
+    ),
+    .init(
+        title: "Fresh New Look",
+        detail: "A new Remodex icon and unified visual identity, plus an SF Pro Rounded font option."
+    ),
+    .init(
+        title: "More Reliable Workflows",
+        detail: "Plan Mode, completed steps, message sending, attachments, and long-running sessions are now more dependable."
+    ),
+    .init(
+        title: "Performance and Stability",
+        detail: "Cleaner Mac bridge removal, fixed service restart loops, and many additional synchronization, performance, and stability improvements."
+    ),
 ]
 
 struct WhatsNewSheet: View {
@@ -72,15 +124,21 @@ struct WhatsNewSheet: View {
         VStack(alignment: .leading, spacing: 12) {
             ForEach(Array(whatsNewItems.enumerated()), id: \.offset) { _, item in
                 HStack(alignment: .top, spacing: 12) {
-                    RemodexIcon.image(systemName: "arrow.right")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(.secondary)
-                        .padding(.top, 4)
+                    Circle()
+                        .fill(.secondary)
+                        .frame(width: 5, height: 5)
+                        .padding(.top, 8)
 
-                    Text(.init(item))
-                        .font(AppFont.body())
-                        .foregroundStyle(.primary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("\(item.title):")
+                            .font(AppFont.body(weight: .semibold))
+                            .foregroundStyle(.primary)
+
+                        Text(item.detail)
+                            .font(AppFont.body())
+                            .foregroundStyle(.primary)
+                    }
+                    .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
