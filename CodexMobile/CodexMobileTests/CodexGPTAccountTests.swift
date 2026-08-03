@@ -135,8 +135,8 @@ final class CodexGPTAccountTests: XCTestCase {
                     "loginInFlight": .bool(false),
                     "needsReauth": .bool(false),
                     "tokenReady": .bool(true),
-                    "bridgeVersion": .string("2.0.0"),
-                    "bridgeLatestVersion": .string("2.0.1"),
+                    "bridgeVersion": .string("3.0.0"),
+                    "bridgeLatestVersion": .string("3.0.1"),
                 ]),
                 includeJSONRPC: false
             )
@@ -144,14 +144,45 @@ final class CodexGPTAccountTests: XCTestCase {
 
         await service.refreshBridgeVersionState(allowAvailableBridgeUpdatePrompt: true)
 
-        XCTAssertEqual(service.bridgeInstalledVersion, "2.0.0")
-        XCTAssertEqual(service.latestBridgePackageVersion, "2.0.1")
+        XCTAssertEqual(service.bridgeInstalledVersion, "3.0.0")
+        XCTAssertEqual(service.latestBridgePackageVersion, "3.0.1")
         XCTAssertEqual(
             service.bridgeUpdatePrompt?.title,
             "A newer Remodex update is available on your Mac"
         )
         XCTAssertEqual(service.bridgeUpdatePrompt?.command, "npm install -g remodex@latest")
         XCTAssertEqual(service.gptAccountSnapshot.status, .unknown)
+    }
+
+    func testRefreshBridgeVersionStateRequiresBridgeThreeForAppThree() async {
+        let service = makeService()
+        service.isConnected = true
+
+        service.requestTransportOverride = { method, params in
+            XCTAssertEqual(method, "account/status/read")
+            XCTAssertNil(params)
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object([
+                    "status": .string("authenticated"),
+                    "authMethod": .string("chatgpt"),
+                    "loginInFlight": .bool(false),
+                    "needsReauth": .bool(false),
+                    "tokenReady": .bool(true),
+                    "bridgeVersion": .string("2.5.8"),
+                    "bridgeLatestVersion": .string("2.5.8"),
+                ]),
+                includeJSONRPC: false
+            )
+        }
+
+        await service.refreshBridgeVersionState()
+
+        XCTAssertEqual(
+            service.bridgeUpdatePrompt?.message,
+            "This device bridge is running Remodex 2.5.8, but this iPhone app requires Remodex 3.0.0 or newer. Update the npm package on your device, then reconnect."
+        )
+        XCTAssertEqual(service.bridgeUpdatePrompt?.command, "npm install -g remodex@latest")
     }
 
     func testRefreshBridgeVersionStateDoesNotPresentOptionalBridgeUpdateWithoutForegroundFlag() async {
@@ -169,8 +200,8 @@ final class CodexGPTAccountTests: XCTestCase {
                     "loginInFlight": .bool(false),
                     "needsReauth": .bool(false),
                     "tokenReady": .bool(true),
-                    "bridgeVersion": .string("2.0.0"),
-                    "bridgeLatestVersion": .string("2.0.1"),
+                    "bridgeVersion": .string("3.0.0"),
+                    "bridgeLatestVersion": .string("3.0.1"),
                 ]),
                 includeJSONRPC: false
             )
@@ -196,8 +227,8 @@ final class CodexGPTAccountTests: XCTestCase {
                     "loginInFlight": .bool(false),
                     "needsReauth": .bool(false),
                     "tokenReady": .bool(true),
-                    "bridgeVersion": .string("2.0.0"),
-                    "bridgeLatestVersion": .string("2.0.1"),
+                    "bridgeVersion": .string("3.0.0"),
+                    "bridgeLatestVersion": .string("3.0.1"),
                 ]),
                 includeJSONRPC: false
             )
@@ -231,8 +262,8 @@ final class CodexGPTAccountTests: XCTestCase {
                     "loginInFlight": .bool(false),
                     "needsReauth": .bool(false),
                     "tokenReady": .bool(true),
-                    "bridgeVersion": .string("2.0.0"),
-                    "bridgeLatestVersion": .string("2.0.1"),
+                    "bridgeVersion": .string("3.0.0"),
+                    "bridgeLatestVersion": .string("3.0.1"),
                 ]),
                 includeJSONRPC: false
             )
@@ -241,8 +272,8 @@ final class CodexGPTAccountTests: XCTestCase {
         service.setForegroundState(true)
         await yieldMainActor(times: 3)
 
-        XCTAssertEqual(service.bridgeInstalledVersion, "2.0.0")
-        XCTAssertEqual(service.latestBridgePackageVersion, "2.0.1")
+        XCTAssertEqual(service.bridgeInstalledVersion, "3.0.0")
+        XCTAssertEqual(service.latestBridgePackageVersion, "3.0.1")
         XCTAssertEqual(
             service.bridgeUpdatePrompt?.title,
             "A newer Remodex update is available on your Mac"
