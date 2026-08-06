@@ -147,17 +147,17 @@ final class CodexThreadRuntimeOverrideTests: XCTestCase {
         XCTAssertNil(service.effectiveServiceTier(for: "thread-phone-authority"))
     }
 
-    func testClearingSelectedModelFallsBackToGPT55Medium() {
+    func testClearingSelectedModelFallsBackToGPT56SolMedium() {
         let service = makeService()
-        service.availableModels = [makeGPT55Model(), makeModel()]
+        service.availableModels = [makeGPT55Model(), makeGPT56Model(id: "gpt-5.6-sol"), makeModel()]
         service.setSelectedModelId("gpt-5.4")
         service.setSelectedReasoningEffort("high")
 
         service.setSelectedModelId(nil)
 
-        XCTAssertEqual(service.selectedModelId, "gpt-5.5")
+        XCTAssertEqual(service.selectedModelId, "gpt-5.6-sol")
         XCTAssertEqual(service.selectedReasoningEffort, "medium")
-        XCTAssertEqual(service.runtimeModelIdentifierForTurn(), "gpt-5.5")
+        XCTAssertEqual(service.runtimeModelIdentifierForTurn(), "gpt-5.6-sol")
         XCTAssertEqual(service.selectedReasoningEffortForSelectedModel(), "medium")
     }
 
@@ -185,7 +185,7 @@ final class CodexThreadRuntimeOverrideTests: XCTestCase {
         let suiteName = "CodexThreadRuntimeOverrideTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName) ?? .standard
         defaults.removePersistentDomain(forName: suiteName)
-        defaults.set("gpt-5.5", forKey: CodexService.selectedModelIdDefaultsKey)
+        defaults.set("gpt-5.6-sol", forKey: CodexService.selectedModelIdDefaultsKey)
 
         let service = CodexService(defaults: defaults)
         Self.retainedServices.append(service)
@@ -194,7 +194,7 @@ final class CodexThreadRuntimeOverrideTests: XCTestCase {
         XCTAssertTrue(service.availableModels.isEmpty)
         XCTAssertNil(service.visibleSelectedModelIDForComposer())
         XCTAssertTrue(service.isRuntimeSelectionLoadingForComposer())
-        XCTAssertEqual(service.runtimeModelIdentifierForTurn(), "gpt-5.5")
+        XCTAssertEqual(service.runtimeModelIdentifierForTurn(), "gpt-5.6-sol")
     }
 
     func testComposerKeepsCustomPersistedModelVisibleDuringBootstrap() {
@@ -223,7 +223,7 @@ final class CodexThreadRuntimeOverrideTests: XCTestCase {
         XCTAssertFalse(service.hasPersistedSelectedModelId)
         XCTAssertNil(service.selectedModelId)
         XCTAssertNil(service.selectedReasoningEffort)
-        XCTAssertEqual(service.runtimeModelIdentifierForTurn(), "gpt-5.5")
+        XCTAssertEqual(service.runtimeModelIdentifierForTurn(), "gpt-5.6-sol")
         XCTAssertNil(defaults.string(forKey: CodexService.selectedModelIdDefaultsKey))
     }
 
@@ -234,18 +234,78 @@ final class CodexThreadRuntimeOverrideTests: XCTestCase {
 
         let firstService = CodexService(defaults: defaults)
         Self.retainedServices.append(firstService)
-        firstService.availableModels = [makeGPT55Model(), makeModel()]
+        firstService.availableModels = [
+            makeGPT55Model(),
+            makeGPT56Model(id: "gpt-5.6-luna"),
+            makeGPT56Model(id: "gpt-5.6-terra"),
+            makeGPT56Model(id: "gpt-5.6-sol"),
+            makeModel(),
+        ]
         firstService.normalizeRuntimeSelectionsAfterModelsUpdate()
 
         XCTAssertTrue(firstService.hasPersistedSelectedModelId)
-        XCTAssertEqual(firstService.selectedModelId, "gpt-5.5")
-        XCTAssertEqual(defaults.string(forKey: CodexService.selectedModelIdDefaultsKey), "gpt-5.5")
+        XCTAssertEqual(firstService.selectedModelId, "gpt-5.6-sol")
+        XCTAssertEqual(defaults.string(forKey: CodexService.selectedModelIdDefaultsKey), "gpt-5.6-sol")
 
         let secondService = CodexService(defaults: defaults)
         Self.retainedServices.append(secondService)
 
         XCTAssertTrue(secondService.hasPersistedSelectedModelId)
-        XCTAssertEqual(secondService.selectedModelId, "gpt-5.5")
+        XCTAssertEqual(secondService.selectedModelId, "gpt-5.6-sol")
+    }
+
+    func testModelListRefreshFallsBackThroughGPT56FamilyBeforeGPT55() {
+        let service = makeService()
+        service.availableModels = [
+            makeGPT55Model(),
+            makeGPT56Model(id: "gpt-5.6-luna"),
+            makeGPT56Model(id: "gpt-5.6-terra"),
+            makeModel(),
+        ]
+        service.normalizeRuntimeSelectionsAfterModelsUpdate()
+
+        XCTAssertEqual(service.selectedModelId, "gpt-5.6-terra")
+        XCTAssertEqual(service.runtimeModelIdentifierForTurn(), "gpt-5.6-terra")
+    }
+
+    func testModelListRefreshUsesGPT55WhenGPT56FamilyIsUnavailable() {
+        let service = makeService()
+        service.availableModels = [makeGPT55Model(), makeModel()]
+        service.normalizeRuntimeSelectionsAfterModelsUpdate()
+
+        XCTAssertEqual(service.selectedModelId, "gpt-5.5")
+        XCTAssertEqual(service.runtimeModelIdentifierForTurn(), "gpt-5.5")
+    }
+
+    func testGPT56ModelsAreFirstClassRuntimeMenuModels() {
+        let orderedModels = TurnComposerMetaMapper.orderedModels(
+            from: [
+                makeModel(),
+                makeGPT55Model(),
+                makeGPT56Model(id: "gpt-5.6-luna"),
+                makeGPT56Model(id: "gpt-5.6-terra"),
+                makeGPT56Model(id: "gpt-5.6-sol"),
+            ]
+        )
+
+        XCTAssertEqual(
+            orderedModels.prefix(3).map(\.id),
+            ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
+        )
+        XCTAssertEqual(TurnComposerMetaMapper.modelTitle(forIdentifier: "gpt-5.6-sol"), "GPT-5.6-Sol")
+        XCTAssertEqual(TurnComposerMetaMapper.modelTitle(forIdentifier: "gpt-5.6-terra"), "GPT-5.6-Terra")
+        XCTAssertEqual(TurnComposerMetaMapper.modelTitle(forIdentifier: "gpt-5.6-luna"), "GPT-5.6-Luna")
+    }
+
+    func testGPT56ReasoningDisplayIncludesMaxAboveExtraHigh() {
+        let options = TurnComposerMetaMapper.reasoningDisplayOptions(
+            from: ["low", "medium", "high", "xhigh", "max"]
+        )
+
+        XCTAssertEqual(
+            options.map(\.title),
+            ["Max", "Extra High", "High", "Medium", "Low"]
+        )
     }
 
     func testContinuationInheritsThreadRuntimeOverrides() {
@@ -391,6 +451,25 @@ final class CodexThreadRuntimeOverrideTests: XCTestCase {
             supportedReasoningEfforts: [
                 CodexReasoningEffortOption(reasoningEffort: "medium", description: "Medium"),
                 CodexReasoningEffortOption(reasoningEffort: "high", description: "High"),
+            ],
+            defaultReasoningEffort: "medium"
+        )
+    }
+
+    private func makeGPT56Model(id: String) -> CodexModelOption {
+        CodexModelOption(
+            id: id,
+            model: id,
+            displayName: id.uppercased(),
+            description: "Test model",
+            isDefault: true,
+            supportsFastMode: true,
+            supportedReasoningEfforts: [
+                CodexReasoningEffortOption(reasoningEffort: "low", description: "Low"),
+                CodexReasoningEffortOption(reasoningEffort: "medium", description: "Medium"),
+                CodexReasoningEffortOption(reasoningEffort: "high", description: "High"),
+                CodexReasoningEffortOption(reasoningEffort: "xhigh", description: "Extra High"),
+                CodexReasoningEffortOption(reasoningEffort: "max", description: "Max"),
             ],
             defaultReasoningEffort: "medium"
         )

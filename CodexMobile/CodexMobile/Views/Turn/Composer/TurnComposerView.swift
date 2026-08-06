@@ -681,10 +681,58 @@ private struct ComposerPreviewContent: View {
     let isThreadRunning: Bool
 
     private let reasoningOptions = TurnComposerMetaMapper.reasoningDisplayOptions(
-        from: ["low", "medium", "high", "xhigh"]
+        from: ["low", "medium", "high", "xhigh", "max"]
     )
 
     private let modelOptions: [CodexModelOption] = [
+        CodexModelOption(
+            id: "gpt-5.6-sol",
+            model: "gpt-5.6-sol",
+            displayName: "GPT-5.6-Sol",
+            description: "Preview model",
+            isDefault: true,
+            supportsFastMode: true,
+            supportedReasoningEfforts: [
+                CodexReasoningEffortOption(reasoningEffort: "low", description: ""),
+                CodexReasoningEffortOption(reasoningEffort: "medium", description: ""),
+                CodexReasoningEffortOption(reasoningEffort: "high", description: ""),
+                CodexReasoningEffortOption(reasoningEffort: "xhigh", description: ""),
+                CodexReasoningEffortOption(reasoningEffort: "max", description: ""),
+            ],
+            defaultReasoningEffort: "high"
+        ),
+        CodexModelOption(
+            id: "gpt-5.6-terra",
+            model: "gpt-5.6-terra",
+            displayName: "GPT-5.6-Terra",
+            description: "Preview model",
+            isDefault: false,
+            supportsFastMode: true,
+            supportedReasoningEfforts: [
+                CodexReasoningEffortOption(reasoningEffort: "low", description: ""),
+                CodexReasoningEffortOption(reasoningEffort: "medium", description: ""),
+                CodexReasoningEffortOption(reasoningEffort: "high", description: ""),
+                CodexReasoningEffortOption(reasoningEffort: "xhigh", description: ""),
+                CodexReasoningEffortOption(reasoningEffort: "max", description: ""),
+            ],
+            defaultReasoningEffort: "medium"
+        ),
+        CodexModelOption(
+            id: "gpt-5.6-luna",
+            model: "gpt-5.6-luna",
+            displayName: "GPT-5.6-Luna",
+            description: "Preview model",
+            isDefault: false,
+            supportsFastMode: true,
+            supportedReasoningEfforts: [
+                CodexReasoningEffortOption(reasoningEffort: "low", description: ""),
+                CodexReasoningEffortOption(reasoningEffort: "medium", description: ""),
+                CodexReasoningEffortOption(reasoningEffort: "high", description: ""),
+                CodexReasoningEffortOption(reasoningEffort: "xhigh", description: ""),
+                CodexReasoningEffortOption(reasoningEffort: "max", description: ""),
+            ],
+            defaultReasoningEffort: "medium"
+        ),
         CodexModelOption(
             id: "gpt-5.5",
             model: "gpt-5.5",
@@ -835,14 +883,14 @@ private struct ComposerPreviewContent: View {
             hasWorkingDirectory: true,
             isWorktreeProject: false,
             orderedModelOptions: modelOptions,
-            selectedModelID: "gpt-5.5",
-            selectedModelTitle: "GPT-5.5",
+            selectedModelID: "gpt-5.6-sol",
+            selectedModelTitle: "GPT-5.6-Sol",
             isLoadingModels: false,
             isRuntimeSelectionLoading: false,
             runtimeState: TurnComposerRuntimeState(
                 reasoningDisplayOptions: reasoningOptions,
-                effectiveReasoningEffort: "high",
-                selectedReasoningEffort: "high",
+                effectiveReasoningEffort: "max",
+                selectedReasoningEffort: "max",
                 reasoningMenuDisabled: false,
                 selectedServiceTier: .fast,
                 supportsFastMode: true

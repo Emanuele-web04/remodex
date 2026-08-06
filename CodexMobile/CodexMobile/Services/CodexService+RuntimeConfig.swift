@@ -26,7 +26,8 @@ private enum RuntimeDebugLogPolicy {
 }
 
 private enum RuntimeSelectionDefaults {
-    static let modelId = "gpt-5.5"
+    static let modelId = "gpt-5.6-sol"
+    static let fallbackModelIds = [modelId, "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"]
     static let reasoningEffort = "medium"
 
     static func reasoningEffort(for unresolvedModelId: String?) -> String? {
@@ -901,12 +902,14 @@ private extension CodexService {
     }
 
     func fallbackModel(from models: [CodexModelOption]) -> CodexModelOption? {
-        // Prefer GPT-5.5 when the bridge advertises it; the rest of the app treats
-        // it as the canonical default regardless of the bridge's `isDefault` flag.
-        if let preferred = models.first(where: {
-            $0.id.lowercased() == "gpt-5.5" || $0.model.lowercased() == "gpt-5.5"
-        }) {
-            return preferred
+        // Prefer the current 5.6 family when the bridge advertises it, while
+        // keeping GPT-5.5 as the compatibility fallback for older local runtimes.
+        for identifier in RuntimeSelectionDefaults.fallbackModelIds {
+            if let preferred = models.first(where: {
+                $0.id.lowercased() == identifier || $0.model.lowercased() == identifier
+            }) {
+                return preferred
+            }
         }
         if let defaultModel = models.first(where: { $0.isDefault }) {
             return defaultModel
