@@ -358,6 +358,44 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
         )
     }
 
+    func testConnectTimeMobileReplacementCloseIsRetryable() {
+        let service = CodexService()
+        let error = CodexServiceError.invalidInput("WebSocket closed during connect (4003)")
+
+        XCTAssertTrue(service.isRetryableSavedSessionConnectError(error))
+        XCTAssertEqual(
+            service.userFacingConnectFailureMessage(error),
+            "A newer Remodex connection replaced this socket. Tap Reconnect to try again."
+        )
+    }
+
+    func testMobileReplacementCloseKeepsSavedPairingAndRetriesReconnect() {
+        let service = CodexService()
+        let sessionID = "session-\(UUID().uuidString)"
+        let relayURL = "wss://relay.test/relay"
+        service.relaySessionId = sessionID
+        service.relayUrl = relayURL
+        service.isConnected = true
+        service.isInitialized = true
+        service.setForegroundState(true)
+
+        service.handleReceiveError(
+            CodexServiceError.disconnected,
+            relayCloseCode: .privateCode(4003)
+        )
+
+        XCTAssertFalse(service.isConnected)
+        XCTAssertFalse(service.isInitialized)
+        XCTAssertTrue(service.shouldAutoReconnectOnForeground)
+        XCTAssertEqual(
+            service.connectionRecoveryState,
+            .retrying(attempt: 0, message: "Reconnecting...")
+        )
+        XCTAssertEqual(service.relaySessionId, sessionID)
+        XCTAssertEqual(service.relayUrl, relayURL)
+        XCTAssertNil(service.lastErrorMessage)
+    }
+
     func testManualWebSocketClosePayloadPreservesRetryableRelayCode() {
         let service = CodexService()
         let closeCode = service.relayCloseCode(
