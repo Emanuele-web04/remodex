@@ -13,6 +13,7 @@ const {
   cloneJSON,
   conversationSnapshotShowsActiveTurn,
   isPlainJSONObject,
+  normalizeDesktopTurnStartSandboxPolicy,
   normalizeToken,
   readString,
   requestIdKey,
@@ -463,7 +464,9 @@ function createDesktopIpcLiveOwner({
     if (input.length === 0) {
       return null;
     }
-    const sanitizedParams = sanitizeTurnStartParams(cloneJSON(params));
+    const sanitizedParams = normalizeDesktopTurnStartSandboxPolicy(
+      sanitizeTurnStartParams(cloneJSON(params))
+    );
     sanitizedParams.input = normalizeInputEntriesForDesktop(sanitizedParams.input);
     const entry = { params: sanitizedParams, requestId: normalizedRequestId || null };
     const queue = pendingTurnStartParamsByThreadId.get(normalizedThreadId) || [];

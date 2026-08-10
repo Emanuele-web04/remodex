@@ -11,6 +11,7 @@ const { createHash } = require("crypto");
 
 const FRAME_HEADER_BYTES = 4;
 const MAX_FRAME_BYTES = 256 * 1024 * 1024;
+const WORKSPACE_WRITE_SANDBOX_TYPE = "workspaceWrite";
 
 const CLIENT_STATUS_CHANGED = "client-status-changed";
 
@@ -450,6 +451,24 @@ function isPlainJSONObject(value) {
   return value != null && typeof value === "object" && !Array.isArray(value);
 }
 
+// Desktop treats writableRoots as iterable for workspace-write turns, while
+// app-server and older mobile clients allow the field to be omitted.
+function normalizeDesktopTurnStartSandboxPolicy(turnStartParams) {
+  const sandboxPolicy = turnStartParams?.sandboxPolicy;
+  if (!isPlainJSONObject(sandboxPolicy)
+    || sandboxPolicy.type !== WORKSPACE_WRITE_SANDBOX_TYPE
+    || Array.isArray(sandboxPolicy.writableRoots)) {
+    return turnStartParams;
+  }
+  return {
+    ...turnStartParams,
+    sandboxPolicy: {
+      ...sandboxPolicy,
+      writableRoots: [],
+    },
+  };
+}
+
 // Single predicate for "this timeline item is a user message", shared by the
 // relay sanitizer, the JSONL history parser, and the Desktop-bound adapter so
 // context filters can never drift apart across paths again.
@@ -681,6 +700,7 @@ module.exports = {
   isPlainJSONObject,
   isThreadTurnStateProbeRequest,
   isUserRoleItem,
+  normalizeDesktopTurnStartSandboxPolicy,
   normalizeToken,
   readString,
   readText,

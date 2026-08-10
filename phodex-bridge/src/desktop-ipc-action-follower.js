@@ -21,6 +21,7 @@ const {
   cloneJSON,
   createFrameReader,
   isThreadTurnStateProbeRequest,
+  normalizeDesktopTurnStartSandboxPolicy,
   normalizeToken,
   readString,
   requestIdKey,
@@ -2034,9 +2035,10 @@ function createDesktopIpcActionFollower({
     const normalized = await Promise.resolve(
       normalizeTurnStartParams(cloneJSON(route.params.turnStartParams))
     );
-    const turnStartParams = normalized && typeof normalized === "object" && !Array.isArray(normalized)
+    const normalizedTurnStartParams = normalized && typeof normalized === "object" && !Array.isArray(normalized)
       ? normalized
       : route.params.turnStartParams;
+    const turnStartParams = normalizeDesktopTurnStartSandboxPolicy(normalizedTurnStartParams);
     return {
       ...route.params,
       turnStartParams,
