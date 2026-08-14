@@ -348,6 +348,7 @@ remodex watch
 | `REMODEX_DESKTOP_AUTO_FOLLOW` | `true` on macOS with local IPC | Open a newly materialized phone-driven thread once so Codex Desktop follows its live IPC stream |
 | `REMODEX_DESKTOP_IPC_SOCKET` | auto-detected | Override the local Codex IPC socket or Windows named pipe path |
 | `REMODEX_DESKTOP_IPC_SNAPSHOT_DEBOUNCE_MS` | `75` | Debounce window (ms) for IPC `conversationState` snapshot / patch broadcasts |
+| `REMODEX_KEEP_MAC_AWAKE_MODE` | `off` | macOS bridge wake policy: `off`, `ac-power`, or `always` |
 | `REMODEX_REFRESH_ENABLED` | `false` | Auto-refresh Codex.app when phone activity is detected (`true` enables it explicitly) |
 | `REMODEX_REFRESH_DEBOUNCE_MS` | `1200` | Debounce window (ms) for coalescing refresh events |
 | `REMODEX_REFRESH_COMMAND` | — | Custom shell command to run instead of the built-in AppleScript refresh |

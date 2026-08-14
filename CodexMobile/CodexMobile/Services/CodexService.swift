@@ -467,7 +467,10 @@ final class CodexService {
     @ObservationIgnored var autoApprovalRetryTokensByReviewKey: [String: CodexAutoApprovalRetryToken] = [:]
     var lastRawMessage: String?
     var lastErrorMessage: String?
-    var keepMacAwakeWhileBridgeRuns = false
+    var keepMacAwakeMode: CodexKeepAwakeMode = .off
+    var keepMacAwakeWhileBridgeRuns: Bool {
+        keepMacAwakeMode != .off
+    }
     var runtimeDebugLogEntries: [String] = []
     @ObservationIgnored var compactRuntimeItemCompletedCount = 0
     @ObservationIgnored var compactRuntimeItemCompletedTypes: [String: Int] = [:]
@@ -743,6 +746,9 @@ final class CodexService {
     var supportsKeepAwakeWhileBridgeRuns: Bool {
         bridgeHostCapabilities.keepAwake
     }
+    var supportsKeepAwakeModes: Bool {
+        bridgeHostCapabilities.keepAwakeModes
+    }
     var supportsBridgePackageUpdate: Bool {
         bridgeHostCapabilities.bridgeUpdate
     }
@@ -854,6 +860,7 @@ final class CodexService {
     static let turnTerminalStatesDefaultsKey = "codex.turnTerminalStates"
     static let threadHistoryPaginationStateDefaultsKey = "codex.threadHistoryPaginationState"
     static let notificationsPromptedDefaultsKey = "codex.notifications.prompted"
+    static let keepMacAwakeModeDefaultsKey = "codex.keepMacAwakeMode"
     static let keepMacAwakeWhileBridgeRunsDefaultsKey = "codex.keepMacAwakeWhileBridgeRuns"
 
     init(
@@ -895,10 +902,15 @@ final class CodexService {
             ? savedReasoning
             : nil
 
-        if defaults.object(forKey: Self.keepMacAwakeWhileBridgeRunsDefaultsKey) != nil {
-            self.keepMacAwakeWhileBridgeRuns = defaults.bool(forKey: Self.keepMacAwakeWhileBridgeRunsDefaultsKey)
+        if let rawKeepAwakeMode = defaults.string(forKey: Self.keepMacAwakeModeDefaultsKey),
+           let savedKeepAwakeMode = CodexKeepAwakeMode(rawValue: rawKeepAwakeMode) {
+            self.keepMacAwakeMode = savedKeepAwakeMode
+        } else if defaults.object(forKey: Self.keepMacAwakeWhileBridgeRunsDefaultsKey) != nil {
+            self.keepMacAwakeMode = defaults.bool(forKey: Self.keepMacAwakeWhileBridgeRunsDefaultsKey)
+                ? .always
+                : .off
         } else {
-            self.keepMacAwakeWhileBridgeRuns = false
+            self.keepMacAwakeMode = .off
         }
         self.threadRuntimeOverridesByThreadID = [:]
 

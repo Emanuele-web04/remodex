@@ -71,6 +71,12 @@ const { createThreadRuntimeSettingsStore } = require("./thread-runtime-settings-
 const { createThreadListProvenanceEnricher } = require("./thread-list-provenance");
 const { createWorktreeOriginEnricher } = require("./worktree-origin");
 const { forEachThreadRowInResponse } = require("./thread-row-enrichment");
+const {
+  KEEP_AWAKE_MODE_ALWAYS,
+  KEEP_AWAKE_MODE_OFF,
+  caffeinateFlagForKeepAwakeMode,
+  resolveKeepAwakeMode,
+} = require("./keep-awake-mode");
 const { version: bridgePackageVersion = "" } = require("../package.json");
 const {
   MINIMUM_SUPPORTED_IOS_APP_VERSION,
@@ -707,9 +713,13 @@ function startBridge({
   onBridgeStatus = null,
 } = {}) {
   const config = explicitConfig || readBridgeConfig();
-  config.keepMacAwakeEnabled = config.keepMacAwakeEnabled === true;
-  const bridgeWakeAssertion = createMacOSBridgeWakeAssertion({
+  config.keepMacAwakeMode = resolveKeepAwakeMode({
+    mode: config.keepMacAwakeMode,
     enabled: config.keepMacAwakeEnabled,
+  });
+  config.keepMacAwakeEnabled = config.keepMacAwakeMode !== KEEP_AWAKE_MODE_OFF;
+  const bridgeWakeAssertion = createMacOSBridgeWakeAssertion({
+    mode: config.keepMacAwakeMode,
   });
   const relayBaseUrl = config.relayUrl.replace(/\/+$/, "");
   if (!relayBaseUrl) {
@@ -2137,20 +2147,25 @@ function startBridge({
     return {
       success: true,
       preferences: {
-        keepMacAwake: config.keepMacAwakeEnabled !== false,
+        keepMacAwake: config.keepMacAwakeMode !== KEEP_AWAKE_MODE_OFF,
+        keepMacAwakeMode: config.keepMacAwakeMode,
       },
       applied: bridgeWakeAssertion.active,
     };
   }
 
   function updateBridgePreferences(preferences = {}) {
-    const nextKeepMacAwakeEnabled = preferences.keepMacAwake !== false;
-    config.keepMacAwakeEnabled = nextKeepMacAwakeEnabled;
-    bridgeWakeAssertion.setEnabled?.(nextKeepMacAwakeEnabled);
+    const nextKeepMacAwakeMode = resolveKeepAwakeMode({
+      mode: preferences.keepMacAwakeMode,
+      enabled: preferences.keepMacAwake,
+    });
+    config.keepMacAwakeMode = nextKeepMacAwakeMode;
+    config.keepMacAwakeEnabled = nextKeepMacAwakeMode !== KEEP_AWAKE_MODE_OFF;
+    bridgeWakeAssertion.setMode?.(nextKeepMacAwakeMode);
 
     try {
       persistBridgePreferences({
-        keepMacAwakeEnabled: nextKeepMacAwakeEnabled,
+        keepMacAwakeMode: nextKeepMacAwakeMode,
       });
     } catch (error) {
       const nextError = new Error("Could not save the bridge preference on this Mac.");
@@ -2225,26 +2240,35 @@ function startBridge({
   };
 }
 
-// Holds a single macOS idle-sleep assertion for as long as the bridge process stays alive.
+// Holds one macOS sleep assertion for as long as the bridge stays alive.
 function createMacOSBridgeWakeAssertion({
   platform = process.platform,
   pid = process.pid,
   spawnImpl = spawn,
   consoleImpl = console,
-  enabled = true,
+  mode = null,
+  enabled = undefined,
 } = {}) {
   if (platform !== "darwin") {
     return {
       active: false,
       enabled: false,
+      mode: KEEP_AWAKE_MODE_OFF,
+      setMode() {
+        return { active: false, enabled: false, mode: KEEP_AWAKE_MODE_OFF };
+      },
       setEnabled() {
-        return { active: false, enabled: false };
+        return { active: false, enabled: false, mode: KEEP_AWAKE_MODE_OFF };
       },
       stop() {},
     };
   }
 
-  let desiredEnabled = Boolean(enabled);
+  let desiredMode = resolveKeepAwakeMode({
+    mode,
+    enabled,
+    fallback: KEEP_AWAKE_MODE_ALWAYS,
+  });
   let child = null;
 
   function stop() {
@@ -2260,12 +2284,13 @@ function createMacOSBridgeWakeAssertion({
   }
 
   function start() {
-    if (!desiredEnabled || child) {
+    const caffeinateFlag = caffeinateFlagForKeepAwakeMode(desiredMode);
+    if (!caffeinateFlag || child) {
       return;
     }
 
     try {
-      const nextChild = spawnImpl("/usr/bin/caffeinate", ["-i", "-w", String(pid)], {
+      const nextChild = spawnImpl("/usr/bin/caffeinate", [caffeinateFlag, "-w", String(pid)], {
         stdio: "ignore",
       });
 
@@ -2287,18 +2312,27 @@ function createMacOSBridgeWakeAssertion({
     }
   }
 
-  function setEnabled(nextEnabled) {
-    desiredEnabled = Boolean(nextEnabled);
-    if (desiredEnabled) {
-      start();
-    } else {
-      stop();
-    }
-
+  function snapshot() {
     return {
       active: Boolean(child && !child.killed),
-      enabled: desiredEnabled,
+      enabled: desiredMode !== KEEP_AWAKE_MODE_OFF,
+      mode: desiredMode,
     };
+  }
+
+  function setMode(nextMode) {
+    const normalizedMode = resolveKeepAwakeMode({ mode: nextMode });
+    if (normalizedMode === desiredMode) {
+      return snapshot();
+    }
+    stop();
+    desiredMode = normalizedMode;
+    start();
+    return snapshot();
+  }
+
+  function setEnabled(nextEnabled) {
+    return setMode(nextEnabled ? KEEP_AWAKE_MODE_ALWAYS : KEEP_AWAKE_MODE_OFF);
   }
 
   start();
@@ -2308,8 +2342,12 @@ function createMacOSBridgeWakeAssertion({
       return Boolean(child && !child.killed);
     },
     get enabled() {
-      return desiredEnabled;
+      return desiredMode !== KEEP_AWAKE_MODE_OFF;
     },
+    get mode() {
+      return desiredMode;
+    },
+    setMode,
     setEnabled,
     stop,
   };
@@ -5019,16 +5057,20 @@ function truncateRelayTextTail(value, maxChars) {
 
 function persistBridgePreferences(
   {
-    keepMacAwakeEnabled,
+    keepMacAwakeMode,
   },
   {
     readDaemonConfigImpl = readDaemonConfig,
     writeDaemonConfigImpl = writeDaemonConfig,
   } = {}
 ) {
+  const normalizedMode = resolveKeepAwakeMode({ mode: keepMacAwakeMode });
   writeDaemonConfigImpl({
     ...(readDaemonConfigImpl() || {}),
-    keepMacAwakeEnabled,
+    keepMacAwakeMode: normalizedMode,
+    // Older bridge versions only understand this boolean. AC-only degrades to
+    // off on downgrade instead of unexpectedly preventing battery sleep.
+    keepMacAwakeEnabled: normalizedMode === KEEP_AWAKE_MODE_ALWAYS,
   });
 }
 

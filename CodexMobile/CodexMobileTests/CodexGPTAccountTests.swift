@@ -29,6 +29,7 @@ final class CodexGPTAccountTests: XCTestCase {
         XCTAssertFalse(service.supportsDisplayWake)
         XCTAssertFalse(service.supportsDesktopAppHandoff)
         XCTAssertFalse(service.supportsKeepAwakeWhileBridgeRuns)
+        XCTAssertFalse(service.supportsKeepAwakeModes)
     }
 
     func testKnownMacBridgeKeepsLegacyDisplayWakeFallback() {
@@ -47,6 +48,19 @@ final class CodexGPTAccountTests: XCTestCase {
         XCTAssertTrue(service.supportsDisplayWake)
         XCTAssertTrue(service.supportsDesktopAppHandoff)
         XCTAssertTrue(service.supportsKeepAwakeWhileBridgeRuns)
+        XCTAssertFalse(service.supportsKeepAwakeModes)
+    }
+
+    func testCurrentMacBridgeAdvertisesSelectableKeepAwakeModes() {
+        let service = makeService()
+        service.gptAccountSnapshot.hostPlatform = .macOS
+        service.gptAccountSnapshot.hostCapabilities = CodexBridgeHostCapabilities(
+            keepAwake: true,
+            keepAwakeModes: true
+        )
+
+        XCTAssertTrue(service.supportsKeepAwakeWhileBridgeRuns)
+        XCTAssertTrue(service.supportsKeepAwakeModes)
     }
 
     func testRefreshGPTAccountStateDecodesSanitizedBridgeStatus() async {
