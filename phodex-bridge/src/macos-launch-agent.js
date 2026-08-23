@@ -76,7 +76,10 @@ function runMacOSBridgeService({ env = process.env, platform = process.platform 
     },
     onBridgeStatus(status) {
       writeBridgeStatus(
-        mergeBridgeStatusForDaemon(status, readBridgeStatus({ env })),
+        {
+          ...mergeBridgeStatusForDaemon(status, readBridgeStatus({ env })),
+          codexTargetFingerprint: config.codexTargetFingerprint,
+        },
         { env }
       );
     },

@@ -100,12 +100,14 @@ function ensureRemodexLogsDir({ fsImpl = fs, ...options } = {}) {
 function writeJsonFile(targetPath, value, { fsImpl = fs } = {}) {
   fsImpl.mkdirSync(path.dirname(targetPath), { recursive: true });
   const serialized = JSON.stringify(value, null, 2);
-  fsImpl.writeFileSync(targetPath, serialized, { mode: 0o600 });
+  const stagedPath = `${targetPath}.tmp-${process.pid}-${Date.now()}`;
+  fsImpl.writeFileSync(stagedPath, serialized, { mode: 0o600 });
   try {
-    fsImpl.chmodSync(targetPath, 0o600);
+    fsImpl.chmodSync(stagedPath, 0o600);
   } catch {
     // Best-effort only on filesystems without POSIX mode support.
   }
+  fsImpl.renameSync(stagedPath, targetPath);
 }
 
 function readJsonFile(targetPath, { fsImpl = fs } = {}) {

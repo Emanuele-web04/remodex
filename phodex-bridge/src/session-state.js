@@ -8,10 +8,15 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { execFileSync } = require("child_process");
+const {
+  DEFAULT_CODEX_BUNDLE_ID,
+  DEFAULT_CODEX_URL_SCHEME,
+  buildCodexDeepLink,
+  defaultCodexAppPath,
+} = require("./desktop-target");
 
 const STATE_DIR = path.join(os.homedir(), ".remodex");
 const STATE_FILE = path.join(STATE_DIR, "last-thread.json");
-const DEFAULT_BUNDLE_ID = "com.openai.codex";
 
 function rememberActiveThread(threadId, source) {
   if (!threadId || typeof threadId !== "string") {
@@ -29,15 +34,24 @@ function rememberActiveThread(threadId, source) {
   return true;
 }
 
-function openLastActiveThread({ bundleId = DEFAULT_BUNDLE_ID } = {}) {
+function openLastActiveThread({
+  bundleId = DEFAULT_CODEX_BUNDLE_ID,
+  appPath = defaultCodexAppPath(),
+  urlScheme = DEFAULT_CODEX_URL_SCHEME,
+  execFileSyncImpl = execFileSync,
+} = {}) {
   const state = readState();
   const threadId = state?.threadId;
   if (!threadId) {
     throw new Error("No remembered Remodex thread found yet.");
   }
 
-  const targetUrl = `codex://threads/${threadId}`;
-  execFileSync("open", ["-b", bundleId, targetUrl], { stdio: "ignore" });
+  const targetUrl = buildCodexDeepLink(`threads/${threadId}`, urlScheme);
+  try {
+    execFileSyncImpl("open", ["-b", bundleId, targetUrl], { stdio: "ignore" });
+  } catch {
+    execFileSyncImpl("open", ["-a", appPath, targetUrl], { stdio: "ignore" });
+  }
   return state;
 }
 

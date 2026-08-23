@@ -10,6 +10,10 @@ const { openLastActiveThread } = require("./session-state");
 const { watchThreadRollout } = require("./rollout-watch");
 const { readBridgeConfig } = require("./codex-desktop-refresher");
 const {
+  resetMacOSDesktopTarget,
+  setMacOSDesktopTarget,
+} = require("./desktop-target-controller");
+const {
   getMacOSBridgeServiceStatus,
   printMacOSBridgePairingQr,
   printMacOSBridgeServiceStatus,
@@ -28,10 +32,12 @@ module.exports = {
   readBridgeConfig,
   readBridgeDeviceState,
   resetMacOSBridgePairing,
+  resetMacOSDesktopTarget,
   restartMacOSBridgeService,
   startBridge,
   runMacOSBridgeService,
   startMacOSBridgeService,
+  setMacOSDesktopTarget,
   stopMacOSBridgeService,
   uninstallMacOSBridgeService,
   resetBridgePairing: resetBridgeTrustState,

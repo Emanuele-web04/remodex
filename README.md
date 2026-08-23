@@ -287,6 +287,25 @@ npm uninstall -g remodex
 
 macOS only. Prints the current `launchd` / bridge status, including whether the service is loaded and whether a recent pairing payload exists.
 
+### `remodex target set` / `remodex target reset`
+
+macOS only. Selects the Codex-compatible desktop app and data home used by the bridge:
+
+```sh
+remodex target set \
+  --codex-home "$HOME/.codex-secondary" \
+  --bundle-id com.openai.codex.secondary \
+  --app-path "$HOME/Applications/ChatGPT Personal.app" \
+  --url-scheme codex-secondary \
+  --restart
+
+remodex target reset --restart
+```
+
+The target is persisted in `~/.remodex/daemon-config.json`. Remodex validates the app bundle identifier and registered URL scheme, and derives IPC only from the selected Codex home. A running service requires `--restart`; Remodex confirms the new app-server and target fingerprint, then restores the previous complete configuration if activation fails. Relay, trusted-phone, and pairing state are not reset by a target switch.
+
+Only one target is active per Remodex bridge. Omitting target commands keeps the existing primary ChatGPT defaults.
+
 ### `remodex run-service`
 
 macOS only. Internal service entrypoint used by `launchd`. You normally do not run this manually.
@@ -352,6 +371,8 @@ remodex watch
 | `REMODEX_REFRESH_DEBOUNCE_MS` | `1200` | Debounce window (ms) for coalescing refresh events |
 | `REMODEX_REFRESH_COMMAND` | — | Custom shell command to run instead of the built-in AppleScript refresh |
 | `REMODEX_CODEX_BUNDLE_ID` | `com.openai.codex` | macOS bundle ID of the Codex app |
+| `REMODEX_CODEX_APP_PATH` | `/Applications/ChatGPT.app` (legacy fallback: `/Applications/Codex.app`) | Absolute path to the selected desktop app bundle |
+| `REMODEX_CODEX_URL_SCHEME` | `codex` | URL scheme used for Resume, auto-follow, and Continue on Mac |
 | `CODEX_HOME` | `~/.codex` | Codex data directory (used here for `sessions/` rollout files) |
 
 ```sh

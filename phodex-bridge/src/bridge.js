@@ -22,6 +22,7 @@ const {
   hasRelayConnectionGoneStale,
 } = require("./bridge-status");
 const { createCodexTransport } = require("./codex-transport");
+const { activateCodexHome } = require("./desktop-target");
 const {
   createThreadRolloutActivityWatcher,
   findRecentRolloutFileForContextRead,
@@ -707,6 +708,10 @@ function startBridge({
   onBridgeStatus = null,
 } = {}) {
   const config = explicitConfig || readBridgeConfig();
+  // A bridge process owns exactly one runtime target. Applying its persisted
+  // home process-wide keeps every existing rollout/worktree/IPC helper aligned
+  // with the app-server spawned below, including helpers that predate config DI.
+  activateCodexHome(config);
   config.keepMacAwakeEnabled = config.keepMacAwakeEnabled === true;
   const bridgeWakeAssertion = createMacOSBridgeWakeAssertion({
     enabled: config.keepMacAwakeEnabled,
@@ -748,6 +753,7 @@ function startBridge({
     refreshCommand: config.refreshCommand,
     bundleId: config.codexBundleId,
     appPath: config.codexAppPath,
+    urlScheme: config.codexUrlScheme,
   });
   const pushServiceClient = createPushNotificationServiceClient({
     baseUrl: config.pushServiceUrl,
@@ -1236,6 +1242,8 @@ function startBridge({
     if (handleDesktopRequest(rawMessage, sendApplicationResponse, {
       bundleId: config.codexBundleId,
       appPath: config.codexAppPath,
+      urlScheme: config.codexUrlScheme,
+      env: process.env,
       readBridgePreferences,
       updateBridgePreferences,
       updateBridgePackageAndRestart,
