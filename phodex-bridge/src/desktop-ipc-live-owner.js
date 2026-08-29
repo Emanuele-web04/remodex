@@ -27,6 +27,7 @@ const {
   buildConversationStateFromThread,
   createEmptyConversationState,
   readThreadIdFromParams,
+  synchronizeDesktopConversationCompatibility,
 } = require("./desktop-ipc-conversation-adapter");
 const {
   DEFAULT_MAX_PATCH_BYTES,
@@ -1117,6 +1118,7 @@ function createDesktopIpcLiveOwner({
       return true;
     }
     runtimeSettingsStore?.attachToConversation?.(threadId, conversationState);
+    synchronizeDesktopConversationCompatibility(conversationState);
     if (shouldDelayInitialSnapshotForHistory(threadId)) {
       return false;
     }
