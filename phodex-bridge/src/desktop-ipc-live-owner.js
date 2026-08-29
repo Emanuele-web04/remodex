@@ -94,20 +94,33 @@ const OWNER_INBOUND_METHODS = new Set([
 
 const THREAD_READ_METHODS = new Set(["thread/read", "thread/resume"]);
 
-const ALLOWED_TURN_START_PARAM_KEYS = new Set([
+// Current app-server v2 TurnStartParams fields. Desktop's adjacent turnStart.context
+// is presentation state, not part of this RPC shape, so it stays outside the request.
+const APP_SERVER_TURN_START_PARAM_KEYS = new Set([
   "threadId",
   "input",
+  "additionalContext",
   "cwd",
   "approvalPolicy",
   "approvalsReviewer",
   "sandboxPolicy",
   "model",
   "serviceTier",
+  "serviceTierForTurn",
   "effort",
   "summary",
   "personality",
   "outputSchema",
   "collaborationMode",
+  "clientUserMessageId",
+  "cyberAccessProgram",
+  "environments",
+  "multiAgentMode",
+  "permissions",
+  "responsesapiClientMetadata",
+  "runtimeWorkspaceRoots",
+  "toolOutput",
+  "turnTrigger",
 ]);
 
 function createDesktopIpcLiveOwner({
@@ -1367,10 +1380,7 @@ function createDesktopIpcLiveOwner({
   }
 
   async function handleFollowerStartTurn(conversationId, params) {
-    const rawTurnStartParams = params.turnStartParams
-      || params.turn_start_params
-      || params.turnStart
-      || params;
+    const rawTurnStartParams = readFollowerTurnStartParams(params);
     const codexParams = mergeFollowerRuntimeOverrides(conversationId, sanitizeTurnStartParams({
       ...rawTurnStartParams,
       threadId: conversationId,
@@ -1380,7 +1390,9 @@ function createDesktopIpcLiveOwner({
       ? normalizedParams
       : codexParams;
     markOwnedThread(conversationId);
-    const senderRequestId = params.senderRequestId || params.sender_request_id;
+    const senderRequestId = params.senderRequestId
+      || params.sender_request_id
+      || rawTurnStartParams.clientUserMessageId;
     const isKnownHeldPhoneStart = Boolean(
       requestIdKey(senderRequestId)
       && pendingTurnStartEntriesByRequestId.has(requestIdKey(senderRequestId))
@@ -1415,6 +1427,17 @@ function createDesktopIpcLiveOwner({
       discardPendingTurnStartEntry(conversationId, pendingEntry);
       throw error;
     }
+  }
+
+  function readFollowerTurnStartParams(params) {
+    const turnStart = isPlainJSONObject(params.turnStart) ? params.turnStart : null;
+    if (isPlainJSONObject(turnStart?.request)) {
+      return turnStart.request;
+    }
+    return params.turnStartParams
+      || params.turn_start_params
+      || params.turnStart
+      || params;
   }
 
   function mirrorFollowerUserPromptToPhone(threadId, turnStartParams, turnStartResult = null) {
@@ -1461,16 +1484,50 @@ function createDesktopIpcLiveOwner({
   }
 
   async function handleFollowerInterruptTurn(conversationId, params) {
-    const turnId = readString(params.turnId)
-      || readString(params.turn_id)
-      || activeTurnIdForConversation(conversationId);
-    if (!turnId) {
-      throw new Error("Missing turnId for follower interrupt request.");
+    const requestedTurnId = readString(params.expectedTurnId)
+      || readString(params.expected_turn_id)
+      || readString(params.turnId)
+      || readString(params.turn_id);
+    const activeTurnId = activeTurnIdForConversation(conversationId);
+    if (requestedTurnId && requestedTurnId !== activeTurnId) {
+      return {
+        interruptedTurnId: null,
+        ok: true,
+      };
     }
-    return await sendCodexRequest("turn/interrupt", {
+
+    const goalPauseError = await pauseActiveGoalForUserStop(
+      conversationId,
+      params.mode,
+      Boolean(requestedTurnId)
+    );
+    const turnId = requestedTurnId || activeTurnId;
+    if (!turnId) {
+      return followerInterruptResult(null, goalPauseError);
+    }
+    await sendCodexRequest("turn/interrupt", {
       threadId: conversationId,
       turnId,
     });
+    return followerInterruptResult(turnId, goalPauseError);
+  }
+
+  async function pauseActiveGoalForUserStop(conversationId, mode, hasRequestedTurnId) {
+    if (mode !== "user-stop" || hasRequestedTurnId) {
+      return "";
+    }
+    if (conversations.get(conversationId)?.threadGoal?.status !== "active") {
+      return "";
+    }
+    try {
+      await sendCodexRequest("thread/goal/set", {
+        threadId: conversationId,
+        status: "paused",
+      });
+      return "";
+    } catch (error) {
+      return error?.message || "Failed to pause thread goal.";
+    }
   }
 
   // Desktop follower approvals only carry decision-style payloads, but app-server
@@ -1786,8 +1843,7 @@ function createDesktopIpcLiveOwner({
         return turnId;
       }
     }
-    const latestTurn = turns[turns.length - 1];
-    return readString(latestTurn?.turnId) || readString(latestTurn?.id);
+    return "";
   }
 
   return {
@@ -1881,7 +1937,7 @@ function normalizeInputEntriesForDesktop(input) {
 function sanitizeTurnStartParams(params) {
   const sanitized = {};
   for (const [key, value] of Object.entries(params || {})) {
-    if (ALLOWED_TURN_START_PARAM_KEYS.has(key)) {
+    if (APP_SERVER_TURN_START_PARAM_KEYS.has(key)) {
       sanitized[key] = value;
     }
   }
@@ -1889,6 +1945,14 @@ function sanitizeTurnStartParams(params) {
     sanitized.input = [];
   }
   return sanitized;
+}
+
+function followerInterruptResult(interruptedTurnId, goalPauseError) {
+  return {
+    interruptedTurnId,
+    ...(goalPauseError ? { goalPauseError } : {}),
+    ok: true,
+  };
 }
 
 function readThreadFromResponse(message) {

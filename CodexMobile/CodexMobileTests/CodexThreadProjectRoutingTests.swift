@@ -89,6 +89,61 @@ final class CodexThreadProjectRoutingTests: XCTestCase {
         XCTAssertEqual(service.currentAuthoritativeProjectPath(for: "thread-rootless"), rootlessPath)
     }
 
+    func testContinuationThreadInheritsArchivedThreadProjectPath() async throws {
+        let service = makeService()
+        service.isConnected = true
+        service.isInitialized = true
+        service.upsertThread(
+            CodexThread(
+                id: "thread-desktop-owned",
+                title: "Desktop thread",
+                cwd: "/Users/me/Developer/synara"
+            )
+        )
+
+        service.requestTransportOverride = { method, params in
+            XCTAssertEqual(method, "thread/start")
+            XCTAssertEqual(params?.objectValue?["cwd"]?.stringValue, "/Users/me/Developer/synara")
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object([
+                    "thread": .object([
+                        "id": .string("thread-continuation"),
+                        "cwd": .string("/Users/me/Developer/synara"),
+                    ]),
+                ]),
+                includeJSONRPC: false
+            )
+        }
+
+        let continuation = try await service.createContinuationThread(from: "thread-desktop-owned")
+
+        XCTAssertEqual(continuation.id, "thread-continuation")
+        XCTAssertEqual(continuation.normalizedProjectPath, "/Users/me/Developer/synara")
+    }
+
+    func testContinuationThreadDoesNotStartWithoutAProjectPath() async throws {
+        let service = makeService()
+        service.isConnected = true
+        service.isInitialized = true
+        var requestedMethods: [String] = []
+
+        service.requestTransportOverride = { method, _ in
+            requestedMethods.append(method)
+            if method == "thread/start" {
+                XCTFail("Continuation must not start without an explicit cwd")
+            }
+            throw CodexServiceError.invalidResponse("Unable to create rootless chat root")
+        }
+
+        do {
+            _ = try await service.createContinuationThread(from: "thread-without-project")
+            XCTFail("Expected continuation creation to fail")
+        } catch {
+            XCTAssertEqual(requestedMethods, ["project/createRootlessChatRoot"])
+        }
+    }
+
     func testMoveThreadToProjectPathKeepsRebindWhenResumeFailsOnlyBecauseRolloutIsMissing() async throws {
         let service = makeService()
         let originalThread = CodexThread(

@@ -1915,17 +1915,22 @@ test("desktop IPC follower routes phone turns to Desktop-owned threads", async (
     serverFrames.indexOf(settingsFrame) < serverFrames.indexOf(turnStartFrame),
     "Desktop runtime settings must settle before start-turn"
   );
-  assert.equal(turnStartFrame.version, 1);
+  assert.equal(turnStartFrame.version, 2);
   assert.deepEqual(turnStartFrame.params, {
     conversationId: "thread-desktop-owned",
-    senderRequestId: "phone-turn-start-1",
-    turnStartParams: {
-      threadId: "thread-desktop-owned",
-      input: [{ type: "input_text", text: "continue from phone" }],
-      cwd: "/repo",
-      model: "gpt-test",
-      effort: "low",
-      serviceTier: "fast",
+    turnStart: {
+      request: {
+        threadId: "thread-desktop-owned",
+        input: [{ type: "input_text", text: "continue from phone" }],
+        cwd: "/repo",
+        model: "gpt-test",
+        effort: "low",
+        serviceTier: "fast",
+        clientUserMessageId: "phone-turn-start-1",
+      },
+      context: {
+        inheritThreadSettings: true,
+      },
     },
   });
 
@@ -1976,7 +1981,8 @@ test("desktop IPC follower routes phone turns to Desktop-owned threads", async (
       expectedMethod: "thread-follower-interrupt-turn",
       expectedParams: {
         conversationId: "thread-desktop-owned",
-        turnId: "turn-from-phone",
+        mode: "user-stop",
+        expectedTurnId: "turn-from-phone",
       },
     },
     {
@@ -2001,10 +2007,10 @@ test("desktop IPC follower routes phone turns to Desktop-owned threads", async (
     assert.equal(handledRoute, true);
     await waitFor(() => serverFrames.find((frame) => frame.method === request.expectedMethod));
     const routedFrame = serverFrames.find((frame) => frame.method === request.expectedMethod);
-    // Versions mirror Codex Desktop's bundled method map (interrupt is v3).
+    // Versions mirror Codex Desktop's bundled method map (interrupt is v4).
     assert.equal(
       routedFrame.version,
-      request.expectedMethod === "thread-follower-interrupt-turn" ? 3 : 1
+      request.expectedMethod === "thread-follower-interrupt-turn" ? 4 : 1
     );
     assert.deepEqual(routedFrame.params, request.expectedParams);
     await waitFor(() => outbound.find((message) => message.id === request.id));
@@ -3377,10 +3383,14 @@ test("desktop IPC follower normalizes phone turn starts before Desktop follower 
 
   await waitFor(() => serverFrames.find((frame) => frame.method === "thread-follower-start-turn"));
   const turnStartFrame = serverFrames.find((frame) => frame.method === "thread-follower-start-turn");
-  assert.deepEqual(turnStartFrame.params.turnStartParams, {
+  assert.deepEqual(turnStartFrame.params.turnStart.request, {
     threadId: "thread-normalize",
     input: [{ type: "input_text", text: "continue" }],
     summary: "none",
+    clientUserMessageId: "phone-turn-start-normalize",
+  });
+  assert.deepEqual(turnStartFrame.params.turnStart.context, {
+    inheritThreadSettings: true,
   });
 });
 
@@ -4013,7 +4023,7 @@ test("desktop IPC follower routes held phone turns once discovery confirms deskt
         writeFrame(socket, {
           type: "client-discovery-response",
           requestId: frame.requestId,
-          response: { canHandle: frame.request?.version === 1 },
+          response: { canHandle: frame.request?.version === 2 },
         });
       } else if (frame.method === "thread-follower-start-turn") {
         writeFrame(socket, {
@@ -4022,7 +4032,7 @@ test("desktop IPC follower routes held phone turns once discovery confirms deskt
           resultType: "success",
           method: frame.method,
           handledByClientId: "desktop",
-          result: { turn: { id: "turn-probe-owned" } },
+          result: { result: { turn: { id: "turn-probe-owned" } } },
         });
       }
     });
@@ -4160,7 +4170,7 @@ test("desktop IPC follower coalesces duplicate held turn starts for a thread", a
   });
   const routedStarts = serverFrames.filter((frame) => frame.method === "thread-follower-start-turn");
   assert.equal(routedStarts.length, 1);
-  assert.equal(routedStarts[0].params.turnStartParams.input[0].text, "new duplicate");
+  assert.equal(routedStarts[0].params.turnStart.request.input[0].text, "new duplicate");
 });
 
 test("desktop IPC follower retries held ownership probes after IPC connects", async (t) => {

@@ -2061,10 +2061,11 @@ test("live owner cancels initial hydration when the originating turn is rejected
   assert.equal(readAttempts, 1);
 });
 
-test("live owner handles discovery and start-turn follower requests for owned threads", async (t) => {
+test("live owner handles current start-turn and interrupt follower contracts", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-follower-");
   const codexRequests = [];
   const appNotifications = [];
+  let goalPauseError = null;
   let serverSocket = null;
 
   const server = net.createServer((socket) => {
@@ -2095,7 +2096,12 @@ test("live owner handles discovery and start-turn follower requests for owned th
     snapshotDebounceMs: 1,
     async sendCodexRequest(method, params) {
       codexRequests.push({ method, params });
-      assert.equal(appNotifications.length, 0);
+      if (method === "turn/start") {
+        assert.equal(appNotifications.length, 0);
+      }
+      if (method === "thread/goal/set" && goalPauseError) {
+        throw goalPauseError;
+      }
       return {
         turn: {
           id: "turn-from-follower",
@@ -2155,16 +2161,32 @@ test("live owner handles discovery and start-turn follower requests for owned th
     type: "request",
     requestId: "start-turn-1",
     sourceClientId: "desktop",
+    version: 2,
     method: "thread-follower-start-turn",
     params: {
       conversationId: "thread-owned",
-      turnStartParams: {
-        input: [
-          { type: "text", text: "# AGENTS.md instructions for /tmp/project\n<INSTRUCTIONS>rules</INSTRUCTIONS>" },
-          { type: "input_text", text: "continue" },
-        ],
-        model: "gpt-test",
-        attachments: [{ id: "client-only" }],
+      turnStart: {
+        request: {
+          threadId: "thread-owned",
+          input: [
+            { type: "text", text: "# AGENTS.md instructions for /tmp/project\n<INSTRUCTIONS>rules</INSTRUCTIONS>" },
+            { type: "input_text", text: "continue" },
+          ],
+          model: "gpt-test",
+          clientUserMessageId: "desktop-message-1",
+          additionalContext: {
+            desktop: { kind: "application", value: "window-1" },
+          },
+          permissions: "workspace-write",
+          runtimeWorkspaceRoots: ["/tmp/project"],
+          responsesapiClientMetadata: { surface: "desktop" },
+          serviceTierForTurn: "priority",
+          turnTrigger: "desktop-follower",
+        },
+        context: {
+          attachments: [{ id: "display-only" }],
+          inheritThreadSettings: true,
+        },
       },
     },
   });
@@ -2193,6 +2215,15 @@ test("live owner handles discovery and start-turn follower requests for owned th
         { type: "input_text", text: "continue" },
       ],
       model: "gpt-test",
+      clientUserMessageId: "desktop-message-1",
+      additionalContext: {
+        desktop: { kind: "application", value: "window-1" },
+      },
+      permissions: "workspace-write",
+      runtimeWorkspaceRoots: ["/tmp/project"],
+      responsesapiClientMetadata: { surface: "desktop" },
+      serviceTierForTurn: "priority",
+      turnTrigger: "desktop-follower",
     },
   }]);
   assert.equal(appNotifications.length, 1);
@@ -2205,6 +2236,215 @@ test("live owner handles discovery and start-turn follower requests for owned th
   assert.equal(appNotifications[0].params.message, "continue");
   assert.equal(appNotifications[0].params.remodexDesktopMirror, true);
   assert.equal(appNotifications[0].params.remodexDesktopIpcMirror, true);
+
+  owner.observeOutbound(JSON.stringify({
+    method: "turn/started",
+    params: {
+      threadId: "thread-owned",
+      turn: {
+        id: "turn-from-follower",
+        items: [],
+        status: "inProgress",
+      },
+    },
+  }));
+
+  writeFrame(serverSocket, {
+    type: "request",
+    requestId: "interrupt-turn-1",
+    sourceClientId: "desktop",
+    version: 4,
+    method: "thread-follower-interrupt-turn",
+    params: {
+      conversationId: "thread-owned",
+      mode: "user-stop",
+      expectedTurnId: "turn-from-follower",
+    },
+  });
+  const interruptResponse = await waitForFrame(
+    serverSocket,
+    (frame) => frame.type === "response" && frame.requestId === "interrupt-turn-1"
+  );
+  assert.equal(interruptResponse.resultType, "success");
+  assert.deepEqual(interruptResponse.result, {
+    interruptedTurnId: "turn-from-follower",
+    ok: true,
+  });
+  assert.deepEqual(codexRequests.filter((request) => request.method === "turn/interrupt"), [{
+    method: "turn/interrupt",
+    params: {
+      threadId: "thread-owned",
+      turnId: "turn-from-follower",
+    },
+  }]);
+
+  owner.observeOutbound(JSON.stringify({
+    method: "turn/started",
+    params: {
+      threadId: "thread-owned",
+      turn: {
+        id: "turn-with-goal",
+        items: [],
+        status: "inProgress",
+      },
+    },
+  }));
+  owner.observeOutbound(JSON.stringify({
+    method: "thread/goal/updated",
+    params: {
+      threadId: "thread-owned",
+      goal: {
+        threadId: "thread-owned",
+        objective: "Finish the task",
+        status: "active",
+      },
+    },
+  }));
+
+  const requestCountBeforeStaleInterrupt = codexRequests.length;
+  writeFrame(serverSocket, {
+    type: "request",
+    requestId: "interrupt-turn-stale",
+    sourceClientId: "desktop",
+    version: 4,
+    method: "thread-follower-interrupt-turn",
+    params: {
+      conversationId: "thread-owned",
+      mode: "user-stop",
+      expectedTurnId: "turn-already-finished",
+    },
+  });
+  const staleInterruptResponse = await waitForFrame(
+    serverSocket,
+    (frame) => frame.type === "response" && frame.requestId === "interrupt-turn-stale"
+  );
+  assert.deepEqual(staleInterruptResponse.result, {
+    interruptedTurnId: null,
+    ok: true,
+  });
+  assert.equal(codexRequests.length, requestCountBeforeStaleInterrupt);
+
+  writeFrame(serverSocket, {
+    type: "request",
+    requestId: "interrupt-turn-with-goal",
+    sourceClientId: "desktop",
+    version: 4,
+    method: "thread-follower-interrupt-turn",
+    params: {
+      conversationId: "thread-owned",
+      mode: "user-stop",
+    },
+  });
+  const goalInterruptResponse = await waitForFrame(
+    serverSocket,
+    (frame) => frame.type === "response" && frame.requestId === "interrupt-turn-with-goal"
+  );
+  assert.deepEqual(goalInterruptResponse.result, {
+    interruptedTurnId: "turn-with-goal",
+    ok: true,
+  });
+  assert.deepEqual(codexRequests.slice(-2), [
+    {
+      method: "thread/goal/set",
+      params: {
+        threadId: "thread-owned",
+        status: "paused",
+      },
+    },
+    {
+      method: "turn/interrupt",
+      params: {
+        threadId: "thread-owned",
+        turnId: "turn-with-goal",
+      },
+    },
+  ]);
+
+  owner.observeOutbound(JSON.stringify({
+    method: "turn/started",
+    params: {
+      threadId: "thread-owned",
+      turn: {
+        id: "turn-with-goal-pause-error",
+        items: [],
+        status: "inProgress",
+      },
+    },
+  }));
+  goalPauseError = new Error("goal pause failed");
+  writeFrame(serverSocket, {
+    type: "request",
+    requestId: "interrupt-turn-goal-pause-error",
+    sourceClientId: "desktop",
+    version: 4,
+    method: "thread-follower-interrupt-turn",
+    params: {
+      conversationId: "thread-owned",
+      mode: "user-stop",
+    },
+  });
+  const goalPauseErrorResponse = await waitForFrame(
+    serverSocket,
+    (frame) => frame.type === "response" && frame.requestId === "interrupt-turn-goal-pause-error"
+  );
+  assert.deepEqual(goalPauseErrorResponse.result, {
+    interruptedTurnId: "turn-with-goal-pause-error",
+    goalPauseError: "goal pause failed",
+    ok: true,
+  });
+  assert.equal(codexRequests.at(-1).method, "turn/interrupt");
+
+  for (const turnId of ["turn-from-follower", "turn-with-goal"]) {
+    owner.observeOutbound(JSON.stringify({
+      method: "turn/completed",
+      params: {
+        threadId: "thread-owned",
+        turn: {
+          id: turnId,
+          items: [],
+          status: "interrupted",
+        },
+      },
+    }));
+  }
+  owner.observeOutbound(JSON.stringify({
+    method: "turn/completed",
+    params: {
+      threadId: "thread-owned",
+      turn: {
+        id: "turn-with-goal-pause-error",
+        items: [],
+        status: "interrupted",
+      },
+    },
+  }));
+  owner.observeOutbound(JSON.stringify({
+    method: "thread/goal/cleared",
+    params: { threadId: "thread-owned" },
+  }));
+  goalPauseError = null;
+  const requestCountBeforeCompletedInterrupt = codexRequests.length;
+  writeFrame(serverSocket, {
+    type: "request",
+    requestId: "interrupt-completed-turn",
+    sourceClientId: "desktop",
+    version: 4,
+    method: "thread-follower-interrupt-turn",
+    params: {
+      conversationId: "thread-owned",
+      mode: "user-stop",
+      expectedTurnId: "turn-with-goal-pause-error",
+    },
+  });
+  const completedInterruptResponse = await waitForFrame(
+    serverSocket,
+    (frame) => frame.type === "response" && frame.requestId === "interrupt-completed-turn"
+  );
+  assert.deepEqual(completedInterruptResponse.result, {
+    interruptedTurnId: null,
+    ok: true,
+  });
+  assert.equal(codexRequests.length, requestCountBeforeCompletedInterrupt);
 });
 
 test("live owner dedupes held phone turn starts routed back through follower IPC", async (t) => {
