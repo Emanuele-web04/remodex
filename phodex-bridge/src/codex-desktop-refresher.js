@@ -8,10 +8,16 @@ const { execFile } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const { readDaemonConfig } = require("./daemon-state");
+const {
+  DEFAULT_CODEX_BUNDLE_ID,
+  DEFAULT_CODEX_URL_SCHEME,
+  buildCodexDeepLink,
+  defaultCodexAppPath,
+  defaultCodexHome,
+  desktopTargetFingerprint,
+} = require("./desktop-target");
 const { createThreadRolloutActivityWatcher } = require("./rollout-watch");
 
-const DEFAULT_BUNDLE_ID = "com.openai.codex";
-const DEFAULT_APP_PATH = "/Applications/Codex.app";
 const DEFAULT_DEBOUNCE_MS = 1200;
 const DEFAULT_FALLBACK_NEW_THREAD_MS = 2_000;
 const DEFAULT_MID_RUN_REFRESH_THROTTLE_MS = 3_000;
@@ -21,7 +27,6 @@ const DEFAULT_CUSTOM_REFRESH_FAILURE_THRESHOLD = 3;
 const DEFAULT_FOLLOW_CONFIRM_TIMEOUT_MS = 1_500;
 const DEFAULT_FOLLOW_MAX_ATTEMPTS = 3;
 const REFRESH_SCRIPT_PATH = path.join(__dirname, "scripts", "codex-refresh.applescript");
-const NEW_THREAD_DEEP_LINK = "codex://threads/new";
 
 class CodexDesktopRefresher {
   constructor({
@@ -34,8 +39,9 @@ class CodexDesktopRefresher {
     navigationOnly = false,
     debounceMs = DEFAULT_DEBOUNCE_MS,
     refreshCommand = "",
-    bundleId = DEFAULT_BUNDLE_ID,
-    appPath = DEFAULT_APP_PATH,
+    bundleId = DEFAULT_CODEX_BUNDLE_ID,
+    appPath = defaultCodexAppPath(),
+    urlScheme = DEFAULT_CODEX_URL_SCHEME,
     logPrefix = "[remodex]",
     fallbackNewThreadMs = DEFAULT_FALLBACK_NEW_THREAD_MS,
     midRunRefreshThrottleMs = DEFAULT_MID_RUN_REFRESH_THROTTLE_MS,
@@ -55,6 +61,7 @@ class CodexDesktopRefresher {
     this.refreshCommand = refreshCommand;
     this.bundleId = bundleId;
     this.appPath = appPath;
+    this.urlScheme = urlScheme;
     this.logPrefix = logPrefix;
     this.fallbackNewThreadMs = fallbackNewThreadMs;
     this.midRunRefreshThrottleMs = midRunRefreshThrottleMs;
@@ -108,7 +115,7 @@ class CodexDesktopRefresher {
 
     const method = parsed.method;
     if (method === "thread/start") {
-      const target = resolveInboundTarget(method, parsed);
+      const target = resolveInboundTarget(method, parsed, this.urlScheme);
       if (target?.threadId) {
         this.queueRefresh("phone", target, `phone ${method}`);
         this.ensureWatcher(target.threadId);
@@ -123,7 +130,7 @@ class CodexDesktopRefresher {
     }
 
     if (method === "turn/start") {
-      const target = resolveInboundTarget(method, parsed);
+      const target = resolveInboundTarget(method, parsed, this.urlScheme);
       if (!target) {
         return;
       }
@@ -164,13 +171,13 @@ class CodexDesktopRefresher {
         return;
       }
 
-      const target = resolveOutboundTarget(method, parsed);
+      const target = resolveOutboundTarget(method, parsed, this.urlScheme);
       this.queueCompletionRefresh(target, turnId, `codex ${method}`);
       return;
     }
 
     if (method === "thread/started") {
-      const target = resolveOutboundTarget(method, parsed);
+      const target = resolveOutboundTarget(method, parsed, this.urlScheme);
       const shouldWaitForMaterialization = Boolean(
         this.navigationOnly
         && this.pendingNewThread
@@ -446,7 +453,7 @@ class CodexDesktopRefresher {
         return;
       }
 
-      this.noteRefreshTarget({ threadId: null, url: NEW_THREAD_DEEP_LINK });
+      this.noteRefreshTarget({ threadId: null, url: buildCodexDeepLink("threads/new", this.urlScheme) });
       this.pendingRefreshKinds.add("phone");
       this.scheduleRefresh("fallback thread/start");
     }, this.fallbackNewThreadMs);
@@ -527,14 +534,14 @@ class CodexDesktopRefresher {
     this.lastRolloutSize = event.size;
     this.noteRefreshTarget({
       threadId: event.threadId,
-      url: buildThreadDeepLink(event.threadId),
+      url: buildThreadDeepLink(event.threadId, this.urlScheme),
     });
 
     if (event.reason === "materialized") {
       this.materializationPendingThreadIds.delete(event.threadId);
       this.queueRefresh("rollout_materialized", {
         threadId: event.threadId,
-        url: buildThreadDeepLink(event.threadId),
+        url: buildThreadDeepLink(event.threadId, this.urlScheme),
       }, `rollout ${event.reason}`);
       if (this.navigationOnly) {
         this.stopWatcher();
@@ -554,7 +561,7 @@ class CodexDesktopRefresher {
     if (previousSize == null) {
       this.queueRefresh("rollout_growth", {
         threadId: event.threadId,
-        url: buildThreadDeepLink(event.threadId),
+        url: buildThreadDeepLink(event.threadId, this.urlScheme),
       }, "rollout first-growth");
       this.lastMidRunRefreshAt = this.now();
       return;
@@ -567,7 +574,7 @@ class CodexDesktopRefresher {
     this.lastMidRunRefreshAt = this.now();
     this.queueRefresh("rollout_growth", {
       threadId: event.threadId,
-      url: buildThreadDeepLink(event.threadId),
+      url: buildThreadDeepLink(event.threadId, this.urlScheme),
     }, "rollout mid-run");
   }
 
@@ -628,7 +635,7 @@ class CodexDesktopRefresher {
     }
     this.queueRefresh("materialization_fallback", {
       threadId,
-      url: buildThreadDeepLink(threadId),
+      url: buildThreadDeepLink(threadId, this.urlScheme),
     }, reason);
   }
 
@@ -640,7 +647,7 @@ class CodexDesktopRefresher {
     if (!this.navigationOnly || !threadId) {
       return targetUrl;
     }
-    const resolvedTargetUrl = targetUrl || buildThreadDeepLink(threadId);
+    const resolvedTargetUrl = targetUrl || buildThreadDeepLink(threadId, this.urlScheme);
     const separator = resolvedTargetUrl.includes("?") ? "&" : "?";
     this.followActivationSerial += 1;
     return `${resolvedTargetUrl}${separator}remodex-follow=${this.now()}-${this.followActivationSerial}`;
@@ -661,7 +668,7 @@ class CodexDesktopRefresher {
       }
       this.queueRefresh("follow_retry", {
         threadId,
-        url: targetUrl || buildThreadDeepLink(threadId),
+        url: targetUrl || buildThreadDeepLink(threadId, this.urlScheme),
       }, `desktop follow not confirmed (attempt ${attempts + 1})`);
     }, Math.max(0, this.followConfirmTimeoutMs));
     timer.unref?.();
@@ -744,7 +751,38 @@ function readBridgeConfig({
     && !codexEndpoint
     && desktopIpcLiveSyncEnabled
   );
-  return {
+  const codexHome = readFirstDefinedEnv(
+    ["CODEX_HOME"],
+    readString(daemonConfig.codexHome) || defaultCodexHome(),
+    env
+  );
+  const codexBundleId = readFirstDefinedEnv(
+    ["REMODEX_CODEX_BUNDLE_ID"],
+    readString(daemonConfig.codexBundleId) || DEFAULT_CODEX_BUNDLE_ID,
+    env
+  );
+  const codexAppPath = readFirstDefinedEnv(
+    ["REMODEX_CODEX_APP_PATH"],
+    readString(daemonConfig.codexAppPath) || defaultCodexAppPath({ fsImpl }),
+    env
+  );
+  const codexUrlScheme = readFirstDefinedEnv(
+    ["REMODEX_CODEX_URL_SCHEME"],
+    readString(daemonConfig.codexUrlScheme) || DEFAULT_CODEX_URL_SCHEME,
+    env
+  );
+  const configuredDesktopIpcSocketPath = readFirstDefinedEnv(
+    ["REMODEX_DESKTOP_IPC_SOCKET"],
+    readString(daemonConfig.desktopIpcSocketPath),
+    env
+  );
+  const explicitCodexHome = readString(env.CODEX_HOME)
+    || readString(daemonConfig.codexHome);
+  const customCodexHomeSelected = explicitCodexHome
+    && path.resolve(explicitCodexHome) !== path.resolve(defaultCodexHome());
+  const desktopIpcSocketPath = configuredDesktopIpcSocketPath
+    || (customCodexHomeSelected ? path.join(codexHome, "ipc", "ipc.sock") : "");
+  const config = {
     relayUrl,
     pushServiceUrl: readFirstDefinedEnv(
       ["REMODEX_PUSH_SERVICE_URL"],
@@ -766,7 +804,8 @@ function readBridgeConfig({
       ? (persistedKeepMacAwakeEnabled == null ? false : persistedKeepMacAwakeEnabled)
       : explicitKeepMacAwakeEnabled,
     codexEndpoint,
-    desktopIpcSocketPath: readFirstDefinedEnv(["REMODEX_DESKTOP_IPC_SOCKET"], "", env),
+    codexHome,
+    desktopIpcSocketPath,
     desktopIpcLiveSyncEnabled,
     desktopAutoFollowEnabled: explicitDesktopAutoFollowEnabled == null
       ? defaultDesktopAutoFollowEnabled
@@ -776,9 +815,12 @@ function readBridgeConfig({
       75
     ),
     refreshCommand,
-    codexBundleId: readFirstDefinedEnv(["REMODEX_CODEX_BUNDLE_ID"], DEFAULT_BUNDLE_ID, env),
-    codexAppPath: DEFAULT_APP_PATH,
+    codexBundleId,
+    codexAppPath,
+    codexUrlScheme,
   };
+  config.codexTargetFingerprint = desktopTargetFingerprint(config);
+  return config;
 }
 
 function readPrivatePackageDefaults({ runtimeRoot, fsImpl }) {
@@ -878,34 +920,34 @@ function extractThreadId(message) {
   return null;
 }
 
-function resolveInboundTarget(method, message) {
+function resolveInboundTarget(method, message, urlScheme = DEFAULT_CODEX_URL_SCHEME) {
   const threadId = extractThreadId(message);
   if (threadId) {
-    return { threadId, url: buildThreadDeepLink(threadId) };
+    return { threadId, url: buildThreadDeepLink(threadId, urlScheme) };
   }
 
   if (method === "thread/start" || method === "turn/start") {
-    return { threadId: null, url: NEW_THREAD_DEEP_LINK };
+    return { threadId: null, url: buildCodexDeepLink("threads/new", urlScheme) };
   }
 
   return null;
 }
 
-function resolveOutboundTarget(method, message) {
+function resolveOutboundTarget(method, message, urlScheme = DEFAULT_CODEX_URL_SCHEME) {
   const threadId = extractThreadId(message);
   if (threadId) {
-    return { threadId, url: buildThreadDeepLink(threadId) };
+    return { threadId, url: buildThreadDeepLink(threadId, urlScheme) };
   }
 
   if (method === "thread/started") {
-    return { threadId: null, url: NEW_THREAD_DEEP_LINK };
+    return { threadId: null, url: buildCodexDeepLink("threads/new", urlScheme) };
   }
 
   return null;
 }
 
-function buildThreadDeepLink(threadId) {
-  return `codex://threads/${threadId}`;
+function buildThreadDeepLink(threadId, urlScheme = DEFAULT_CODEX_URL_SCHEME) {
+  return buildCodexDeepLink(`threads/${threadId}`, urlScheme);
 }
 
 function readOptionalBooleanEnv(keys, env = process.env) {

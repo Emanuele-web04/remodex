@@ -94,6 +94,88 @@ test("remodex start refreshes macOS service config and plist", async () => {
   ]);
 });
 
+test("remodex target set forwards exact values without shell interpolation", async () => {
+  const calls = [];
+  const messages = [];
+  await main({
+    argv: [
+      "node", "remodex", "target", "set",
+      "--codex-home", "/Users/test/Codex Home",
+      "--bundle-id", "com.openai.codex.secondary",
+      "--app-path", "/Users/test/ChatGPT Personal.app",
+      "--url-scheme", "codex-secondary",
+      "--restart",
+    ],
+    platform: "darwin",
+    consoleImpl: {
+      log(message) { messages.push(message); },
+      error(message) { throw new Error(`unexpected error: ${message}`); },
+    },
+    exitImpl(code) { throw new Error(`unexpected exit ${code}`); },
+    deps: {
+      async setMacOSDesktopTarget(options) {
+        calls.push(options);
+        return { target: options.target, restarted: true, rolledBack: false };
+      },
+    },
+  });
+  assert.deepEqual(calls, [{
+    target: {
+      codexHome: "/Users/test/Codex Home",
+      codexBundleId: "com.openai.codex.secondary",
+      codexAppPath: "/Users/test/ChatGPT Personal.app",
+      codexUrlScheme: "codex-secondary",
+    },
+    restart: true,
+  }]);
+  assert.deepEqual(messages, ["[remodex] Desktop target updated and service restarted."]);
+});
+
+test("remodex target reset preserves the default contract", async () => {
+  const calls = [];
+  await main({
+    argv: ["node", "remodex", "target", "reset", "--restart"],
+    platform: "darwin",
+    consoleImpl: { log() {}, error(message) { throw new Error(message); } },
+    exitImpl(code) { throw new Error(`unexpected exit ${code}`); },
+    deps: {
+      async resetMacOSDesktopTarget(options) {
+        calls.push(options);
+        return { target: {}, restarted: true, rolledBack: false };
+      },
+    },
+  });
+  assert.deepEqual(calls, [{ restart: true }]);
+});
+
+test("remodex resume forwards the persisted desktop target", async () => {
+  const calls = [];
+  await main({
+    argv: ["node", "remodex", "resume"],
+    platform: "darwin",
+    consoleImpl: { log() {}, error(message) { throw new Error(message); } },
+    exitImpl(code) { throw new Error(`unexpected exit ${code}`); },
+    deps: {
+      readBridgeConfig() {
+        return {
+          codexBundleId: "com.openai.codex.secondary",
+          codexAppPath: "/Users/test/ChatGPT Personal.app",
+          codexUrlScheme: "codex-secondary",
+        };
+      },
+      openLastActiveThread(options) {
+        calls.push(options);
+        return { threadId: "thread-1", source: "phone" };
+      },
+    },
+  });
+  assert.deepEqual(calls, [{
+    bundleId: "com.openai.codex.secondary",
+    appPath: "/Users/test/ChatGPT Personal.app",
+    urlScheme: "codex-secondary",
+  }]);
+});
+
 test("remodex up shows a startup indicator while waiting for the pairing QR", async () => {
   const calls = [];
   const messages = [];

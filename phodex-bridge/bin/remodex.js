@@ -11,10 +11,12 @@ const {
   printMacOSBridgeServiceStatus,
   readBridgeConfig,
   resetMacOSBridgePairing,
+  resetMacOSDesktopTarget,
   restartMacOSBridgeService,
   runMacOSBridgeService,
   startBridge,
   startMacOSBridgeService,
+  setMacOSDesktopTarget,
   stopMacOSBridgeService,
   uninstallMacOSBridgeService,
   resetBridgePairing,
@@ -29,10 +31,12 @@ const defaultDeps = {
   printMacOSBridgeServiceStatus,
   readBridgeConfig,
   resetMacOSBridgePairing,
+  resetMacOSDesktopTarget,
   restartMacOSBridgeService,
   runMacOSBridgeService,
   startBridge,
   startMacOSBridgeService,
+  setMacOSDesktopTarget,
   stopMacOSBridgeService,
   uninstallMacOSBridgeService,
   resetBridgePairing,
@@ -229,6 +233,40 @@ async function main({
     return;
   }
 
+  if (command === "target") {
+    assertMacOSCommand(command, { platform, consoleImpl, exitImpl });
+    const targetCommand = parseTargetCommand(argv.slice(2));
+    let result;
+    if (targetCommand.action === "set") {
+      result = await deps.setMacOSDesktopTarget({
+        target: {
+          codexHome: targetCommand.codexHome,
+          codexBundleId: targetCommand.bundleId,
+          codexAppPath: targetCommand.appPath,
+          codexUrlScheme: targetCommand.urlScheme,
+        },
+        restart: targetCommand.restart,
+      });
+    } else if (targetCommand.action === "reset") {
+      result = await deps.resetMacOSDesktopTarget({ restart: targetCommand.restart });
+    } else {
+      throw new Error("Usage: remodex target set --codex-home <path> --bundle-id <id> --app-path <path> --url-scheme <scheme> [--restart] | remodex target reset [--restart]");
+    }
+    emitResult({
+      payload: {
+        ok: true,
+        currentVersion: version,
+        target: result.target,
+        restarted: result.restarted,
+        rolledBack: result.rolledBack,
+      },
+      message: `[remodex] Desktop target ${targetCommand.action === "reset" ? "reset" : "updated"}${result.restarted ? " and service restarted" : ""}.`,
+      jsonOutput,
+      consoleImpl,
+    });
+    return;
+  }
+
   if (command === "reset-pairing") {
     try {
       if (platform === "darwin") {
@@ -265,7 +303,12 @@ async function main({
 
   if (command === "resume") {
     try {
-      const state = deps.openLastActiveThread();
+      const config = deps.readBridgeConfig();
+      const state = deps.openLastActiveThread({
+        bundleId: config.codexBundleId,
+        appPath: config.codexAppPath,
+        urlScheme: config.codexUrlScheme,
+      });
       emitResult({
         payload: {
           ok: true,
@@ -296,7 +339,7 @@ async function main({
 
   consoleImpl.error(`Unknown command: ${command}`);
   consoleImpl.error(
-    "Usage: remodex up | remodex run | remodex start | remodex restart | remodex qr | remodex pair | remodex stop | remodex uninstall-service | remodex status | "
+    "Usage: remodex up | remodex run | remodex start | remodex restart | remodex qr | remodex pair | remodex stop | remodex uninstall-service | remodex status | remodex target ... | "
     + "remodex reset-pairing | remodex resume | remodex watch [threadId] | remodex --version | "
     + "append --json to start/restart/qr/pair/stop/uninstall-service/status/reset-pairing/resume for machine-readable output"
   );
@@ -321,6 +364,51 @@ function parseCliArgs(rawArgs) {
     jsonOutput,
     watchThreadId: positionals[1] || "",
   };
+}
+
+function parseTargetCommand(rawArgs) {
+  const args = rawArgs.filter((arg) => arg !== "--json");
+  const action = args[1] || "";
+  const result = {
+    action,
+    restart: false,
+    codexHome: "",
+    bundleId: "",
+    appPath: "",
+    urlScheme: "",
+  };
+  const valueFlags = new Map([
+    ["--codex-home", "codexHome"],
+    ["--bundle-id", "bundleId"],
+    ["--app-path", "appPath"],
+    ["--url-scheme", "urlScheme"],
+  ]);
+  for (let index = 2; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument === "--restart") {
+      result.restart = true;
+      continue;
+    }
+    const field = valueFlags.get(argument);
+    if (!field || index + 1 >= args.length) {
+      throw new Error(`Unknown or incomplete target option: ${argument}`);
+    }
+    result[field] = args[index + 1];
+    index += 1;
+  }
+  if (action === "set") {
+    for (const [field, label] of [
+      ["codexHome", "--codex-home"],
+      ["bundleId", "--bundle-id"],
+      ["appPath", "--app-path"],
+      ["urlScheme", "--url-scheme"],
+    ]) {
+      if (!result[field]) {
+        throw new Error(`remodex target set requires ${label}.`);
+      }
+    }
+  }
+  return result;
 }
 
 function emitVersion({

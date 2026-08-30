@@ -29,7 +29,7 @@ test("desktop/continueOnMac relaunches Codex for the requested thread", async ()
     appPath: "/Applications/Codex.app",
     executor: async (...args) => {
       executorCalls.push(args);
-      if (args[0] === "pkill") {
+      if (args[0] === "/usr/bin/osascript") {
         running = false;
       }
       return { stdout: "", stderr: "" };
@@ -44,10 +44,15 @@ test("desktop/continueOnMac relaunches Codex for the requested thread", async ()
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   assert.equal(executorCalls.length, 3);
-  assert.equal(executorCalls[0][0], "pkill");
+  assert.equal(executorCalls[0][0], "/usr/bin/osascript");
   assert.deepEqual(executorCalls[0][1], [
-    "-x",
-    "Codex",
+    "-e",
+    "on run argv",
+    "-e",
+    "tell application id (item 1 of argv) to quit",
+    "-e",
+    "end run",
+    "com.openai.codex",
   ]);
   assert.equal(executorCalls[1][0], "open");
   assert.deepEqual(executorCalls[1][1], [
@@ -114,6 +119,33 @@ test("desktop/continueOnMac boots Codex before deep-linking unknown threads", as
   assert.equal(responses[0].result?.relaunched, false);
 });
 
+test("desktop/continueOnMac uses the selected Doppel bundle and scheme", async () => {
+  const calls = [];
+  const responses = [];
+  handleDesktopRequest(JSON.stringify({
+    id: "request-doppel",
+    method: "desktop/continueOnMac",
+    params: { threadId: "thread-doppel" },
+  }), (response) => responses.push(JSON.parse(response)), {
+    platform: "darwin",
+    bundleId: "com.openai.codex.secondary",
+    appPath: "/Users/test/ChatGPT Personal.app",
+    urlScheme: "codex-secondary",
+    executor: async (...args) => { calls.push(args); return { stdout: "", stderr: "" }; },
+    isAppRunning: async () => false,
+    sleepFn: async () => {},
+    threadMaterializeWaitMs: 0,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(calls[0], [
+    "open", ["-b", "com.openai.codex.secondary"], { timeout: 20_000 },
+  ]);
+  assert.deepEqual(calls[1], ["open", [
+    "-b", "com.openai.codex.secondary", "codex-secondary://threads/thread-doppel",
+  ], { timeout: 20_000 }]);
+  assert.equal(responses[0].result.targetUrl, "codex-secondary://threads/thread-doppel");
+});
+
 test("desktop/continueOnMac relaunches when a desktop-known thread is requested and Codex is already open", async () => {
   const executorCalls = [];
   const responses = [];
@@ -155,7 +187,7 @@ test("desktop/continueOnMac relaunches when a desktop-known thread is requested 
     fsModule: fakeFS,
     executor: async (...args) => {
       executorCalls.push(args);
-      if (args[0] === "pkill") {
+      if (args[0] === "/usr/bin/osascript") {
         running = false;
       }
       return { stdout: "", stderr: "" };
@@ -167,10 +199,15 @@ test("desktop/continueOnMac relaunches when a desktop-known thread is requested 
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   assert.equal(executorCalls.length, 3);
-  assert.equal(executorCalls[0][0], "pkill");
+  assert.equal(executorCalls[0][0], "/usr/bin/osascript");
   assert.deepEqual(executorCalls[0][1], [
-    "-x",
-    "Codex",
+    "-e",
+    "on run argv",
+    "-e",
+    "tell application id (item 1 of argv) to quit",
+    "-e",
+    "end run",
+    "com.openai.codex",
   ]);
   assert.equal(executorCalls[1][0], "open");
   assert.deepEqual(executorCalls[1][1], [

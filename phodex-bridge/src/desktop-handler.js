@@ -8,11 +8,15 @@ const { execFile } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const { promisify } = require("util");
+const {
+  DEFAULT_CODEX_BUNDLE_ID,
+  DEFAULT_CODEX_URL_SCHEME,
+  buildCodexDeepLink,
+  defaultCodexAppPath,
+} = require("./desktop-target");
 const { findRolloutFileForThread, resolveSessionsRoot } = require("./rollout-watch");
 
 const execFileAsync = promisify(execFile);
-const DEFAULT_BUNDLE_ID = "com.openai.codex";
-const DEFAULT_APP_PATH = "/Applications/Codex.app";
 const DEFAULT_PLATFORM = process.platform;
 const HANDOFF_TIMEOUT_MS = 20_000;
 const DEFAULT_RELAUNCH_WAIT_MS = 300;
@@ -20,7 +24,6 @@ const DEFAULT_APP_BOOT_WAIT_MS = 1_200;
 const DEFAULT_THREAD_MATERIALIZE_WAIT_MS = 4_000;
 const DEFAULT_THREAD_MATERIALIZE_POLL_MS = 250;
 const DEFAULT_WAKE_DISPLAY_DURATION_SECONDS = 30;
-const WINDOWS_BOUNCE_URL = "codex://settings";
 const DESKTOP_THREAD_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/;
 
 function handleDesktopRequest(rawMessage, sendResponse, options = {}) {
@@ -61,8 +64,9 @@ function handleDesktopRequest(rawMessage, sendResponse, options = {}) {
 
 async function handleDesktopMethod(method, params, options = {}) {
   const platform = options.platform || DEFAULT_PLATFORM;
-  const bundleId = options.bundleId || DEFAULT_BUNDLE_ID;
-  const appPath = options.appPath || DEFAULT_APP_PATH;
+  const bundleId = options.bundleId || DEFAULT_CODEX_BUNDLE_ID;
+  const appPath = options.appPath || defaultCodexAppPath();
+  const urlScheme = options.urlScheme || DEFAULT_CODEX_URL_SCHEME;
   const executor = options.executor || execFileAsync;
   const env = options.env || process.env;
   const fsModule = options.fsModule || fs;
@@ -86,6 +90,7 @@ async function handleDesktopMethod(method, params, options = {}) {
         platform,
         bundleId,
         appPath,
+        urlScheme,
         executor,
         env,
         fsModule,
@@ -108,6 +113,7 @@ async function handleDesktopMethod(method, params, options = {}) {
         platform,
         bundleId,
         appPath,
+        urlScheme,
         executor,
         env,
         fsModule,
@@ -140,6 +146,7 @@ async function continueOnDesktop(
     platform,
     bundleId,
     appPath,
+    urlScheme,
     executor,
     env,
     fsModule,
@@ -159,7 +166,7 @@ async function continueOnDesktop(
     throw desktopError("invalid_thread_id", "The requested desktop thread id is not valid.");
   }
 
-  const targetUrl = `codex://threads/${threadId}`;
+  const targetUrl = buildCodexDeepLink(`threads/${threadId}`, urlScheme);
   const desktopKnown = isThreadLikelyKnownOnDesktop(threadId, { env, fsModule });
 
   if (platform === "win32") {
@@ -170,9 +177,10 @@ async function continueOnDesktop(
           env,
           sleepFn,
           settleMs: relaunchWaitMs,
+          urlScheme,
         });
       } else {
-        await openWindowsDeepLink(WINDOWS_BOUNCE_URL, { executor, env });
+        await openWindowsDeepLink(buildCodexDeepLink("settings", urlScheme), { executor, env });
         await sleepFn(appBootWaitMs);
         await waitForThreadMaterialization(threadId, {
           env,
@@ -202,7 +210,7 @@ async function continueOnDesktop(
 
   const appRunning = typeof isAppRunning === "function"
     ? await isAppRunning(appPath)
-    : await detectRunningCodexApp(appPath, executor);
+    : await detectRunningCodexApp(bundleId, executor);
 
   // If Codex.app is already open, explicit handoff should still feel like a
   // real device switch: close, reopen, then focus the requested thread.
@@ -421,14 +429,12 @@ function resolveSessionsRootForEnv(env) {
   return resolveSessionsRoot();
 }
 
-async function detectRunningCodexApp(appPath, executor) {
-  const appName = path.basename(appPath, ".app");
-
+async function detectRunningCodexApp(bundleId, executor) {
   try {
-    await executor("pgrep", ["-x", appName], {
+    const result = await executor("/usr/bin/lsappinfo", ["find", `bundleid=${bundleId}`], {
       timeout: HANDOFF_TIMEOUT_MS,
     });
-    return true;
+    return Boolean(String(result?.stdout || "").trim());
   } catch {
     return false;
   }
@@ -468,8 +474,8 @@ async function openWindowsDeepLink(targetUrl, { executor, env }) {
   });
 }
 
-async function refreshWindowsCodex(targetUrl, { executor, env, sleepFn, settleMs }) {
-  await openWindowsDeepLink(WINDOWS_BOUNCE_URL, { executor, env });
+async function refreshWindowsCodex(targetUrl, { executor, env, sleepFn, settleMs, urlScheme }) {
+  await openWindowsDeepLink(buildCodexDeepLink("settings", urlScheme), { executor, env });
   await sleepFn(settleMs);
   await openWindowsDeepLink(targetUrl, { executor, env });
 }
@@ -499,31 +505,31 @@ async function forceRelaunchCodexApp({
   relaunchWaitMs,
   appBootWaitMs,
 }) {
-  const appName = path.basename(appPath, ".app");
+  await executor("/usr/bin/osascript", [
+    "-e",
+    "on run argv",
+    "-e",
+    "tell application id (item 1 of argv) to quit",
+    "-e",
+    "end run",
+    bundleId,
+  ], {
+    timeout: HANDOFF_TIMEOUT_MS,
+  });
 
-  try {
-    await executor("pkill", ["-x", appName], {
-      timeout: HANDOFF_TIMEOUT_MS,
-    });
-  } catch (error) {
-    if (error?.code !== 1) {
-      throw error;
-    }
-  }
-
-  await waitForAppExit(appPath, executor, isAppRunning);
+  await waitForAppExit(bundleId, appPath, executor, isAppRunning);
   await sleepFn(relaunchWaitMs);
   await openCodexApp({ bundleId, appPath, executor });
   await sleepFn(appBootWaitMs);
 }
 
-async function waitForAppExit(appPath, executor, isAppRunning) {
+async function waitForAppExit(bundleId, appPath, executor, isAppRunning) {
   const deadline = Date.now() + HANDOFF_TIMEOUT_MS;
 
   while (Date.now() < deadline) {
     const isRunning = typeof isAppRunning === "function"
       ? await isAppRunning(appPath)
-      : await detectRunningCodexApp(appPath, executor);
+      : await detectRunningCodexApp(bundleId, executor);
     if (!isRunning) {
       return;
     }

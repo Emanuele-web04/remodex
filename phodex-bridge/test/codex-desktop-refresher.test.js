@@ -140,6 +140,41 @@ test("readBridgeConfig keeps safe defaults and explicit overrides", () => {
       },
     },
   });
+  const selectedTargetConfig = readBridgeConfig({
+    env: {
+      CODEX_HOME: "/Users/test/Codex Home",
+      REMODEX_CODEX_BUNDLE_ID: "com.openai.codex.secondary",
+      REMODEX_CODEX_APP_PATH: "/Users/test/ChatGPT Personal.app",
+      REMODEX_CODEX_URL_SCHEME: "codex-secondary",
+    },
+    platform: "darwin",
+    runtimeRoot: "/tmp/remodex-package",
+    fsImpl: {
+      existsSync: () => false,
+      readFileSync: () => {
+        throw new Error("unexpected read");
+      },
+    },
+  });
+  const resetPrimaryTargetConfig = readBridgeConfig({
+    env: { REMODEX_DEVICE_STATE_DIR: "/tmp/remodex-primary-state" },
+    platform: "darwin",
+    runtimeRoot: "/tmp/remodex-package",
+    fsImpl: {
+      existsSync(targetPath) {
+        return targetPath === "/tmp/remodex-primary-state/daemon-config.json";
+      },
+      readFileSync(targetPath) {
+        if (targetPath === "/tmp/remodex-primary-state/daemon-config.json") {
+          return JSON.stringify({
+            codexHome: path.join(os.homedir(), ".codex"),
+            desktopIpcSocketPath: "",
+          });
+        }
+        throw new Error("unexpected read");
+      },
+    },
+  });
   assert.equal(macConfig.refreshEnabled, false);
   assert.equal(macConfig.keepMacAwakeEnabled, false);
   assert.equal(macConfig.relayUrl, "");
@@ -160,6 +195,15 @@ test("readBridgeConfig keeps safe defaults and explicit overrides", () => {
   assert.equal(explicitOffConfig.desktopIpcSnapshotDebounceMs, 25);
   assert.equal(explicitOffConfig.keepMacAwakeEnabled, false);
   assert.equal(explicitAutoFollowOffConfig.desktopAutoFollowEnabled, false);
+  assert.equal(selectedTargetConfig.codexHome, "/Users/test/Codex Home");
+  assert.equal(selectedTargetConfig.codexBundleId, "com.openai.codex.secondary");
+  assert.equal(selectedTargetConfig.codexAppPath, "/Users/test/ChatGPT Personal.app");
+  assert.equal(selectedTargetConfig.codexUrlScheme, "codex-secondary");
+  assert.equal(
+    selectedTargetConfig.desktopIpcSocketPath,
+    "/Users/test/Codex Home/ipc/ipc.sock"
+  );
+  assert.equal(resetPrimaryTargetConfig.desktopIpcSocketPath, "");
 });
 
 test("readBridgeConfig uses only the packaged relay default outside a source checkout", () => {
