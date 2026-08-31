@@ -32,6 +32,7 @@ const {
 const SERVICE_LABEL = "com.remodex.bridge";
 const DEFAULT_PAIRING_WAIT_TIMEOUT_MS = 10_000;
 const DEFAULT_PAIRING_WAIT_INTERVAL_MS = 200;
+const CODEX_APP_RESOURCE_SUBPATH = path.join("Codex.app", "Contents", "Resources");
 
 // If the saved Node binary or CLI entrypoint disappears (npm uninstall, deleted
 // checkout), exit 0 so launchd's KeepAlive.SuccessfulExit=false stops rescheduling
@@ -405,6 +406,7 @@ function buildLaunchAgentPlist({
   nodePath,
   cliPath,
 }) {
+  const launchAgentPathEnv = buildLaunchAgentPathEnv({ homeDir, pathEnv });
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -431,7 +433,7 @@ ${buildLaunchAgentProgramArguments({ nodePath, cliPath })
     <key>HOME</key>
     <string>${escapeXml(homeDir)}</string>
     <key>PATH</key>
-    <string>${escapeXml(pathEnv)}</string>
+    <string>${escapeXml(launchAgentPathEnv)}</string>
     <key>REMODEX_DEVICE_STATE_DIR</key>
     <string>${escapeXml(stateDir)}</string>
   </dict>
@@ -442,6 +444,25 @@ ${buildLaunchAgentProgramArguments({ nodePath, cliPath })
 </dict>
 </plist>
 `;
+}
+
+function buildLaunchAgentPathEnv({ homeDir, pathEnv }) {
+  const entries = String(pathEnv || "")
+    .split(path.delimiter)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  const fallbackEntries = [
+    path.join("/Applications", CODEX_APP_RESOURCE_SUBPATH),
+    homeDir ? path.join(homeDir, "Applications", CODEX_APP_RESOURCE_SUBPATH) : "",
+  ].filter(Boolean);
+
+  for (const entry of fallbackEntries) {
+    if (!entries.includes(entry)) {
+      entries.push(entry);
+    }
+  }
+
+  return entries.join(path.delimiter);
 }
 
 async function waitForFreshPairingSession({
