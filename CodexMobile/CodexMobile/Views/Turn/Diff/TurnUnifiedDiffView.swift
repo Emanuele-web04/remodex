@@ -280,7 +280,7 @@ struct UnifiedDiffView: View {
             if diff.hunks.isEmpty {
                 rawFallback
             } else {
-                VStack(alignment: .leading, spacing: 0) {
+                LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(Array(diff.hunks.enumerated()), id: \.element.id) { index, hunk in
                         if index > 0 {
                             Rectangle()
@@ -342,7 +342,7 @@ struct UnifiedDiffView: View {
     // code is still non-empty (e.g. plain `+`/`-` snippets without `@@` markers).
     private var rawFallback: some View {
         let lines = rawDiffCode.components(separatedBy: "\n")
-        return VStack(alignment: .leading, spacing: 0) {
+        return LazyVStack(alignment: .leading, spacing: 0) {
             ForEach(Array(lines.enumerated()), id: \.offset) { _, raw in
                 UnifiedDiffRawRow(rawLine: raw)
             }
@@ -391,7 +391,7 @@ private struct UnifiedDiffHunkSection: View {
             .buttonStyle(.plain)
 
             if !isCollapsed {
-                VStack(alignment: .leading, spacing: 0) {
+                LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(hunk.lines) { line in
                         UnifiedDiffRow(line: line, gutterWidth: gutterWidth)
                     }
