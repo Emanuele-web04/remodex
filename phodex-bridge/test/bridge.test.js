@@ -3478,7 +3478,7 @@ test("sanitizeThreadHistoryImagesForRelay leaves unrelated RPC payloads unchange
   );
 });
 
-test("createMacOSBridgeWakeAssertion spawns a macOS caffeinate idle-sleep assertion tied to the bridge pid", () => {
+test("createMacOSBridgeWakeAssertion uses an always-on idle-sleep assertion by default", () => {
   const spawnCalls = [];
   const fakeChild = {
     killed: false,
@@ -3509,7 +3509,36 @@ test("createMacOSBridgeWakeAssertion spawns a macOS caffeinate idle-sleep assert
   assert.equal(fakeChild.killed, true);
 });
 
-test("createMacOSBridgeWakeAssertion can toggle the caffeinate assertion on and off live", () => {
+test("createMacOSBridgeWakeAssertion uses an AC-only system-sleep assertion when requested", () => {
+  const spawnCalls = [];
+  const assertion = createMacOSBridgeWakeAssertion({
+    platform: "darwin",
+    pid: 5150,
+    mode: "ac-power",
+    spawnImpl(command, args, options) {
+      spawnCalls.push({ command, args, options });
+      return {
+        killed: false,
+        on() {},
+        unref() {},
+        kill() {
+          this.killed = true;
+        },
+      };
+    },
+  });
+
+  assert.equal(assertion.mode, "ac-power");
+  assert.equal(assertion.active, true);
+  assert.deepEqual(spawnCalls, [{
+    command: "/usr/bin/caffeinate",
+    args: ["-s", "-w", "5150"],
+    options: { stdio: "ignore" },
+  }]);
+  assertion.stop();
+});
+
+test("createMacOSBridgeWakeAssertion can switch modes live", () => {
   const spawnCalls = [];
   const children = [];
 
@@ -3534,17 +3563,26 @@ test("createMacOSBridgeWakeAssertion can toggle the caffeinate assertion on and 
 
   assert.equal(assertion.active, false);
   assert.equal(assertion.enabled, false);
+  assert.equal(assertion.mode, "off");
   assert.deepEqual(spawnCalls, []);
 
-  assertion.setEnabled(true);
+  assertion.setMode("ac-power");
   assert.equal(assertion.enabled, true);
+  assert.equal(assertion.mode, "ac-power");
   assert.equal(assertion.active, true);
   assert.equal(spawnCalls.length, 1);
+  assert.deepEqual(spawnCalls[0].args, ["-s", "-w", "9001"]);
 
-  assertion.setEnabled(false);
+  assertion.setMode("always");
+  assert.equal(assertion.mode, "always");
+  assert.equal(assertion.active, true);
+  assert.equal(children[0].killed, true);
+  assert.deepEqual(spawnCalls[1].args, ["-i", "-w", "9001"]);
+
+  assertion.setMode("off");
   assert.equal(assertion.enabled, false);
   assert.equal(assertion.active, false);
-  assert.equal(children[0].killed, true);
+  assert.equal(children[1].killed, true);
 });
 
 test("createMacOSBridgeWakeAssertion is a no-op outside macOS", () => {
@@ -3558,6 +3596,7 @@ test("createMacOSBridgeWakeAssertion is a no-op outside macOS", () => {
   });
 
   assert.equal(assertion.active, false);
+  assert.equal(assertion.mode, "off");
   assertion.stop();
   assert.equal(didSpawn, false);
 });
@@ -3566,7 +3605,7 @@ test("persistBridgePreferences only saves the daemon preference field", () => {
   const writes = [];
 
   persistBridgePreferences(
-    { keepMacAwakeEnabled: false },
+    { keepMacAwakeMode: "ac-power" },
     {
       readDaemonConfigImpl() {
         return {
@@ -3583,6 +3622,7 @@ test("persistBridgePreferences only saves the daemon preference field", () => {
   assert.deepEqual(writes, [{
     relayUrl: "ws://127.0.0.1:9000/relay",
     refreshEnabled: true,
+    keepMacAwakeMode: "ac-power",
     keepMacAwakeEnabled: false,
   }]);
 });

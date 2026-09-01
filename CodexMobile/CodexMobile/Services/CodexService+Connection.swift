@@ -8,6 +8,12 @@ import Foundation
 import Network
 import UIKit
 
+enum CodexKeepAwakeMode: String, CaseIterable, Sendable {
+    case off
+    case acPower = "ac-power"
+    case always
+}
+
 extension CodexService {
     // Only close codes that prove the saved pairing/session can no longer be reused
     // should force a QR reset. A `4003` replaces an older mobile socket with a newer one,
@@ -209,9 +215,16 @@ extension CodexService {
         failAllPendingRequests(with: CodexServiceError.disconnected)
     }
 
+    func setKeepMacAwakeModePreference(_ mode: CodexKeepAwakeMode) {
+        keepMacAwakeMode = mode
+        defaults.set(mode.rawValue, forKey: Self.keepMacAwakeModeDefaultsKey)
+        // Preserve safe downgrade behavior for older app versions. AC-only
+        // becomes off rather than unexpectedly keeping a Mac awake on battery.
+        defaults.set(mode == .always, forKey: Self.keepMacAwakeWhileBridgeRunsDefaultsKey)
+    }
+
     func setKeepMacAwakeWhileBridgeRunsPreference(_ enabled: Bool) {
-        keepMacAwakeWhileBridgeRuns = enabled
-        defaults.set(enabled, forKey: Self.keepMacAwakeWhileBridgeRunsDefaultsKey)
+        setKeepMacAwakeModePreference(enabled ? .always : .off)
     }
 
     func updateBridgeKeepMacAwakePreference(_ enabled: Bool) async {
@@ -228,7 +241,7 @@ extension CodexService {
 
         do {
             try await handoffService.updateBridgeKeepMacAwakePreference(
-                enabled: keepMacAwakeWhileBridgeRuns
+                mode: keepMacAwakeMode
             )
         } catch {
             if showFailureInUI {

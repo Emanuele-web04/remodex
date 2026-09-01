@@ -8,6 +8,11 @@ const { execFile } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const { readDaemonConfig } = require("./daemon-state");
+const {
+  KEEP_AWAKE_MODE_ALWAYS,
+  KEEP_AWAKE_MODE_OFF,
+  normalizeKeepAwakeMode,
+} = require("./keep-awake-mode");
 const { createThreadRolloutActivityWatcher } = require("./rollout-watch");
 
 const DEFAULT_BUNDLE_ID = "com.openai.codex";
@@ -724,10 +729,20 @@ function readBridgeConfig({
   const explicitRefreshEnabled = readOptionalBooleanEnv(["REMODEX_REFRESH_ENABLED"], env);
   const explicitDesktopIpcLiveSyncEnabled = readOptionalBooleanEnv(["REMODEX_DESKTOP_IPC_LIVE_SYNC"], env);
   const explicitDesktopAutoFollowEnabled = readOptionalBooleanEnv(["REMODEX_DESKTOP_AUTO_FOLLOW"], env);
+  const explicitKeepMacAwakeMode = normalizeKeepAwakeMode(env.REMODEX_KEEP_MAC_AWAKE_MODE);
   const explicitKeepMacAwakeEnabled = readOptionalBooleanEnv(["REMODEX_KEEP_MAC_AWAKE"], env);
+  const persistedKeepMacAwakeMode = normalizeKeepAwakeMode(daemonConfig.keepMacAwakeMode);
   const persistedKeepMacAwakeEnabled = typeof daemonConfig.keepMacAwakeEnabled === "boolean"
     ? daemonConfig.keepMacAwakeEnabled
     : null;
+  const keepMacAwakeMode = explicitKeepMacAwakeMode
+    || (explicitKeepMacAwakeEnabled == null
+      ? null
+      : (explicitKeepMacAwakeEnabled ? KEEP_AWAKE_MODE_ALWAYS : KEEP_AWAKE_MODE_OFF))
+    || persistedKeepMacAwakeMode
+    || (persistedKeepMacAwakeEnabled == null
+      ? KEEP_AWAKE_MODE_OFF
+      : (persistedKeepMacAwakeEnabled ? KEEP_AWAKE_MODE_ALWAYS : KEEP_AWAKE_MODE_OFF));
   // The deep-link refresh workaround stays opt-in; local IPC live sync is the primary desktop path.
   // Once opted in, the persisted choice must survive restarts: `remodex restart`
   // rewrites daemon-config.json from this computed config, so ignoring the
@@ -762,9 +777,8 @@ function readBridgeConfig({
       readFirstDefinedEnv(["REMODEX_REFRESH_DEBOUNCE_MS"], String(DEFAULT_DEBOUNCE_MS), env),
       DEFAULT_DEBOUNCE_MS
     ),
-    keepMacAwakeEnabled: explicitKeepMacAwakeEnabled == null
-      ? (persistedKeepMacAwakeEnabled == null ? false : persistedKeepMacAwakeEnabled)
-      : explicitKeepMacAwakeEnabled,
+    keepMacAwakeMode,
+    keepMacAwakeEnabled: keepMacAwakeMode !== KEEP_AWAKE_MODE_OFF,
     codexEndpoint,
     desktopIpcSocketPath: readFirstDefinedEnv(["REMODEX_DESKTOP_IPC_SOCKET"], "", env),
     desktopIpcLiveSyncEnabled,

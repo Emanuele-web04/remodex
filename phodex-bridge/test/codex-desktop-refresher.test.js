@@ -73,6 +73,38 @@ test("readBridgeConfig keeps safe defaults and explicit overrides", () => {
       },
     },
   });
+  const persistedLegacyKeepAwakeConfig = readBridgeConfig({
+    env: {
+      REMODEX_DEVICE_STATE_DIR: "/tmp/remodex-state",
+    },
+    platform: "darwin",
+    runtimeRoot: "/tmp/remodex-package",
+    fsImpl: {
+      existsSync(targetPath) {
+        return targetPath === "/tmp/remodex-state/daemon-config.json";
+      },
+      readFileSync(targetPath) {
+        if (targetPath === "/tmp/remodex-state/daemon-config.json") {
+          return JSON.stringify({ keepMacAwakeEnabled: true });
+        }
+        throw new Error("unexpected read");
+      },
+    },
+  });
+  const explicitAcPowerConfig = readBridgeConfig({
+    env: {
+      REMODEX_KEEP_MAC_AWAKE_MODE: "ac-power",
+      REMODEX_KEEP_MAC_AWAKE: "true",
+    },
+    platform: "darwin",
+    runtimeRoot: "/tmp/remodex-package",
+    fsImpl: {
+      existsSync: () => false,
+      readFileSync: () => {
+        throw new Error("unexpected read");
+      },
+    },
+  });
   const linuxConfig = readBridgeConfig({
     env: {},
     platform: "linux",
@@ -142,12 +174,18 @@ test("readBridgeConfig keeps safe defaults and explicit overrides", () => {
   });
   assert.equal(macConfig.refreshEnabled, false);
   assert.equal(macConfig.keepMacAwakeEnabled, false);
+  assert.equal(macConfig.keepMacAwakeMode, "off");
   assert.equal(macConfig.relayUrl, "");
   assert.equal(macConfig.pushServiceUrl, "");
   assert.equal(macConfig.desktopIpcLiveSyncEnabled, true);
   assert.equal(macConfig.desktopAutoFollowEnabled, true);
   assert.equal(macConfig.desktopIpcSnapshotDebounceMs, 75);
   assert.equal(persistedKeepAwakeConfig.keepMacAwakeEnabled, false);
+  assert.equal(persistedKeepAwakeConfig.keepMacAwakeMode, "off");
+  assert.equal(persistedLegacyKeepAwakeConfig.keepMacAwakeEnabled, true);
+  assert.equal(persistedLegacyKeepAwakeConfig.keepMacAwakeMode, "always");
+  assert.equal(explicitAcPowerConfig.keepMacAwakeEnabled, true);
+  assert.equal(explicitAcPowerConfig.keepMacAwakeMode, "ac-power");
   assert.equal(macEndpointConfig.refreshEnabled, false);
   assert.equal(linuxConfig.refreshEnabled, false);
   assert.equal(linuxConfig.desktopAutoFollowEnabled, false);

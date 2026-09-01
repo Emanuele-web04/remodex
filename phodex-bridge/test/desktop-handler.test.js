@@ -403,6 +403,7 @@ test("desktop/preferences/update forwards bridge preference changes", async () =
     id: "request-5",
     method: "desktop/preferences/update",
     params: {
+      keepMacAwakeMode: "ac-power",
       keepMacAwake: false,
     },
   }), (response) => {
@@ -422,18 +423,40 @@ test("desktop/preferences/update forwards bridge preference changes", async () =
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   assert.deepEqual(updates, [{
-    keepMacAwake: false,
+    keepMacAwakeMode: "ac-power",
   }]);
   assert.deepEqual(responses, [{
     id: "request-5",
     result: {
       success: true,
       preferences: {
-        keepMacAwake: false,
+        keepMacAwakeMode: "ac-power",
       },
       applied: false,
     },
   }]);
+});
+
+test("desktop/preferences/update maps legacy booleans to wake modes", async () => {
+  const updates = [];
+
+  handleDesktopRequest(JSON.stringify({
+    id: "request-legacy-preference",
+    method: "desktop/preferences/update",
+    params: {
+      keepMacAwake: true,
+    },
+  }), () => {}, {
+    platform: "darwin",
+    updateBridgePreferences(nextPreferences) {
+      updates.push(nextPreferences);
+      return { success: true };
+    },
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.deepEqual(updates, [{ keepMacAwakeMode: "always" }]);
 });
 
 test("desktop/preferences/update rejects invalid bridge preference payloads", async () => {

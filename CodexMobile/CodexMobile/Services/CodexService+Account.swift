@@ -124,6 +124,7 @@ struct CodexBridgeHostCapabilities: Codable, Equatable, Sendable {
         case desktopHandoff
         case displayWake
         case keepAwake
+        case keepAwakeModes
         case hostBrowserLogin
         case terminal
         case bridgeUpdate
@@ -132,6 +133,7 @@ struct CodexBridgeHostCapabilities: Codable, Equatable, Sendable {
     var desktopHandoff: Bool = false
     var displayWake: Bool = false
     var keepAwake: Bool = false
+    var keepAwakeModes: Bool = false
     var hostBrowserLogin: Bool = false
     var terminal: Bool = false
     var bridgeUpdate: Bool = false
@@ -140,6 +142,7 @@ struct CodexBridgeHostCapabilities: Codable, Equatable, Sendable {
         desktopHandoff: Bool = false,
         displayWake: Bool = false,
         keepAwake: Bool = false,
+        keepAwakeModes: Bool = false,
         hostBrowserLogin: Bool = false,
         terminal: Bool = false,
         bridgeUpdate: Bool = false
@@ -147,6 +150,7 @@ struct CodexBridgeHostCapabilities: Codable, Equatable, Sendable {
         self.desktopHandoff = desktopHandoff
         self.displayWake = displayWake
         self.keepAwake = keepAwake
+        self.keepAwakeModes = keepAwakeModes
         self.hostBrowserLogin = hostBrowserLogin
         self.terminal = terminal
         self.bridgeUpdate = bridgeUpdate
@@ -157,6 +161,7 @@ struct CodexBridgeHostCapabilities: Codable, Equatable, Sendable {
         desktopHandoff = try container.decodeIfPresent(Bool.self, forKey: .desktopHandoff) ?? false
         displayWake = try container.decodeIfPresent(Bool.self, forKey: .displayWake) ?? false
         keepAwake = try container.decodeIfPresent(Bool.self, forKey: .keepAwake) ?? false
+        keepAwakeModes = try container.decodeIfPresent(Bool.self, forKey: .keepAwakeModes) ?? false
         hostBrowserLogin = try container.decodeIfPresent(Bool.self, forKey: .hostBrowserLogin) ?? false
         terminal = try container.decodeIfPresent(Bool.self, forKey: .terminal) ?? false
         bridgeUpdate = try container.decodeIfPresent(Bool.self, forKey: .bridgeUpdate) ?? false
@@ -1223,6 +1228,7 @@ extension CodexService {
             desktopHandoff: firstBoolValue(in: capabilitiesObject, keys: ["desktopHandoff", "desktop_handoff"]) ?? false,
             displayWake: firstBoolValue(in: capabilitiesObject, keys: ["displayWake", "display_wake"]) ?? false,
             keepAwake: firstBoolValue(in: capabilitiesObject, keys: ["keepAwake", "keep_awake"]) ?? false,
+            keepAwakeModes: firstBoolValue(in: capabilitiesObject, keys: ["keepAwakeModes", "keep_awake_modes"]) ?? false,
             hostBrowserLogin: firstBoolValue(in: capabilitiesObject, keys: ["hostBrowserLogin", "host_browser_login"]) ?? false,
             terminal: firstBoolValue(in: capabilitiesObject, keys: ["terminal", "sshTerminal", "ssh_terminal"]) ?? false,
             bridgeUpdate: firstBoolValue(in: capabilitiesObject, keys: ["bridgeUpdate", "bridge_update"]) ?? false
