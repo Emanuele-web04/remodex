@@ -14,6 +14,9 @@ enum TurnComposerMetaMapper {
     // Returns models sorted using the explicit product order expected by the UI.
     static func orderedModels(from models: [CodexModelOption]) -> [CodexModelOption] {
         let preferredOrder: [String] = [
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
             "gpt-5.5",
             "gpt-5.4",
             "gpt-5.3-codex",
@@ -46,6 +49,12 @@ enum TurnComposerMetaMapper {
     static func modelTitle(forIdentifier identifier: String?, fallback: String? = nil) -> String {
         let normalizedIdentifier = identifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         switch normalizedIdentifier.lowercased() {
+        case "gpt-5.6-sol":
+            return "GPT-5.6-Sol"
+        case "gpt-5.6-terra":
+            return "GPT-5.6-Terra"
+        case "gpt-5.6-luna":
+            return "GPT-5.6-Luna"
         case "gpt-5.5":
             return "GPT-5.5"
         case "gpt-5.3-codex":
@@ -70,7 +79,7 @@ enum TurnComposerMetaMapper {
             if normalizedIdentifier.lowercased().hasPrefix("gpt-") {
                 return "GPT-" + String(normalizedIdentifier.dropFirst("gpt-".count))
             }
-            return normalizedIdentifier.isEmpty ? "GPT-5.5" : normalizedIdentifier
+            return normalizedIdentifier.isEmpty ? "GPT-5.6-Sol" : normalizedIdentifier
         }
     }
 
@@ -148,6 +157,8 @@ enum TurnComposerMetaMapper {
             return "High"
         case "xhigh", "extra_high", "extra-high", "very_high", "very-high":
             return "Extra High"
+        case "max", "maximum":
+            return "Max"
         default:
             return normalized.split(separator: "_")
                 .map { $0.capitalized }
@@ -178,8 +189,12 @@ struct TurnComposerReasoningDisplayOption: Identifiable, Equatable {
             return 1
         case "High":
             return 2
-        case "Exceptional":
+        case "Extra High":
             return 3
+        case "Exceptional":
+            return 4
+        case "Max":
+            return 5
         default:
             return 4
         }

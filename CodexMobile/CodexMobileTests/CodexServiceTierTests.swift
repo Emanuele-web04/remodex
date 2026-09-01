@@ -81,6 +81,21 @@ final class CodexServiceTierTests: XCTestCase {
         let payload = """
         [
           {
+            "slug": "gpt-5.6-sol",
+            "name": "GPT-5.6 Sol",
+            "supportedReasoningEfforts": ["medium"]
+          },
+          {
+            "slug": "gpt-5.6-terra",
+            "name": "GPT-5.6 Terra",
+            "supportedReasoningEfforts": ["medium"]
+          },
+          {
+            "slug": "gpt-5.6-luna",
+            "name": "GPT-5.6 Luna",
+            "supportedReasoningEfforts": ["medium"]
+          },
+          {
             "slug": "gpt-5.4",
             "name": "GPT-5.4",
             "supportedReasoningEfforts": ["medium"]
@@ -112,9 +127,18 @@ final class CodexServiceTierTests: XCTestCase {
 
         XCTAssertTrue(models[0].supportsFastMode)
         XCTAssertTrue(models[1].supportsFastMode)
-        XCTAssertFalse(models[2].supportsFastMode)
-        XCTAssertFalse(models[3].supportsFastMode)
-        XCTAssertFalse(models[4].supportsFastMode)
+        XCTAssertTrue(models[2].supportsFastMode)
+        XCTAssertTrue(models[3].supportsFastMode)
+        XCTAssertTrue(models[4].supportsFastMode)
+        XCTAssertFalse(models[5].supportsFastMode)
+        XCTAssertFalse(models[6].supportsFastMode)
+        XCTAssertFalse(models[7].supportsFastMode)
+        for index in 0...2 {
+            XCTAssertEqual(
+                models[index].supportedReasoningEfforts.map(\.reasoningEffort),
+                ["medium", "low", "high", "xhigh", "max"]
+            )
+        }
     }
 
     func testSwitchingBetweenFastCapableModelsKeepsSelectedServiceTier() {
