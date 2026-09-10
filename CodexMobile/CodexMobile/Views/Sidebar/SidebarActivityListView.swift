@@ -73,12 +73,22 @@ struct SidebarActivityListView<Row: View>: View {
     private func activityRow(_ thread: CodexThread, runBadge: CodexThreadRunBadgeState?) -> some View {
         let path = thread.gitWorkingDirectory
         let canRefresh = isVisible && codex.isConnected && codex.isInitialized && codex.isAppInForeground
-        let refreshKey = ActivityRowRefreshKey(path: path, enabled: canRefresh, generation: refreshGeneration)
+        let isRunning = runBadge == .running
+        let refreshKey = ActivityRowRefreshKey(path: path, enabled: canRefresh, generation: refreshGeneration, isRunning: isRunning)
         return row(thread, path.flatMap { diffStore.totalsByPath[$0] })
             .padding(.horizontal, 4)
             .task(id: refreshKey) {
-                guard canRefresh else { return }
-                await diffStore.refresh(path: path, codex: codex, revision: refreshGeneration)
+                guard canRefresh, let path, !path.isEmpty else { return }
+                // The row task is cancelled when hidden, disconnected, or no
+                // longer running. The store coalesces polling per checkout.
+                repeat {
+                    await diffStore.refresh(
+                        path: path, codex: codex, revision: refreshGeneration,
+                        maxAge: isRunning ? 15 : 30
+                    )
+                    guard isRunning else { return }
+                    do { try await Task.sleep(for: .seconds(15)) } catch { return }
+                } while !Task.isCancelled
             }
             .onChange(of: runBadge) { _, _ in
                 guard canRefresh else { return }
@@ -91,4 +101,5 @@ private struct ActivityRowRefreshKey: Equatable {
     let path: String?
     let enabled: Bool
     let generation: Int
+    let isRunning: Bool
 }

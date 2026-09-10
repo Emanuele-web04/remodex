@@ -420,11 +420,12 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
     }
 
     private var searchMatchingThreads: [CodexThread] {
+        let liveThreads = codex.threads.filter { $0.syncState != .archivedLocal }
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         if query.isEmpty {
-            return codex.threads
+            return liveThreads
         } else {
-            return codex.threads.filter {
+            return liveThreads.filter {
                 $0.displayTitle.localizedCaseInsensitiveContains(query)
                 || ($0.preview?.localizedCaseInsensitiveContains(query) ?? false)
                 || $0.projectDisplayName.localizedCaseInsensitiveContains(query)

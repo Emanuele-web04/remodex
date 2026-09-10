@@ -1718,6 +1718,7 @@ function startBridge({
         isActiveThreadCatalog: method === "thread/list"
           && parsed.params?.archived !== true
           && !parsed.params?.cursor,
+        threadListLimit: method === "thread/list" ? parsed.params?.limit : undefined,
         threadId: method === "thread/turns/list" || method === "thread/read" || method === "thread/resume"
           ? threadIdFromRequestParams(parsed.params)
           : "",
@@ -1777,7 +1778,7 @@ function startBridge({
       });
       normalizedMessage = JSON.stringify(parsed);
       if (trackedRequest.isActiveThreadCatalog) {
-        desktopIpcActionFollower?.observeThreadListResponse(parsed.result);
+        desktopIpcActionFollower?.observeThreadListResponse(parsed.result, { limit: trackedRequest.threadListLimit });
       }
     }
 

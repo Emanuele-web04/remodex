@@ -285,6 +285,7 @@ function createDesktopIpcActionFollower({
   const activeThreadIds = new Set();
   const desktopFollowThreadIds = new Set();
   const backgroundCatalogThreadIds = new Set();
+  let backgroundCatalogPageSize = 0;
   const followerClientIdsByThreadId = new Map();
   // Threads discovered from Litter snapshots before the phone reads them.
   // Their raw state is retained for lifecycle detection, but their transcript
@@ -343,7 +344,7 @@ function createDesktopIpcActionFollower({
   // Current Desktop sends initial snapshots only to explicit followers. Warm a
   // bounded recent catalog window without opening chats or claiming a writer.
   // The existing background path forwards lifecycle only, never transcript items.
-  function observeThreadListResponse(result) {
+  function observeThreadListResponse(result, { limit = null } = {}) {
     const rows = result?.data || result?.items || result?.threads;
     if (!Array.isArray(rows)) {
       return;
@@ -352,17 +353,31 @@ function createDesktopIpcActionFollower({
       .map((thread) => readString(thread?.id))
       .filter((threadId) => threadId && !isLocallyOwnedThread(threadId) && !liveOwnerThreadIds.has(threadId))
       .slice(0, MAX_ACTIVE_THREAD_IDS));
-    for (const threadId of backgroundCatalogThreadIds) {
-      if (!candidates.has(threadId) && !announcedBackgroundTurnsByThreadId.has(threadId)) {
-        backgroundCatalogThreadIds.delete(threadId);
-        if (backgroundOnlyThreadIds.has(threadId) || !activeThreadIds.has(threadId)) {
-          unfollowDesktopThread(threadId);
+    // Foreground health probes request fewer rows than the sidebar. Keep those
+    // additive; only a request covering the established window may prune it.
+    const requestedPageSize = Number.isSafeInteger(limit) && limit > 0
+      ? Math.min(limit, MAX_ACTIVE_THREAD_IDS)
+      : null;
+    const replacesCatalog = requestedPageSize === null
+      ? !result.nextCursor && !result.hasMore
+      : requestedPageSize >= backgroundCatalogPageSize;
+    backgroundCatalogPageSize = Math.max(backgroundCatalogPageSize, requestedPageSize || 0);
+    if (replacesCatalog) {
+      for (const threadId of backgroundCatalogThreadIds) {
+        if (!candidates.has(threadId) && !announcedBackgroundTurnsByThreadId.has(threadId)) {
+          backgroundCatalogThreadIds.delete(threadId);
+          if (backgroundOnlyThreadIds.has(threadId) || !activeThreadIds.has(threadId)) {
+            unfollowDesktopThread(threadId);
+          }
         }
       }
     }
     for (const threadId of candidates) {
       if (backgroundCatalogThreadIds.has(threadId) || desktopFollowThreadIds.has(threadId)) {
         continue;
+      }
+      if (backgroundCatalogThreadIds.size >= MAX_ACTIVE_THREAD_IDS) {
+        break;
       }
       backgroundCatalogThreadIds.add(threadId);
       if (!activeThreadIds.has(threadId)) {
@@ -595,6 +610,7 @@ function createDesktopIpcActionFollower({
     }
     desktopFollowThreadIds.clear();
     backgroundCatalogThreadIds.clear();
+    backgroundCatalogPageSize = 0;
     activeThreadIds.clear();
     followerClientIdsByThreadId.clear();
     backgroundOnlyThreadIds.clear();

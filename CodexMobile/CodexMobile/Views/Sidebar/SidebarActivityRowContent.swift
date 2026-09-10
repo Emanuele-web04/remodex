@@ -56,17 +56,23 @@ struct SidebarActivityRowContent: View {
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
 
-                    if let diffTotals, diffTotals.additions > 0 || diffTotals.deletions > 0 {
+                    if let diffTotals, diffTotals.hasChanges {
                         HStack(spacing: 5) {
-                            Text("+\(formattedCount(diffTotals.additions))")
-                                .foregroundStyle(.green)
-                            Text("−\(formattedCount(diffTotals.deletions))")
-                                .foregroundStyle(.red)
+                            if diffTotals.additions > 0 || diffTotals.deletions > 0 {
+                                Text("+\(formattedCount(diffTotals.additions))")
+                                    .foregroundStyle(.green)
+                                Text("−\(formattedCount(diffTotals.deletions))")
+                                    .foregroundStyle(.red)
+                            }
+                            if diffTotals.binaryFiles > 0 {
+                                Text("B\(diffTotals.binaryFiles)")
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                         .font(AppFont.mono(.caption))
                         .fixedSize(horizontal: true, vertical: false)
                         .accessibilityElement(children: .ignore)
-                        .accessibilityLabel("\(diffTotals.additions) lines added, \(diffTotals.deletions) lines removed")
+                        .accessibilityLabel(diffAccessibilityLabel(diffTotals))
                     }
                 }
             }
@@ -93,6 +99,17 @@ struct SidebarActivityRowContent: View {
         let divisor: Double = value >= 1_000_000 ? 1_000_000 : 1_000
         let suffix = value >= 1_000_000 ? "M" : "K"
         return (Double(value) / divisor).formatted(.number.precision(.fractionLength(0...1))) + suffix
+    }
+
+    private func diffAccessibilityLabel(_ totals: GitDiffTotals) -> String {
+        var parts: [String] = []
+        if totals.additions > 0 || totals.deletions > 0 {
+            parts.append("\(totals.additions) lines added, \(totals.deletions) lines removed")
+        }
+        if totals.binaryFiles > 0 {
+            parts.append(totals.binaryFiles == 1 ? "1 binary file changed" : "\(totals.binaryFiles) binary files changed")
+        }
+        return parts.joined(separator: ", ")
     }
 }
 

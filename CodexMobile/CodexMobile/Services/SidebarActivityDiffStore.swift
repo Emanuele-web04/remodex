@@ -15,7 +15,7 @@ final class SidebarActivityDiffStore {
     @ObservationIgnored private var pendingRefreshPaths: Set<String> = []
     @ObservationIgnored private var generation = 0
 
-    func refresh(path: String?, codex: CodexService, revision: Int = 0, force: Bool = false) async {
+    func refresh(path: String?, codex: CodexService, revision: Int = 0, force: Bool = false, maxAge: TimeInterval = 30) async {
         guard !Task.isCancelled, codex.isConnected, codex.isInitialized,
               let path, !path.isEmpty else { return }
         let requestGeneration = generation
@@ -24,13 +24,13 @@ final class SidebarActivityDiffStore {
             await pending.value
             if !Task.isCancelled, generation == requestGeneration,
                (refreshedRevisionByPath[path] ?? -1) < revision {
-                await refresh(path: path, codex: codex, revision: revision)
+                await refresh(path: path, codex: codex, revision: revision, maxAge: maxAge)
             }
             return
         }
         if !force, let refreshedAt = refreshedAtByPath[path],
            (refreshedRevisionByPath[path] ?? -1) >= revision,
-           Date().timeIntervalSince(refreshedAt) < 30 { return }
+           Date().timeIntervalSince(refreshedAt) < maxAge { return }
 
         let macID = codex.currentMacScopedPersistenceDeviceId
         let request = Task { [weak self] in

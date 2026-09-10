@@ -249,6 +249,40 @@ test("catalog discovery restores parallel running badges without opening transcr
   assert.equal(follows().at(-1).params.conversationId, "catalog-39");
 });
 
+test("smaller catalog probes preserve follows until a full-window refresh", async (t) => {
+  const ipc = createFakeIpcTransport();
+  const messages = [];
+  const follower = createDesktopIpcActionFollower({
+    socketPath: "/tmp/fake-remodex-catalog-probe.sock", netModule: ipc.netModule,
+    sendApplicationResponse: (raw) => messages.push(JSON.parse(raw)),
+  });
+  t.after(() => follower.stopAll());
+  const changes = () => ipc.state.frames.filter((frame) => (
+    frame.method === "thread-stream-following-changed"
+  ));
+  const stopped = () => changes().filter((frame) => !frame.params.following);
+  const rows = Array.from({ length: 70 }, (_, i) => ({ id: `probe-${i}` }));
+
+  follower.observeThreadListResponse({ data: rows, nextCursor: "next-page" }, { limit: 70 });
+  await waitFor(() => changes().length === 70);
+  for (const limit of [1, 5]) {
+    follower.observeThreadListResponse({ data: rows.slice(0, limit), nextCursor: "next-page" }, { limit });
+  }
+  assert.equal(stopped().length, 0, "partial reads must not remove the other idle subscriptions");
+  follower.observeThreadListResponse({ data: [{ id: "new-probe" }], nextCursor: "next-page" }, { limit: 1 });
+  assert.equal(changes().at(-1).params.conversationId, "new-probe", "partial reads may discover new chats");
+
+  sendActivitySnapshot(ipc.state.socket, "probe-69", "inProgress");
+  await waitFor(() => messages.some((message) => message.method === "turn/started"));
+  follower.observeThreadListResponse({ data: [rows[0]], nextCursor: null }, { limit: 70 });
+  assert.equal(stopped().length, 69, "a full-size request may legitimately return fewer chats");
+  assert.equal(stopped().some((frame) => frame.params.conversationId === "probe-69"), false);
+  sendActivitySnapshot(ipc.state.socket, "probe-69", "completed");
+  await waitFor(() => messages.some((message) => message.method === "turn/completed"));
+  follower.observeThreadListResponse({ data: [rows[0]], nextCursor: null }, { limit: 70 });
+  assert.equal(stopped().length, 70, "settled chats outside the full window can be pruned");
+});
+
 test("desktop renderer follows do not replay completed chats into sidebar running state", async (t) => {
   const ipc = createFakeIpcTransport();
   const messages = [];

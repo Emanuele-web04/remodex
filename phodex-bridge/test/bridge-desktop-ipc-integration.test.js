@@ -774,6 +774,59 @@ test("bridge observes held desktop IPC turns only after local fallback", async (
   assert.equal(fakeCodex.sent.filter((message) => message.id === "held-turn-start").length, 1);
 });
 
+test("bridge preserves catalog request limits and excludes archived or cursor pages", async (t) => {
+  const relayServer = new WebSocket.Server({ port: 0 });
+  const relayMessages = [];
+  const catalogs = [];
+  let relaySocket = null;
+  let bridge = null;
+  let fakeCodex = null;
+  await new Promise((resolve) => relayServer.once("listening", resolve));
+  relayServer.on("connection", (socket) => {
+    relaySocket = socket;
+    socket.on("message", (data) => relayMessages.push(JSON.parse(data.toString("utf8"))));
+  });
+  const { startBridge } = loadBridgeWithTestDoubles({
+    createCodexTransportImpl() {
+      fakeCodex = createFakeCodexTransport();
+      return fakeCodex;
+    },
+    desktopIpcActionFollowerModule: {
+      createDesktopIpcActionFollower() {
+        return {
+          observeInbound() { return false; },
+          observeThreadListResponse(result, options) { catalogs.push({ result, options }); },
+          stopAll() {},
+        };
+      },
+    },
+  });
+  t.after(() => {
+    bridge?.stop();
+    relaySocket?.close();
+    relayServer.close();
+  });
+  bridge = startBridge({ printPairingQr: false, config: bridgeTestConfig(relayServer) });
+  await waitFor(() => relaySocket?.readyState === WebSocket.OPEN);
+
+  const requests = [
+    { id: "catalog", params: { limit: 70, cursor: null } },
+    { id: "probe", params: { limit: 1, cursor: null } },
+    { id: "archived", params: { limit: 70, archived: true } },
+    { id: "page", params: { limit: 70, cursor: "next-page" } },
+  ];
+  for (const request of requests) {
+    relaySocket.send(JSON.stringify({ ...request, method: "thread/list" }));
+    await waitFor(() => fakeCodex.sent.some((message) => message.id === request.id));
+    fakeCodex.emitMessage({ id: request.id, result: { data: [{ id: request.id }], nextCursor: "next-page" } });
+    await waitForMessage(relayMessages, (message) => message.id === request.id);
+  }
+  assert.deepEqual(catalogs.map(({ result, options }) => ({ id: result.data[0].id, limit: options?.limit })), [
+    { id: "catalog", limit: 70 },
+    { id: "probe", limit: 1 },
+  ]);
+});
+
 test("bridge Activity is opt-in and canonical-only endpoints need no Desktop IPC", async (t) => {
   const relayServer = new WebSocket.Server({ port: 0 });
   const relayMessages = [];
