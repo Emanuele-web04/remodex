@@ -358,10 +358,15 @@ function createDesktopIpcActionFollower({
     const requestedPageSize = Number.isSafeInteger(limit) && limit > 0
       ? Math.min(limit, MAX_ACTIVE_THREAD_IDS)
       : null;
-    const replacesCatalog = requestedPageSize === null
+    // limit: 1 is the phone's health probe, including before its first sidebar
+    // request. It must never establish or replace the catalog window.
+    const isForegroundProbe = requestedPageSize === 1;
+    const replacesCatalog = !isForegroundProbe && (requestedPageSize === null
       ? !result.nextCursor && !result.hasMore
-      : requestedPageSize >= backgroundCatalogPageSize;
-    backgroundCatalogPageSize = Math.max(backgroundCatalogPageSize, requestedPageSize || 0);
+      : requestedPageSize >= backgroundCatalogPageSize);
+    if (!isForegroundProbe) {
+      backgroundCatalogPageSize = Math.max(backgroundCatalogPageSize, requestedPageSize || 0);
+    }
     if (replacesCatalog) {
       for (const threadId of backgroundCatalogThreadIds) {
         if (!candidates.has(threadId) && !announcedBackgroundTurnsByThreadId.has(threadId)) {

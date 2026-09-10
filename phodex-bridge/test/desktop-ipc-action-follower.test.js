@@ -249,6 +249,30 @@ test("catalog discovery restores parallel running badges without opening transcr
   assert.equal(follows().at(-1).params.conversationId, "catalog-39");
 });
 
+test("foreground probes stay additive before the first sidebar catalog", async (t) => {
+  const ipc = createFakeIpcTransport();
+  const follower = createDesktopIpcActionFollower({
+    socketPath: "/tmp/fake-remodex-first-probe.sock", netModule: ipc.netModule,
+    sendApplicationResponse: () => {},
+  });
+  t.after(() => follower.stopAll());
+  const changes = () => ipc.state.frames.filter((frame) => (
+    frame.method === "thread-stream-following-changed"
+  ));
+  follower.observeThreadListResponse({ data: [{ id: "first-probe" }], nextCursor: "next" }, { limit: 1 });
+  await waitFor(() => changes().length === 1);
+  follower.observeThreadListResponse({ data: [{ id: "second-probe" }], nextCursor: "next" }, { limit: 1 });
+  follower.observeThreadListResponse({ data: [], nextCursor: null }, { limit: 1 });
+  assert.deepEqual(changes().map((frame) => frame.params), [
+    { hostId: "local", conversationId: "first-probe", following: true },
+    { hostId: "local", conversationId: "second-probe", following: true },
+  ]);
+
+  follower.observeThreadListResponse({ data: [{ id: "second-probe" }], nextCursor: null }, { limit: 70 });
+  assert.equal(changes().at(-1).params.conversationId, "first-probe");
+  assert.equal(changes().at(-1).params.following, false);
+});
+
 test("smaller catalog probes preserve follows until a full-window refresh", async (t) => {
   const ipc = createFakeIpcTransport();
   const messages = [];
