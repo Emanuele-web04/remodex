@@ -69,9 +69,6 @@ function handleGitRequest(rawMessage, sendResponse, options = {}) {
   handleGitMethod(method, params, methodOptions)
     .then((result) => {
       sendResponse(JSON.stringify({ id, result }));
-      if (method === "thread/name/set") {
-        options.onThreadNameSet?.(result);
-      }
     })
     .catch((err) => {
       const errorCode = err.errorCode || "git_error";
@@ -96,7 +93,7 @@ async function handleGitMethod(method, params, options = {}) {
     return threadGenerateTitle(params, options);
   }
   if (method === "thread/name/set") {
-    return threadNameSet(params);
+    return threadNameSet(params, options);
   }
 
   const cwd = await resolveGitCwd(params);
@@ -153,8 +150,9 @@ async function handleGitMethod(method, params, options = {}) {
   }
 }
 
-// Owns mobile thread renames locally so they do not fall through to unsupported Codex RPC.
-function threadNameSet(params) {
+// Normalize mobile aliases, then persist through the same catalog RPC as Desktop.
+// The app-server emits thread/name/updated to the phone and live IPC owner.
+async function threadNameSet(params, { sendCodexRequest } = {}) {
   const threadId = normalizeNonEmptyLine(params.threadId || params.thread_id || params.conversationId || params.conversation_id);
   const name = normalizeNonEmptyLine(params.name || params.threadName || params.thread_name || params.title);
   if (!threadId) {
@@ -163,6 +161,11 @@ function threadNameSet(params) {
   if (!name) {
     throw gitError("missing_thread_name", "A thread name is required.");
   }
+
+  if (typeof sendCodexRequest !== "function") {
+    throw gitError("thread_rename_unavailable", "The local Codex connection is unavailable.");
+  }
+  await sendCodexRequest("thread/name/set", { threadId, name });
 
   return { threadId, thread_id: threadId, name, title: name };
 }

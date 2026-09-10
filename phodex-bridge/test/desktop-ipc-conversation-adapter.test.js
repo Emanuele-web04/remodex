@@ -15,6 +15,52 @@ const {
   buildConversationStatePatches,
 } = require("../src/desktop-ipc-state-patches");
 
+test("Desktop 26.903 text parsing accepts hydrated and live phone inputs", () => {
+  const textWithSpans = {
+    type: "text",
+    text: "  résumé  ",
+    text_elements: [{ byteRange: { start: 2, end: 10 }, placeholder: "résumé" }],
+  };
+  const sourceThread = {
+    id: "thread-text-compatibility",
+    turns: [{
+      id: "turn-text-compatibility",
+      status: "completed",
+      items: [
+        { type: "userMessage", id: "opening", content: [textWithSpans] },
+        { type: "agentMessage", id: "reply", text: "Hello" },
+        { type: "userMessage", id: "later", content: [{ type: "text", text: "next" }] },
+        { type: "steeringUserMessage", id: "steer", input: [{ type: "text", text: "change" }] },
+      ],
+    }],
+  };
+  const original = structuredClone(sourceThread);
+  const state = buildConversationStateFromThread(sourceThread);
+  const turn = state.turns[0];
+  assert.deepEqual(turn.params.input[0], textWithSpans);
+  assert.deepEqual(sourceThread, original);
+
+  // A later phone message may overwrite params after initial hydration.
+  turn.params.input = [
+    { type: "text", text: "hey there" },
+    { type: "image", url: "data:image/png;base64,test" },
+    textWithSpans,
+  ];
+  synchronizeDesktopConversationCompatibility(state);
+  const canonical = state.turnHistory.history.entitiesByKey["turn:turn-text-compatibility"];
+  for (const candidate of [turn, canonical]) {
+    const inputs = [
+      ...candidate.params.input,
+      ...candidate.items.flatMap((item) => item.content || item.input || []),
+    ];
+    // The current ASAR parser dereferences this collection before checking spans.
+    assert.doesNotThrow(() => inputs.filter((input) => input.type === "text")
+      .forEach((input) => assert.equal(typeof input.text_elements.length, "number")));
+    assert.deepEqual(candidate.params.input[2], textWithSpans);
+    assert.deepEqual(candidate.params.input[1], { type: "image", url: "data:image/png;base64,test" });
+  }
+});
+
 test("conversation adapter publishes current Desktop canonical history with iterable phone settings", () => {
   const state = buildConversationStateFromThread({
     id: "thread-phone-desktop",
@@ -140,7 +186,7 @@ test("conversation adapter strips injected context user items from hydrated turn
 
   const turn = state.turns[0];
   // The real prompt is adopted into params.input; context never becomes a bubble.
-  assert.deepEqual(turn.params.input, [{ type: "text", text: "minchia compa" }]);
+  assert.deepEqual(turn.params.input, [{ type: "text", text: "minchia compa", text_elements: [] }]);
   assert.deepEqual(turn.items.map((item) => item.id), ["reply"]);
 });
 
@@ -248,7 +294,7 @@ test("conversation adapter strips injected context carried inside turn.items", (
   // Context is dropped; the real prompt is adopted into params.input (Desktop
   // renders the bubble from there), leaving only the assistant reply as an item.
   assert.deepEqual(turn.items.map((item) => item.id), ["reply"]);
-  assert.deepEqual(turn.params.input, [{ type: "text", text: "minchia compa" }]);
+  assert.deepEqual(turn.params.input, [{ type: "text", text: "minchia compa", text_elements: [] }]);
   const serialized = JSON.stringify(turn);
   assert.equal(serialized.includes("AGENTS.md instructions"), false);
   assert.equal(serialized.includes("environment_context"), false);
@@ -284,7 +330,7 @@ test("conversation adapter extracts prompt from mixed context wrapper user items
   });
 
   const turn = state.turns[0];
-  assert.deepEqual(turn.params.input, [{ type: "text", text: "fix the desktop sync bug" }]);
+  assert.deepEqual(turn.params.input, [{ type: "text", text: "fix the desktop sync bug", text_elements: [] }]);
   assert.deepEqual(turn.items.map((item) => item.id), ["reply"]);
   const serialized = JSON.stringify(turn);
   assert.equal(serialized.includes("AGENTS.md instructions"), false);
@@ -338,7 +384,7 @@ test("conversation adapter adopts live mixed context prompt item into params inp
   });
 
   const turn = conversations.get("thread-live-wrapper").turns[0];
-  assert.deepEqual(turn.params.input, [{ type: "text", text: "continue from live event" }]);
+  assert.deepEqual(turn.params.input, [{ type: "text", text: "continue from live event", text_elements: [] }]);
   assert.deepEqual(turn.items, []);
   const serialized = JSON.stringify(turn);
   assert.equal(serialized.includes("AGENTS.md instructions"), false);

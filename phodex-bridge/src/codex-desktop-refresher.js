@@ -101,6 +101,9 @@ class CodexDesktopRefresher {
   }
 
   handleInbound(rawMessage, parsedMessage = null) {
+    if (!this.canRefresh()) {
+      return;
+    }
     const parsed = parsedMessage ?? safeParseJSON(rawMessage);
     if (!parsed) {
       return;
@@ -147,6 +150,9 @@ class CodexDesktopRefresher {
   }
 
   handleOutbound(rawMessage, parsedMessage = null) {
+    if (!this.canRefresh()) {
+      return;
+    }
     const parsed = parsedMessage ?? safeParseJSON(rawMessage);
     if (!parsed) {
       return;
@@ -739,11 +745,6 @@ function readBridgeConfig({
   const desktopIpcLiveSyncEnabled = explicitDesktopIpcLiveSyncEnabled == null
     ? true
     : explicitDesktopIpcLiveSyncEnabled;
-  const defaultDesktopAutoFollowEnabled = (
-    platform === "darwin"
-    && !codexEndpoint
-    && desktopIpcLiveSyncEnabled
-  );
   return {
     relayUrl,
     pushServiceUrl: readFirstDefinedEnv(
@@ -768,9 +769,8 @@ function readBridgeConfig({
     codexEndpoint,
     desktopIpcSocketPath: readFirstDefinedEnv(["REMODEX_DESKTOP_IPC_SOCKET"], "", env),
     desktopIpcLiveSyncEnabled,
-    desktopAutoFollowEnabled: explicitDesktopAutoFollowEnabled == null
-      ? defaultDesktopAutoFollowEnabled
-      : explicitDesktopAutoFollowEnabled,
+    // Live sync must not navigate or activate Desktop without an explicit opt-in.
+    desktopAutoFollowEnabled: explicitDesktopAutoFollowEnabled === true,
     desktopIpcSnapshotDebounceMs: parseIntegerEnv(
       readFirstDefinedEnv(["REMODEX_DESKTOP_IPC_SNAPSHOT_DEBOUNCE_MS"], "75", env),
       75

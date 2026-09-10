@@ -1057,12 +1057,19 @@ test("threadGenerateTitle falls back to a sanitized first-message title", async 
   assert.equal(result.title, "Rename this conversation after");
 });
 
-test("threadNameSet normalizes mobile rename params", () => {
-  const result = __test.threadNameSet({
+test("threadNameSet persists normalized mobile rename params through Codex", async () => {
+  const requests = [];
+  const result = await __test.threadNameSet({
     thread_id: " thread-1 ",
     name: "  Fix Thread Naming  ",
+  }, {
+    sendCodexRequest: async (method, params) => requests.push({ method, params }),
   });
 
+  assert.deepEqual(requests, [{
+    method: "thread/name/set",
+    params: { threadId: "thread-1", name: "Fix Thread Naming" },
+  }]);
   assert.deepEqual(result, {
     threadId: "thread-1",
     thread_id: "thread-1",
@@ -1071,9 +1078,9 @@ test("threadNameSet normalizes mobile rename params", () => {
   });
 });
 
-test("handleGitRequest owns thread rename and emits the rename hook", async () => {
+test("handleGitRequest acknowledges a rename only after Codex saves it", async () => {
   const responses = [];
-  const notifications = [];
+  let finishSave;
   const handled = handleGitRequest(
     JSON.stringify({
       id: "rename-1",
@@ -1085,11 +1092,14 @@ test("handleGitRequest owns thread rename and emits the rename hook", async () =
     }),
     (response) => responses.push(JSON.parse(response)),
     {
-      onThreadNameSet: (result) => notifications.push(result),
+      sendCodexRequest: () => new Promise((resolve) => { finishSave = resolve; }),
     }
   );
 
   assert.equal(handled, true);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(responses.length, 0);
+  finishSave({});
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(responses.length, 1);
@@ -1102,7 +1112,28 @@ test("handleGitRequest owns thread rename and emits the rename hook", async () =
       title: "Polish loading states",
     },
   });
-  assert.deepEqual(notifications, [responses[0].result]);
+});
+
+test("handleGitRequest reports failed catalog renames instead of acknowledging them", async () => {
+  const responses = [];
+  handleGitRequest(JSON.stringify({
+    id: "failed-rename",
+    method: "thread/name/set",
+    params: { thread_id: "thread-1", name: "New title" },
+  }), (response) => responses.push(JSON.parse(response)), {
+    sendCodexRequest: async () => { throw new Error("Catalog write failed"); },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(responses.length, 1);
+  assert.equal(responses[0].result, undefined);
+  assert.equal(responses[0].error.message, "Catalog write failed");
+});
+
+test("threadNameSet fails when the local runtime is unavailable", async () => {
+  await assert.rejects(
+    __test.threadNameSet({ threadId: "thread-1", name: "New title" }),
+    /local Codex connection is unavailable/
+  );
 });
 
 test("gitCreateWorktree creates a managed worktree under CODEX_HOME/worktrees", async () => {

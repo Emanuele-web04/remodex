@@ -737,9 +737,8 @@ function startBridge({
   const relaySessionUrl = `${relayBaseUrl}/${sessionId}`;
   const notificationSecret = randomBytes(24).toString("hex");
   const desktopRefresher = new CodexDesktopRefresher({
-    // IPC snapshots are accepted only after Codex mounts the route and
-    // announces itself as a follower. Auto-follow performs that one-time
-    // activation; refreshEnabled still controls the legacy reload workaround.
+    // Opening a thread manually establishes its IPC subscription. Automatic
+    // navigation and the legacy refresh workaround both require an opt-in.
     enabled: config.refreshEnabled || config.desktopAutoFollowEnabled === true,
     // With IPC live sync streaming content, deep-link refreshes are only needed
     // to navigate Desktop onto the phone-driven thread, not to reload content.
@@ -1244,7 +1243,7 @@ function startBridge({
     }
     if (handleGitRequest(rawMessage, sendApplicationResponse, {
       codexAppPath: config.codexAppPath,
-      onThreadNameSet: sendThreadNameUpdatedNotification,
+      sendCodexRequest,
     })) {
       return;
     }
@@ -1321,25 +1320,6 @@ function startBridge({
       sanitizeRelayBoundCodexMessage(rawMessage),
       sendRelayWireMessage
     );
-  }
-
-  // Mirrors accepted local renames back to the phone using the existing push-event shape.
-  function sendThreadNameUpdatedNotification(result) {
-    const threadId = readString(result?.threadId || result?.thread_id);
-    const name = readString(result?.name || result?.title);
-    if (!threadId || !name) {
-      return;
-    }
-
-    sendApplicationResponse(JSON.stringify({
-      method: "thread/name/updated",
-      params: {
-        threadId,
-        thread_id: threadId,
-        name,
-        title: name,
-      },
-    }));
   }
 
   function handleBridgeManagedThreadTurnsListRequest(rawMessage, sendResponse = sendApplicationResponse) {

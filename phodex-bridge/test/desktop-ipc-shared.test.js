@@ -11,6 +11,7 @@ const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
 const {
+  buildThreadReadStateContext,
   isContextualUserText,
   isThreadTurnStateProbeRequest,
   resolveDefaultIpcSocketPath,
@@ -20,6 +21,23 @@ const {
   sanitizeUserRoleItem,
   visibleUserPromptText,
 } = require("../src/desktop-ipc-shared");
+
+test("Desktop read-state v3 carries account identity without bearer tokens", () => {
+  const payload = {
+    "https://api.openai.com/auth": { chatgpt_account_id: "account-test", user_id: "user-test" },
+  };
+  const authToken = `header.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.signature`;
+  const context = buildThreadReadStateContext({ authMethod: "chatgpt", authToken });
+  assert.deepEqual(context.identity, { kind: "chatgpt", accountId: "account-test", userId: "user-test" });
+  assert.equal(context.executionHostKey,
+    "local:092af2cb59bdd804c6f7f1cd1d85464b682974e43cd517397d25510024034d1c");
+  assert.equal(JSON.stringify(context).includes(authToken), false);
+  assert.equal(buildThreadReadStateContext({ authMethod: "chatgpt", authToken: "invalid" }), null);
+  assert.equal(buildThreadReadStateContext({ authMethod: null, requiresOpenaiAuth: true }), null);
+  assert.equal(buildThreadReadStateContext({ authMethod: "apikey" }, "remote"), null);
+  assert.deepEqual(buildThreadReadStateContext({ authMethod: "apikey" }).identity,
+    { kind: "execution-storage", authMode: "apikey" });
+});
 
 test("response item text preserves nested data text parts", () => {
   assert.equal(

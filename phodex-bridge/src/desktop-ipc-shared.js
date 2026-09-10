@@ -26,7 +26,8 @@ const DESKTOP_IPC_METHOD_VERSIONS = new Map([
   ["thread-stream-following-status-requested", 1],
   ["thread-archived", 2],
   ["thread-unarchived", 1],
-  ["thread-read-state-changed", 2],
+  ["thread-owner-discovery", 1],
+  ["thread-read-state-changed", 3],
   ["thread-queued-followups-changed", 1],
   ["thread-follower-start-turn", 2],
   ["thread-follower-load-complete-history", 1],
@@ -582,6 +583,38 @@ function buildCompleteThreadReadParams(threadId) {
   };
 }
 
+// Desktop 26.903 scopes read receipts to the authenticated identity and runtime.
+// Only the local stdio runtime is owned by this bridge; never broadcast tokens.
+function buildThreadReadStateContext(authStatus, hostId = "local") {
+  if (!authStatus || hostId !== "local") {
+    return null;
+  }
+  let identity;
+  if (authStatus.authMethod === "chatgpt" || authStatus.authMethod === "chatgptAuthTokens") {
+    try {
+      const payload = JSON.parse(Buffer.from(
+        readString(authStatus.authToken).split(".")[1] || "", "base64url"
+      ).toString("utf8"));
+      const auth = payload["https://api.openai.com/auth"];
+      const accountId = readString(auth?.chatgpt_account_id ?? auth?.account_id);
+      const userId = readString(auth?.user_id ?? auth?.chatgpt_user_id);
+      if (!accountId || !userId) {
+        return null;
+      }
+      identity = { kind: "chatgpt", accountId, userId };
+    } catch {
+      return null;
+    }
+  } else {
+    if (authStatus.authMethod == null && authStatus.requiresOpenaiAuth !== false) {
+      return null;
+    }
+    identity = { kind: "execution-storage", authMode: authStatus.authMethod ?? "none" };
+  }
+  const hostHash = createHash("sha256").update(JSON.stringify(["local", hostId, null])).digest("hex");
+  return { identity, executionHostKey: `${hostId}:${hostHash}` };
+}
+
 function resolveIpcSocketPathCandidates() {
   if (process.platform === "win32") {
     return ["\\\\.\\pipe\\codex-ipc"];
@@ -666,6 +699,7 @@ function responseItemMessageText(payload) {
 }
 
 module.exports = {
+  buildThreadReadStateContext,
   CLIENT_STATUS_CHANGED,
   buildCompleteThreadReadParams,
   buildIpcRequestEnvelope,

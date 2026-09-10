@@ -345,7 +345,7 @@ remodex watch
 | `REMODEX_PUSH_SERVICE_URL` | disabled by default | Optional HTTP base URL for managed push registration/completion |
 | `REMODEX_CODEX_ENDPOINT` | — | Connect to an existing Codex WebSocket instead of spawning a local `codex app-server` |
 | `REMODEX_DESKTOP_IPC_LIVE_SYNC` | `true` | Broadcast Remodex-owned active threads over the local Codex Desktop / VSCode IPC bus |
-| `REMODEX_DESKTOP_AUTO_FOLLOW` | `true` on macOS with local IPC | Open a newly materialized phone-driven thread once so Codex Desktop follows its live IPC stream |
+| `REMODEX_DESKTOP_AUTO_FOLLOW` | `false` | Explicitly opt in to opening phone-driven threads in Codex Desktop |
 | `REMODEX_DESKTOP_IPC_SOCKET` | auto-detected | Override the local Codex IPC socket or Windows named pipe path |
 | `REMODEX_DESKTOP_IPC_SNAPSHOT_DEBOUNCE_MS` | `75` | Debounce window (ms) for IPC `conversationState` snapshot / patch broadcasts |
 | `REMODEX_REFRESH_ENABLED` | `false` | Auto-refresh Codex.app when phone activity is detected (`true` enables it explicitly) |
@@ -361,8 +361,8 @@ REMODEX_REFRESH_ENABLED=true remodex up
 # Disable local Desktop / VSCode IPC live sync
 REMODEX_DESKTOP_IPC_LIVE_SYNC=false remodex up
 
-# Keep phone-driven threads in the sidebar without automatically opening them
-REMODEX_DESKTOP_AUTO_FOLLOW=false remodex up
+# Optionally open phone-driven threads in Desktop automatically
+REMODEX_DESKTOP_AUTO_FOLLOW=true remodex up
 
 # Connect to an existing Codex instance
 REMODEX_CODEX_ENDPOINT=ws://localhost:8080 remodex up
@@ -516,10 +516,10 @@ Run `remodex reset-pairing`, then start the bridge again with `remodex up`. You 
 Yes — set `REMODEX_CODEX_ENDPOINT=ws://host:port` to skip spawning a local `codex app-server`.
 
 **Why don't my phone threads show up in the Codex desktop app immediately?**
-With `REMODEX_DESKTOP_IPC_LIVE_SYNC=true` and `REMODEX_DESKTOP_AUTO_FOLLOW=true`, Remodex waits for the new rollout, opens its exact route in an already-running Codex app, and confirms the follow handshake before relying on IPC patches. If Codex is closed, the thread remains available through the shared session catalog and is followed when you open it.
+Phone-created threads appear through the shared local session catalog. Open a thread manually in Codex Desktop to follow its live stream. Remodex does not navigate or activate Desktop by default. `REMODEX_DESKTOP_AUTO_FOLLOW=true` explicitly opts in to automatic navigation.
 
 **Does Remodex support true live sync between phone and `Codex.app`?**
-Yes while the relevant client is following the thread. Desktop-to-phone streams directly over the local IPC bus. Phone-to-Desktop uses a one-time route activation because Codex intentionally ignores external snapshots for unmounted threads; after Codex confirms `following: true`, the timeline and subsequent patches remain live. Disk persistence is still the fallback while Codex is closed.
+Yes while the relevant client is following the thread. Both directions stream over the local IPC bus. Opening a thread establishes its subscription; phone activity does not need to change the active desktop view. Disk persistence is still the fallback while Codex is closed.
 
 **Can I self-host the relay?**
 Yes. That is the intended forking path. The transport and push-service code are in [`relay/`](relay/); point `REMODEX_RELAY` at the instance you run.

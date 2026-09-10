@@ -99,6 +99,7 @@ test("readBridgeConfig keeps safe defaults and explicit overrides", () => {
     env: {
       REMODEX_CODEX_ENDPOINT: "ws://localhost:8080",
       REMODEX_REFRESH_ENABLED: "true",
+      REMODEX_DESKTOP_AUTO_FOLLOW: "true",
       REMODEX_DESKTOP_IPC_SOCKET: "/tmp/remodex-ipc.sock",
     },
     platform: "darwin",
@@ -145,7 +146,7 @@ test("readBridgeConfig keeps safe defaults and explicit overrides", () => {
   assert.equal(macConfig.relayUrl, "");
   assert.equal(macConfig.pushServiceUrl, "");
   assert.equal(macConfig.desktopIpcLiveSyncEnabled, true);
-  assert.equal(macConfig.desktopAutoFollowEnabled, true);
+  assert.equal(macConfig.desktopAutoFollowEnabled, false);
   assert.equal(macConfig.desktopIpcSnapshotDebounceMs, 75);
   assert.equal(persistedKeepAwakeConfig.keepMacAwakeEnabled, false);
   assert.equal(macEndpointConfig.refreshEnabled, false);
@@ -153,6 +154,7 @@ test("readBridgeConfig keeps safe defaults and explicit overrides", () => {
   assert.equal(linuxConfig.desktopAutoFollowEnabled, false);
   assert.equal(linuxCommandConfig.refreshEnabled, false);
   assert.equal(explicitOnConfig.refreshEnabled, true);
+  assert.equal(explicitOnConfig.desktopAutoFollowEnabled, true);
   assert.equal(explicitOnConfig.desktopIpcSocketPath, "/tmp/remodex-ipc.sock");
   assert.equal(explicitOffConfig.refreshEnabled, false);
   assert.equal(explicitOffConfig.desktopIpcLiveSyncEnabled, false);
@@ -325,6 +327,32 @@ test("thread/started cancels the fallback and refreshes the concrete thread rout
 
   refresher.handleTransportReset();
   assert.equal(stopCount, 1);
+});
+
+test("disabled desktop navigation leaves phone activity entirely in the background", async () => {
+  const refreshCalls = [];
+  let watchers = 0;
+  const refresher = new CodexDesktopRefresher({
+    enabled: false,
+    navigationOnly: true,
+    debounceMs: 1,
+    fallbackNewThreadMs: 1,
+    refreshExecutor: async (url) => refreshCalls.push(url),
+    watchThreadRolloutFactory: () => { watchers += 1; return { stop() {} }; },
+  });
+  refresher.handleInbound(JSON.stringify({ method: "thread/start", params: {} }));
+  refresher.handleOutbound(JSON.stringify({
+    method: "thread/started", params: { thread: { id: "phone-only" } },
+  }));
+  refresher.handleInbound(JSON.stringify({ method: "turn/start", params: { threadId: "phone-only" } }));
+  refresher.handleOutbound(JSON.stringify({
+    method: "turn/completed", params: { threadId: "phone-only", turn: { id: "turn-phone" } },
+  }));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(refreshCalls, []);
+  assert.equal(watchers, 0);
+  assert.equal(refresher.materializationPendingThreadIds.size, 0);
+  assert.equal(refresher.hasPendingRefreshWork(), false);
 });
 
 test("navigation-only mode refreshes phone turn starts but skips watchers and completion refreshes", async () => {

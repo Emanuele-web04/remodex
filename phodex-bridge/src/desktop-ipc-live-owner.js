@@ -10,6 +10,7 @@ const {
   CLIENT_STATUS_CHANGED,
   DESKTOP_IPC_METHOD_VERSIONS: METHOD_VERSION_BY_NAME,
   buildCompleteThreadReadParams,
+  buildThreadReadStateContext,
   cloneJSON,
   conversationSnapshotShowsActiveTurn,
   isPlainJSONObject,
@@ -66,6 +67,7 @@ const THREAD_QUEUED_FOLLOWUPS_CHANGED = "thread-queued-followups-changed";
 const REMODEX_LIVE_OWNER_SOURCE = "desktop-ipc-live-owner";
 
 const SUPPORTED_FOLLOWER_REQUEST_METHODS = new Set([
+  "thread-owner-discovery",
   "thread-follower-start-turn",
   "thread-follower-load-complete-history",
   "thread-follower-update-thread-settings",
@@ -141,6 +143,7 @@ function createDesktopIpcLiveOwner({
   maxPatchBytes = DEFAULT_MAX_PATCH_BYTES,
   requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
   reconnectMs = DEFAULT_RECONNECT_MS,
+  startRouterWhenMissing = false,
   initialHistoryRetryMs = DEFAULT_INITIAL_HISTORY_RETRY_MS,
   initialHistoryMaxAttempts = DEFAULT_INITIAL_HISTORY_MAX_ATTEMPTS,
   liveOwnershipFreshnessMs = DEFAULT_LIVE_OWNERSHIP_FRESHNESS_MS,
@@ -192,6 +195,7 @@ function createDesktopIpcLiveOwner({
   const queuedFollowUpsByThreadId = new Map();
   const runningQueuedFollowUpThreadIds = new Set();
   const announcedReadStateThreadIds = new Set();
+  const pendingReadStateByThreadId = new Map();
   const pendingThreadArchiveMetadataByThreadId = new Map();
   const dirtyThreadIds = new Set();
   let snapshotTimer = null;
@@ -204,6 +208,10 @@ function createDesktopIpcLiveOwner({
     requestTimeoutMs,
     reconnectMs,
     logPrefix,
+    // Let Desktop/VSCode own its bus. Restarting a bridge-owned router forces
+    // concurrent Desktop clients to re-elect routers and can split their sockets.
+    // Phone history remains local while Desktop is closed; reconnect replays it.
+    startRouterWhenMissing,
     onConnected() {
       flushPendingThreadArchiveMetadataBroadcasts();
       requestFollowerStatusForAllOwnedThreads();
@@ -302,6 +310,10 @@ function createDesktopIpcLiveOwner({
     if (!message || typeof message !== "object") {
       return;
     }
+    if (message.method === "account/updated") {
+      announcedReadStateThreadIds.clear();
+      pendingReadStateByThreadId.clear();
+    }
 
     const responseId = message.id == null ? "" : String(message.id);
     if (responseId && !message.method) {
@@ -351,6 +363,11 @@ function createDesktopIpcLiveOwner({
       refreshOptimisticFallbackForThread(update.threadId);
       scheduleSnapshot(update.threadId);
       replaySidebarAnnouncementAfterMaterialization(message, update.threadId);
+      if (message.method === "thread/name/updated") {
+        // Unopened Desktop threads ignore stream snapshots. Refresh their catalog
+        // metadata after the name is persisted, even if the first turn has ended.
+        broadcastThreadUnarchived(update.threadId);
+      }
     }
 
     if (readString(message.method) === "turn/completed") {
@@ -404,6 +421,7 @@ function createDesktopIpcLiveOwner({
     queuedFollowUpsByThreadId.clear();
     runningQueuedFollowUpThreadIds.clear();
     announcedReadStateThreadIds.clear();
+    pendingReadStateByThreadId.clear();
     ownedThreadIds.clear();
     conversations.clear();
     ipc.close();
@@ -423,16 +441,44 @@ function createDesktopIpcLiveOwner({
     if (hadUnread) {
       conversation.hasUnreadTurn = false;
       conversation.unreadMessageCount = 0;
+      announcedReadStateThreadIds.delete(normalizedThreadId);
       scheduleSnapshot(normalizedThreadId);
     } else if (announcedReadStateThreadIds.has(normalizedThreadId)) {
       return;
     }
-    if (ipc.sendBroadcast(THREAD_READ_STATE_CHANGED, {
-      conversationId: normalizedThreadId,
-      hasUnreadTurn: false,
-    })) {
-      announcedReadStateThreadIds.add(normalizedThreadId);
+    if (pendingReadStateByThreadId.has(normalizedThreadId)) {
+      return;
     }
+    const request = Symbol();
+    pendingReadStateByThreadId.set(normalizedThreadId, request);
+    Promise.resolve()
+      .then(() => sendCodexRequest("getAuthStatus", { includeToken: true, refreshToken: false }))
+      .then((authStatus) => {
+        if (pendingReadStateByThreadId.get(normalizedThreadId) !== request
+          || !ownedThreadIds.has(normalizedThreadId)) {
+          return;
+        }
+        const current = conversations.get(normalizedThreadId);
+        if (current?.hasUnreadTurn || current?.unreadMessageCount > 0) {
+          return;
+        }
+        const context = buildThreadReadStateContext(authStatus, hostId);
+        if (context && ipc.sendBroadcast(THREAD_READ_STATE_CHANGED, {
+          conversationId: normalizedThreadId,
+          hostId,
+          hasUnreadTurn: false,
+          context,
+        })) {
+          announcedReadStateThreadIds.add(normalizedThreadId);
+        }
+      })
+      // A failed identity lookup leaves the next phone read free to retry.
+      .catch(() => {})
+      .finally(() => {
+        if (pendingReadStateByThreadId.get(normalizedThreadId) === request) {
+          pendingReadStateByThreadId.delete(normalizedThreadId);
+        }
+      });
   }
 
   // Snappier Stop UX on Desktop: flip the active turn to interrupted right away;
@@ -711,6 +757,7 @@ function createDesktopIpcLiveOwner({
     }
     runningQueuedFollowUpThreadIds.delete(normalizedThreadId);
     announcedReadStateThreadIds.delete(normalizedThreadId);
+    pendingReadStateByThreadId.delete(normalizedThreadId);
     cancelSidebarAnnouncement(normalizedThreadId);
     announcedSidebarThreadIds.delete(normalizedThreadId);
     pendingSidebarMaterializationThreadIds.delete(normalizedThreadId);
@@ -1299,6 +1346,13 @@ function createDesktopIpcLiveOwner({
     if (!SUPPORTED_FOLLOWER_REQUEST_METHODS.has(method)) {
       return false;
     }
+    const requestedHostId = readString(params.hostId || envelope.request?.hostId || envelope.hostId);
+    if (method === "thread-owner-discovery" && !requestedHostId) {
+      return false;
+    }
+    if (requestedHostId && requestedHostId !== hostId) {
+      return false;
+    }
     const threadId = readConversationIdFromFollowerParams(params);
     return Boolean(threadId && ownedThreadIds.has(threadId));
   }
@@ -1307,11 +1361,14 @@ function createDesktopIpcLiveOwner({
     const method = readString(envelope?.method);
     const params = envelope?.params && typeof envelope.params === "object" ? envelope.params : {};
     const conversationId = readConversationIdFromFollowerParams(params);
-    if (!conversationId || !ownedThreadIds.has(conversationId)) {
+    if (!conversationId || !canHandleFollowerRequest(envelope)) {
       throw new Error("conversation-not-owned");
     }
 
     switch (method) {
+      case "thread-owner-discovery":
+        // Remodex cannot yet inject Desktop's untrusted app response items.
+        return { supportsUntrustedAppInput: false };
       case "thread-follower-start-turn":
         return await handleFollowerStartTurn(conversationId, params);
       case "thread-follower-load-complete-history":
@@ -1382,6 +1439,9 @@ function createDesktopIpcLiveOwner({
   }
 
   async function handleFollowerStartTurn(conversationId, params) {
+    if (params.turnStart?.context?.responseItems?.length > 0) {
+      throw new Error("Remodex does not support untrusted app input yet.");
+    }
     const rawTurnStartParams = readFollowerTurnStartParams(params);
     const codexParams = mergeFollowerRuntimeOverrides(conversationId, sanitizeTurnStartParams({
       ...rawTurnStartParams,
