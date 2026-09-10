@@ -85,6 +85,348 @@ test("desktop identity repair pairs synthetic turns independently of parallel ac
   assert.deepEqual([...stablePriority.nextTurnIds], ["turn-real-stable"]);
 });
 
+test("desktop follower Activity callback is bounded across reconnect and archive", async (t) => {
+  const ipc = createFakeIpcTransport();
+  const observations = [];
+  const follower = createDesktopIpcActionFollower({
+    socketPath: "/tmp/fake-remodex-activity.sock",
+    netModule: ipc.netModule,
+    sendApplicationResponse() {},
+    onActivityObservation(observation) {
+      observations.push(observation);
+    },
+    requestTimeoutMs: 500,
+  });
+  t.after(() => follower.stopAll());
+
+  follower.observeInbound(JSON.stringify({ id: "sidebar", method: "thread/list", params: {} }));
+  await waitFor(() => ipc.state.socket && observations.some((value) => value.type === "connected"));
+  sendActivitySnapshot(ipc.state.socket, "thread-activity", "inProgress");
+  await waitFor(() => observations.some((value) => value.type === "state"));
+  const firstState = observations.find((value) => value.type === "state");
+  assert.equal(firstState.sourceGeneration, 1);
+  assert.deepEqual(firstState.state.turns[0].items, [{
+    id: "activity-command",
+    itemId: "",
+    item_id: "",
+    type: "commandExecution",
+  }]);
+  assert.equal(JSON.stringify(firstState).includes("private output"), false);
+  assert.equal(JSON.stringify(firstState).includes("private command"), false);
+
+  ipc.state.socket.destroy();
+  await waitFor(() => observations.some((value) => value.type === "disconnected"));
+  follower.observeInbound(JSON.stringify({ id: "sidebar-again", method: "thread/list", params: {} }));
+  await waitFor(() => ipc.state.connectionCount === 2 && ipc.state.socket);
+  await waitFor(() => observations.filter((value) => value.type === "connected").length === 2);
+  sendActivitySnapshot(ipc.state.socket, "thread-activity", "completed");
+  await waitFor(() => observations.filter((value) => value.type === "state").length === 2);
+  assert.equal(
+    observations.filter((value) => value.type === "state").at(-1).sourceGeneration,
+    2
+  );
+
+  emitFrame(ipc.state.socket, {
+    type: "broadcast",
+    method: "thread-archived",
+    sourceClientId: "desktop",
+    version: 2,
+    params: { conversationId: "thread-activity", cwd: "/repo/activity" },
+  });
+  await waitFor(() => observations.some((value) => (
+    value.type === "removed" && value.reason === "archived"
+  )));
+});
+
+test("desktop follower does not project locally owned echoes into Activity", async (t) => {
+  const ipc = createFakeIpcTransport();
+  const observations = [];
+  const follower = createDesktopIpcActionFollower({
+    socketPath: "/tmp/fake-remodex-owned.sock",
+    netModule: ipc.netModule,
+    sendApplicationResponse() {},
+    isLocallyOwnedThread: (threadId) => threadId === "local-thread",
+    onActivityObservation(observation) {
+      observations.push(observation);
+    },
+    requestTimeoutMs: 500,
+  });
+  t.after(() => follower.stopAll());
+
+  follower.observeInbound(JSON.stringify({ id: "sidebar", method: "thread/list", params: {} }));
+  await waitFor(() => ipc.state.socket);
+  sendActivitySnapshot(ipc.state.socket, "local-thread", "inProgress");
+  await wait(25);
+  assert.equal(observations.some((value) => value.type === "state"), false);
+});
+
+test("Activity keeps canonical normalized outcomes and compacts growing item history", async (t) => {
+  const ipc = createFakeIpcTransport();
+  const observations = [];
+  const follower = createDesktopIpcActionFollower({
+    socketPath: "/tmp/fake-remodex-activity.sock", netModule: ipc.netModule,
+    sendApplicationResponse() {}, onActivityObservation: (value) => observations.push(value),
+  });
+  t.after(() => follower.stopAll());
+  follower.observeInbound(JSON.stringify({ id: "sidebar", method: "thread/list", params: {} }));
+  await waitFor(() => observations.some((value) => value.type === "connected"));
+  const turn = {
+    turnId: "raw-turn", status: "inProgress", startedAt: 100,
+    items: Array.from({ length: 1000 }, (_, index) => ({
+      id: `command-${index}`, type: "commandExecution", aggregatedOutput: "private output",
+    })),
+  };
+  sendActivitySnapshot(ipc.state.socket, "normalized-activity", "completed", {
+    turns: [],
+    turnHistory: { history: {
+      entitiesByKey: { "turn:raw-turn": turn },
+      islands: [{ entries: [{ value: "turn:raw-turn" }] }],
+    } },
+  });
+  await waitFor(() => observations.some((value) => value.type === "state"));
+  const compact = observations.find((value) => value.type === "state").state;
+  assert.equal(compact.turns[0].status, "inProgress", "idle runtime must not invent completion");
+  assert.equal(compact.turns[0].items.length, 1);
+  assert.equal(compact.turns[0].items[0].id, "command-999");
+  assert.equal(JSON.stringify(compact).includes("private output"), false);
+  const { projectDesktopThreadActivity } = require("../src/thread-activity-projector");
+  const entry = projectDesktopThreadActivity("normalized-activity", compact, 1);
+  assert.equal(entry.lastOutcome, undefined);
+  assert.equal(entry.runtime, "idle");
+});
+
+test("catalog discovery restores parallel running badges without opening transcripts or echoing follows", async (t) => {
+  const ipc = createFakeIpcTransport();
+  const messages = [];
+  const follower = createDesktopIpcActionFollower({
+    socketPath: "/tmp/fake-remodex-catalog.sock", netModule: ipc.netModule,
+    sendApplicationResponse: (raw) => messages.push(JSON.parse(raw)),
+    isLocallyOwnedThread: (id) => id === "local-owned",
+  });
+  t.after(() => follower.stopAll());
+  const rows = [
+    { id: "local-owned" },
+    ...Array.from({ length: 40 }, (_, i) => ({ id: `catalog-${i}` })),
+  ];
+  const follows = () => ipc.state.frames.filter((frame) => (
+    frame.method === "thread-stream-following-changed" && frame.params.following
+  ));
+  follower.observeThreadListResponse({ data: rows });
+  await waitFor(() => follows().length === 40);
+  assert.equal(follows().some((frame) => frame.params.conversationId === "local-owned"), false);
+  follower.observeThreadListResponse({ data: rows });
+  for (const id of ["catalog-0", "catalog-39"]) {
+    // Another bridge/renderer may announce its subscription before the baseline.
+    for (let i = 0; i < 3; i += 1) {
+      emitFrame(ipc.state.socket, {
+        type: "broadcast", method: "thread-stream-following-changed", version: 1,
+        sourceClientId: "other-follower",
+        params: { conversationId: id, following: true },
+      });
+    }
+    sendActivitySnapshot(ipc.state.socket, id, "inProgress");
+  }
+  await waitFor(() => messages.filter((m) => m.method === "turn/started").length === 2);
+  assert.equal(follows().length, 40, "peer subscriptions must not bounce between followers");
+  assert.deepEqual(messages.map((m) => m.method), ["turn/started", "turn/started"]);
+  assert.equal(JSON.stringify(messages).includes("private"), false);
+
+  follower.observeThreadListResponse({ data: [{ id: "catalog-39" }] });
+  const stopped = () => ipc.state.frames.filter((frame) => (
+    frame.method === "thread-stream-following-changed" && !frame.params.following
+  ));
+  assert.equal(stopped().length, 38, "keep already-announced running chats outside the refreshed page");
+  sendActivitySnapshot(ipc.state.socket, "catalog-0", "completed");
+  await waitFor(() => messages.some((m) => m.method === "turn/completed"));
+  follower.observeThreadListResponse({ data: [{ id: "catalog-39" }] });
+  assert.equal(stopped().length, 39);
+
+  const closed = new Promise((resolve) => ipc.state.socket.once("close", resolve));
+  ipc.state.socket.destroy();
+  await closed;
+  follower.observeInbound(JSON.stringify({ method: "thread/list", params: {} }));
+  await waitFor(() => ipc.state.connectionCount === 2 && follows().length === 41);
+  assert.equal(follows().at(-1).params.conversationId, "catalog-39");
+});
+
+test("foreground probes stay additive before the first sidebar catalog", async (t) => {
+  const ipc = createFakeIpcTransport();
+  const follower = createDesktopIpcActionFollower({
+    socketPath: "/tmp/fake-remodex-first-probe.sock", netModule: ipc.netModule,
+    sendApplicationResponse: () => {},
+  });
+  t.after(() => follower.stopAll());
+  const changes = () => ipc.state.frames.filter((frame) => (
+    frame.method === "thread-stream-following-changed"
+  ));
+  follower.observeThreadListResponse({ data: [{ id: "first-probe" }], nextCursor: "next" }, { limit: 1 });
+  await waitFor(() => changes().length === 1);
+  follower.observeThreadListResponse({ data: [{ id: "second-probe" }], nextCursor: "next" }, { limit: 1 });
+  follower.observeThreadListResponse({ data: [], nextCursor: null }, { limit: 1 });
+  assert.deepEqual(changes().map((frame) => frame.params), [
+    { hostId: "local", conversationId: "first-probe", following: true },
+    { hostId: "local", conversationId: "second-probe", following: true },
+  ]);
+
+  follower.observeThreadListResponse({ data: [{ id: "second-probe" }], nextCursor: null }, { limit: 70 });
+  assert.equal(changes().at(-1).params.conversationId, "first-probe");
+  assert.equal(changes().at(-1).params.following, false);
+});
+
+test("smaller catalog probes preserve follows until a full-window refresh", async (t) => {
+  const ipc = createFakeIpcTransport();
+  const messages = [];
+  const follower = createDesktopIpcActionFollower({
+    socketPath: "/tmp/fake-remodex-catalog-probe.sock", netModule: ipc.netModule,
+    sendApplicationResponse: (raw) => messages.push(JSON.parse(raw)),
+  });
+  t.after(() => follower.stopAll());
+  const changes = () => ipc.state.frames.filter((frame) => (
+    frame.method === "thread-stream-following-changed"
+  ));
+  const stopped = () => changes().filter((frame) => !frame.params.following);
+  const rows = Array.from({ length: 70 }, (_, i) => ({ id: `probe-${i}` }));
+
+  follower.observeThreadListResponse({ data: rows, nextCursor: "next-page" }, { limit: 70 });
+  await waitFor(() => changes().length === 70);
+  for (const limit of [1, 5]) {
+    follower.observeThreadListResponse({ data: rows.slice(0, limit), nextCursor: "next-page" }, { limit });
+  }
+  assert.equal(stopped().length, 0, "partial reads must not remove the other idle subscriptions");
+  follower.observeThreadListResponse({ data: [{ id: "new-probe" }], nextCursor: "next-page" }, { limit: 1 });
+  assert.equal(changes().at(-1).params.conversationId, "new-probe", "partial reads may discover new chats");
+
+  sendActivitySnapshot(ipc.state.socket, "probe-69", "inProgress");
+  await waitFor(() => messages.some((message) => message.method === "turn/started"));
+  follower.observeThreadListResponse({ data: [rows[0]], nextCursor: null }, { limit: 70 });
+  assert.equal(stopped().length, 69, "a full-size request may legitimately return fewer chats");
+  assert.equal(stopped().some((frame) => frame.params.conversationId === "probe-69"), false);
+  sendActivitySnapshot(ipc.state.socket, "probe-69", "completed");
+  await waitFor(() => messages.some((message) => message.method === "turn/completed"));
+  follower.observeThreadListResponse({ data: [rows[0]], nextCursor: null }, { limit: 70 });
+  assert.equal(stopped().length, 70, "settled chats outside the full window can be pruned");
+});
+
+test("desktop renderer follows do not replay completed chats into sidebar running state", async (t) => {
+  const ipc = createFakeIpcTransport();
+  const messages = [];
+  const follower = createDesktopIpcActionFollower({
+    socketPath: "/tmp/fake-remodex-sidebar-ownership.sock", netModule: ipc.netModule,
+    sendApplicationResponse: (raw) => messages.push(JSON.parse(raw)),
+  });
+  t.after(() => follower.stopAll());
+  follower.observeInbound(JSON.stringify({ method: "thread/list", params: {} }));
+  await waitFor(() => ipc.state.frames.some((f) => f.method === "initialize"));
+  await wait(10);
+  const rows = Array.from({ length: 6 }, (_, i) => ({ id: `desktop-chat-${i}` }));
+  // Desktop announces its mounted views before the phone's catalog arrives.
+  for (const { id } of rows) {
+    emitFrame(ipc.state.socket, {
+      type: "broadcast", method: "thread-stream-following-changed", version: 1,
+      sourceClientId: "desktop-renderer", params: { conversationId: id, following: true },
+    });
+  }
+  follower.observeThreadListResponse({ data: rows });
+  for (const [i, { id }] of rows.entries()) {
+    const turn = {
+      turnId: `turn-${i}`, status: i < 2 ? "inProgress" : "completed",
+      items: [{ id: `item-${i}`, type: "agentMessage", text: "Existing output" }],
+    };
+    sendActivitySnapshot(ipc.state.socket, id, i < 2 ? "inProgress" : "completed", i % 2 === 0
+      ? { turns: [turn] }
+      : {
+        turns: [],
+        turnHistory: { history: {
+          entitiesByKey: { [`turn:${i}`]: turn },
+          islands: [{ entries: [{ value: `turn:${i}` }] }],
+        } },
+      });
+  }
+  await wait(25);
+  assert.deepEqual(messages.filter((m) => m.method === "turn/started").map((m) => m.params.threadId),
+    ["desktop-chat-0", "desktop-chat-1"]);
+  assert.deepEqual(messages.filter((m) => m.method?.startsWith("item/")), [],
+    "sidebar discovery must not send old item/started events that iOS interprets as live work");
+  assert.equal(messages.some((m) => m.method === "thread/started" || m.method === "thread/replaced"), false,
+    "sidebar discovery must not trigger full history reads on the phone");
+});
+
+function sendActivitySnapshot(socket, threadId, status, overrides = {}) {
+  emitFrame(socket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop",
+    version: 11,
+    params: {
+      conversationId: threadId,
+      change: {
+        type: "snapshot",
+        conversationState: {
+          title: "Activity thread",
+          cwd: "/repo/activity",
+          threadRuntimeStatus: { type: status === "inProgress" ? "active" : "idle" },
+          requests: [],
+          turns: [{
+            id: "activity-turn",
+            status,
+            turnStartedAtMs: 1_700_000_000_000,
+            turnCompletedAtMs: status === "completed" ? 1_700_000_001_000 : null,
+            items: [{
+              id: "activity-command",
+              type: "commandExecution",
+              command: "private command",
+              aggregatedOutput: "private output",
+            }],
+          }],
+          ...overrides,
+        },
+      },
+    },
+  });
+}
+
+function createFakeIpcTransport() {
+  const state = { socket: null, connectionCount: 0, frames: [] };
+  return {
+    state,
+    netModule: {
+      createConnection() {
+        const socket = new EventEmitter();
+        socket.destroyed = false;
+        socket.write = (buffer, callback = () => {}) => {
+          const frame = parseFrameBuffer(buffer);
+          state.frames.push(frame);
+          callback();
+          if (frame.method === "initialize") {
+            setImmediate(() => emitFrame(socket, {
+              type: "response",
+              requestId: frame.requestId,
+              resultType: "success",
+              method: "initialize",
+              handledByClientId: "desktop",
+              result: { clientId: "remodex-activity-test" },
+            }));
+          }
+        };
+        socket.destroy = () => {
+          if (socket.destroyed) {
+            return;
+          }
+          socket.destroyed = true;
+          if (state.socket === socket) {
+            state.socket = null;
+          }
+          setImmediate(() => socket.emit("close"));
+        };
+        state.socket = socket;
+        state.connectionCount += 1;
+        setImmediate(() => socket.emit("connect"));
+        return socket;
+      },
+    },
+  };
+}
+
 test("desktop turns/list returns newest-first pages without reversing reopen history", () => {
   const chronologicalTurns = [
     { id: "turn-1", items: [{ id: "message-1", type: "agentMessage", text: "one" }] },

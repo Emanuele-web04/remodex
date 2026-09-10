@@ -55,6 +55,8 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
     @State private var isCreatingThread = false
     @State private var pendingTopAction: SidebarTopAction? = nil
     @State private var groupedThreads: [SidebarThreadGroup] = []
+    @State private var activityRefreshGeneration = 0
+    @AppStorage("sidebar.taskViewMode") private var taskViewMode: SidebarTaskViewMode = .projects
     @State private var activeSidebarSheet: SidebarPresentedSheet?
     @State private var projectGroupPendingArchive: SidebarThreadGroup? = nil
     @State private var projectGroupPendingDeletion: SidebarThreadGroup? = nil
@@ -80,6 +82,7 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
             .background(Color(.systemBackground))
             .adaptiveTopBar {
                 SidebarHeaderView(
+                    taskViewMode: $taskViewMode,
                     showsCloseButton: showsInlineCloseButton,
                     onClose: onClose,
                     overflowActions: overflowMenuActions,
@@ -216,6 +219,11 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
 
     private func refreshThreads() async {
         guard codex.isConnected else { return }
+        defer {
+            rebuildGroupedThreads()
+            rebuildCachedRunBadges()
+            activityRefreshGeneration += 1
+        }
         let startedAt = Date()
         debugSidebarLog("refreshThreads start threadCount=\(codex.threads.count)")
         do {
@@ -267,6 +275,10 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
     // Routes the shared bottom Chat button by the active sidebar scope without
     // putting a closure ternary inside the SwiftUI view builder.
     private func handleBottomChatTap() {
+        guard taskViewMode == .projects else {
+            handleNewChatButtonTap()
+            return
+        }
         switch selectedContentScope {
         case .projects:
             handleNewChatButtonTap()
@@ -407,21 +419,26 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
         projectGroupPendingDeletion = nil
     }
 
-    // Rebuilds sidebar sections only when the source thread array changes.
-    private func rebuildGroupedThreads() {
-        let startedAt = Date()
+    private var searchMatchingThreads: [CodexThread] {
+        let liveThreads = codex.threads.filter { $0.syncState != .archivedLocal }
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let source: [CodexThread]
         if query.isEmpty {
-            source = codex.threads
+            return liveThreads
         } else {
-            source = codex.threads.filter {
+            return liveThreads.filter {
                 $0.displayTitle.localizedCaseInsensitiveContains(query)
                 || ($0.preview?.localizedCaseInsensitiveContains(query) ?? false)
                 || $0.projectDisplayName.localizedCaseInsensitiveContains(query)
                 || ($0.normalizedProjectPath?.localizedCaseInsensitiveContains(query) ?? false)
             }
         }
+    }
+
+    // Rebuilds the more expensive Projects hierarchy when its inputs change.
+    private func rebuildGroupedThreads() {
+        let startedAt = Date()
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let source = searchMatchingThreads
         // Run badges participate in ordering, so grouping reads the same state the
         // badge column shows; the shared fingerprint keeps the two from diverging.
         var runBadges: [String: CodexThreadRunBadgeState] = [:]
@@ -500,7 +517,8 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
         cachedRunBadges = byThreadID
         debugSidebarLog(
             "rebuildCachedRunBadges durationMs=\(Int(Date().timeIntervalSince(startedAt) * 1000)) "
-                + "threadCount=\(codex.threads.count) cached=\(cachedRunBadges.count)"
+                + "threadCount=\(codex.threads.count) cached=\(cachedRunBadges.count) "
+                + "running=\(cachedRunBadges.values.filter { $0 == .running }.count)"
         )
     }
 
@@ -547,7 +565,10 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
     }
 
     private var scopedSidebarThreads: [CodexThread] {
-        SidebarThreadGrouping.threadsForScope(
+        if taskViewMode == .activity {
+            return codex.threads.filter { $0.syncState != .archivedLocal }
+        }
+        return SidebarThreadGrouping.threadsForScope(
             sidebarGroupingScope,
             from: codex.threads,
             projectlessRootPaths: projectlessChatRootPaths
@@ -555,6 +576,7 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
     }
 
     private var emptySidebarTitle: String {
+        if taskViewMode == .activity { return "No tasks" }
         switch selectedContentScope {
         case .projects:
             return "No project chats"
@@ -564,6 +586,7 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
     }
 
     private var emptySidebarFilterTitle: String {
+        if taskViewMode == .activity { return "No matching tasks" }
         switch selectedContentScope {
         case .projects:
             return "No matching projects"
@@ -605,6 +628,10 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
                 }
             }
             .scrollDismissesKeyboard(.interactively)
+            .scrollBounceBehavior(.always, axes: .vertical)
+            .refreshable {
+                await refreshThreads()
+            }
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 bottomActionBar
             }
@@ -646,6 +673,10 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
 
     private var threadList: some View {
         SidebarThreadListView(
+            taskViewMode: taskViewMode,
+            activityThreads: taskViewMode == .activity ? searchMatchingThreads : [],
+            isActivityVisible: isVisible,
+            activityRefreshGeneration: activityRefreshGeneration,
             isFiltering: !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
             isConnected: codex.isConnected,
             isCreatingThread: isCreatingThread,
@@ -694,16 +725,14 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
                 threadPendingDeletion = thread
             }
         )
-        .refreshable {
-            await refreshThreads()
-        }
     }
 
     // Keeps transient sync feedback inside the scope row so list fetches do not
     // add a separate row and shift the chat list vertically.
     private var sidebarScopeRow: some View {
         let projectGroupIDs = visibleProjectGroupIDs
-        let shouldShowToggle = selectedContentScope == .projects && !projectGroupIDs.isEmpty
+        let shouldShowToggle = taskViewMode == .projects
+            && selectedContentScope == .projects && !projectGroupIDs.isEmpty
         let areAllCollapsed = areAllProjectFoldersCollapsed(projectGroupIDs)
         let shouldShowSyncStatus = SidebarThreadsLoadingPresentation.shouldShowInlineStatus(
             isLoadingThreads: codex.isLoadingThreads,
@@ -717,9 +746,11 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
 
                 Spacer(minLength: 0)
             } else {
-                SidebarContentScopePicker(selection: $selectedContentScope)
-                    .fixedSize(horizontal: true, vertical: false)
-                    .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                if taskViewMode == .projects {
+                    SidebarContentScopePicker(selection: $selectedContentScope)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                }
 
                 Spacer(minLength: 0)
 
@@ -769,7 +800,7 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
 }
 
 private extension SidebarView {
-    static var isSidebarDebugLoggingEnabled: Bool { false }
+    static var isSidebarDebugLoggingEnabled: Bool { AppEnvironment.verboseDiagnosticsEnabled }
 }
 
 private enum SidebarPresentedSheet: String, Identifiable {

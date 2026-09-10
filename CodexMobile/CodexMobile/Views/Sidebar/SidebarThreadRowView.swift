@@ -7,6 +7,8 @@ import SwiftUI
 import UIKit
 
 struct SidebarThreadRowView: View {
+    var taskViewMode: SidebarTaskViewMode = .projects
+    var activityDiffTotals: GitDiffTotals? = nil
     let thread: CodexThread
     let isSelected: Bool
     let runBadgeState: CodexThreadRunBadgeState?
@@ -26,17 +28,22 @@ struct SidebarThreadRowView: View {
     // environment values do NOT propagate through a representable-built
     // host, so without this re-injection `SidebarSubagentNameLabel` would
     // fault on `@Environment(CodexService.self)` inside the wrapped row.
-    // The row body itself never touches any property on `codex`, so the
-    // "no service observation in the parent row" invariant documented on
-    // `SidebarSubagentNameLabel` is preserved (only that nested label
-    // subscribes to `codex.subagentIdentityVersion`).
+    // The row body itself never touches any property on `codex`; nested
+    // labels subscribe to identity or runtime state inside that host.
     @Environment(CodexService.self) private var codex
 
     @State private var renamePrompt = ThreadRenamePromptState()
 
     var body: some View {
         Group {
-            if thread.isSubagent {
+            if taskViewMode == .activity {
+                SidebarActivityRowContent(
+                    thread: thread,
+                    projectLabel: pinnedProjectLabel,
+                    diffTotals: activityDiffTotals,
+                    onTap: onTap
+                )
+            } else if thread.isSubagent {
                 subagentRow
             } else {
                 parentRow

@@ -187,9 +187,8 @@ async function gitStatus(cwd) {
   const localOnlyCommitCount = await countLocalOnlyCommits(cwd, { detached: snapshot.detached }).catch(() => 0);
   const state = computeState(dirty, ahead, behind, snapshot.detached, noUpstream);
   const canPush = hasPushRemote && hasHeadCommit && (ahead > 0 || noUpstream) && !snapshot.detached;
-  const diff = await repoDiffTotals(cwd, {
+  const diff = await repoDiffTotals(snapshot.repoRoot || cwd, {
     tracking: snapshot.tracking,
-    fileLines: snapshot.fileLines,
   }).catch(() => ({ additions: 0, deletions: 0, binaryFiles: 0 }));
 
   return {
@@ -270,17 +269,14 @@ async function gitInit(cwd) {
 // ─── Git Diff ─────────────────────────────────────────────────
 
 async function gitDiff(cwd) {
+  cwd = await resolveRepoRoot(cwd);
   const porcelain = await git(cwd, "status", "--porcelain=v1", "-b");
   const lines = porcelain.trim().split("\n").filter(Boolean);
   const branchLine = lines[0] || "";
-  const fileLines = lines.slice(1);
   const tracking = parseTrackingFromStatus(branchLine);
   const baseRef = await resolveRepoDiffBase(cwd, tracking);
   const trackedPatch = await gitDiffAgainstBase(cwd, baseRef);
-  const untrackedPaths = fileLines
-    .filter((line) => line.startsWith("?? "))
-    .map((line) => line.substring(3).trim())
-    .filter(Boolean);
+  const untrackedPaths = await repoUntrackedPaths(cwd);
   const untrackedPatch = await diffPatchForUntrackedFiles(cwd, untrackedPaths);
   const patch = [trackedPatch.trim(), untrackedPatch.trim()].filter(Boolean).join("\n\n").trim();
   return { patch };
@@ -2352,10 +2348,7 @@ function scopedLocalCheckoutPath(checkoutRootPath, projectRelativePath) {
 async function repoDiffTotals(cwd, context) {
   const baseRef = await resolveRepoDiffBase(cwd, context.tracking);
   const trackedTotals = await diffTotalsAgainstBase(cwd, baseRef);
-  const untrackedPaths = context.fileLines
-    .filter((line) => line.startsWith("?? "))
-    .map((line) => line.substring(3).trim())
-    .filter(Boolean);
+  const untrackedPaths = await repoUntrackedPaths(cwd);
   const untrackedTotals = await diffTotalsForUntrackedFiles(cwd, untrackedPaths);
 
   return {
@@ -2363,6 +2356,13 @@ async function repoDiffTotals(cwd, context) {
     deletions: trackedTotals.deletions + untrackedTotals.deletions,
     binaryFiles: trackedTotals.binaryFiles + untrackedTotals.binaryFiles,
   };
+}
+
+// Porcelain collapses new directories and quotes filenames. Ask Git for the
+// individual paths so the summary and Changes patch include every new file.
+async function repoUntrackedPaths(repoRoot) {
+  const output = await git(repoRoot, "ls-files", "--others", "--exclude-standard", "-z");
+  return output.split("\0").filter(Boolean);
 }
 
 // Uses upstream when available; otherwise falls back to commits not yet present on any remote.

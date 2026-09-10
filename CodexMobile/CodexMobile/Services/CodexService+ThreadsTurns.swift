@@ -1189,6 +1189,10 @@ extension CodexService {
                 // Avoid the server's narrower default sourceKinds so multi-project history
                 // includes threads started from the app-server flow as well.
                 "sourceKinds": .array(threadListSourceKinds.map(JSONValue.string)),
+                // Desktop's catalog also contains sessions that a rollout scan
+                // can temporarily omit. Read the same indexed metadata across providers.
+                "useStateDbOnly": .bool(true),
+                "modelProviders": .array([]),
                 // The app-server defaults to created_at, which can exclude an old thread
                 // with recent activity from this capped sidebar window.
                 "sortKey": .string("updated_at"),
