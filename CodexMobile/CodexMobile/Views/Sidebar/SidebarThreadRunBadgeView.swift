@@ -12,11 +12,14 @@ struct SidebarThreadRunBadgeView: View {
     private static let statusDotSize: CGFloat = 10.5
 
     let state: CodexThreadRunBadgeState
+    var spinnerSize: CGFloat = 13
 
     var body: some View {
         switch state {
         case .running:
-            RunningThreadSpinner(size: 13)
+            RunningThreadSpinner(size: spinnerSize)
+                .accessibilityHidden(false)
+                .accessibilityLabel("Running")
         case .waitingOnUser:
             statusDot(color: .yellow, label: "Waiting for your response")
         case .ready:

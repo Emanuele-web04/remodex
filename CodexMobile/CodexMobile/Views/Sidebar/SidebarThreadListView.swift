@@ -1,11 +1,15 @@
 // FILE: SidebarThreadListView.swift
-// Purpose: Renders sidebar project/rootless thread groups and empty states.
+// Purpose: Renders Activity rows, project/rootless groups, and empty states.
 // Layer: View Component
 // Exports: SidebarThreadListView
 
 import SwiftUI
 
 struct SidebarThreadListView: View {
+    var taskViewMode: SidebarTaskViewMode = .projects
+    var activityThreads: [CodexThread] = []
+    var isActivityVisible: Bool = true
+    var activityRefreshGeneration: Int = 0
     var isFiltering: Bool = false
     let isConnected: Bool
     let isCreatingThread: Bool
@@ -45,12 +49,22 @@ struct SidebarThreadListView: View {
                     .font(AppFont.subheadline())
                     .padding(.horizontal, 16)
                     .padding(.top, 20)
-            } else if groups.flatMap(\.threads).isEmpty && isFiltering {
+            } else if (taskViewMode == .activity ? activityThreads.isEmpty : groups.flatMap(\.threads).isEmpty)
+                        && isFiltering {
                 Text(emptyFilterTitle)
                     .foregroundStyle(.secondary)
                     .font(AppFont.subheadline())
                     .padding(.horizontal, 16)
                     .padding(.top, 20)
+            } else if taskViewMode == .activity {
+                SidebarActivityListView(
+                    threads: activityThreads,
+                    isVisible: isActivityVisible,
+                    refreshGeneration: activityRefreshGeneration
+                ) { thread, totals in
+                    threadRow(thread, showsProjectLabel: true, activityDiffTotals: totals)
+                }
+                .id("\(codex.currentMacScopedPersistenceDeviceId ?? "local"):\(codex.isConnected)")
             } else {
                 ForEach(groups) { group in
                     groupSection(group)
@@ -298,6 +312,8 @@ struct SidebarThreadListView: View {
     private func threadRow(
         _ thread: CodexThread,
         isPinnedRow: Bool = false,
+        showsProjectLabel: Bool = false,
+        activityDiffTotals: GitDiffTotals? = nil,
         childSubagentCount: Int = 0,
         isSubagentExpanded: Bool = false,
         onToggleSubagents: (() -> Void)? = nil
@@ -305,15 +321,19 @@ struct SidebarThreadListView: View {
         let isSelected = selectedThread?.id == thread.id
 
         return SidebarThreadRowView(
+            taskViewMode: taskViewMode,
+            activityDiffTotals: activityDiffTotals,
             thread: thread,
             isSelected: isSelected,
             runBadgeState: runBadgeStateByThreadID[thread.id],
             isPinned: codex.isThreadPinned(thread.id),
-            pinnedProjectLabel: isPinnedRow && !SidebarThreadGrouping.isRootlessChatThread(
+            pinnedProjectLabel: (isPinnedRow || showsProjectLabel) && !SidebarThreadGrouping.isRootlessChatThread(
                 thread,
                 projectlessRootPaths: projectlessRootPaths
             )
-                ? thread.projectDisplayName
+                ? (taskViewMode == .activity
+                    ? thread.projectGroupPath.map { URL(fileURLWithPath: $0).lastPathComponent }
+                    : thread.projectDisplayName)
                 : nil,
             childSubagentCount: childSubagentCount,
             isSubagentExpanded: isSubagentExpanded,
@@ -334,6 +354,9 @@ struct SidebarThreadListView: View {
 
     // Preloads metadata only for subagent rows that are currently reachable in the sidebar tree.
     private var visibleSubagentThreadIDs: [String] {
+        if taskViewMode == .activity {
+            return activityThreads.filter(\.isSubagent).map(\.id)
+        }
         var visibleThreadIDs: [String] = []
 
         for group in groups {
@@ -592,9 +615,14 @@ private enum SidebarThreadListPreviewFixtures {
 
 @MainActor
 @ViewBuilder
-private func sidebarThreadBlockPreviewBody() -> some View {
+private func sidebarThreadBlockPreviewBody(taskViewMode: SidebarTaskViewMode = .projects) -> some View {
     ScrollView {
         SidebarThreadListView(
+            taskViewMode: taskViewMode,
+            activityThreads: SidebarThreadGrouping.activityThreads(
+                from: SidebarThreadListPreviewFixtures.allThreads,
+                runBadgeStateByThreadID: SidebarThreadListPreviewFixtures.runBadges
+            ),
             isConnected: true,
             isCreatingThread: false,
             threads: SidebarThreadListPreviewFixtures.allThreads,
@@ -622,4 +650,8 @@ private func sidebarThreadBlockPreviewBody() -> some View {
 #Preview("Sidebar Thread Block — Light") {
     sidebarThreadBlockPreviewBody()
         .preferredColorScheme(.light)
+}
+
+#Preview("Sidebar Activity") {
+    sidebarThreadBlockPreviewBody(taskViewMode: .activity)
 }

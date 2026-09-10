@@ -396,6 +396,58 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertEqual(userRows.first?.text, "stessa richiesta")
     }
 
+    func testDesktopMetadataForSixChatsOnlyShowsTwoActualRunningTurns() async {
+        let service = makeService()
+        service.isConnected = true
+        service.isInitialized = true
+        service.activeThreadId = nil
+        let threadIDs = (0..<6).map { _ in "thread-\(UUID().uuidString)" }
+        var methods: [String] = []
+        service.requestTransportOverride = { method, _ in
+            methods.append(method)
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object(["data": .array([])]),
+                includeJSONRPC: false
+            )
+        }
+
+        for threadID in threadIDs {
+            service.handleNotification(method: "thread/started", params: .object([
+                "threadId": .string(threadID),
+                "remodexDesktopMirror": .bool(true),
+                "remodexDesktopIpcMirror": .bool(true),
+                "thread": .object([
+                    "id": .string(threadID),
+                    "name": .string("Existing Desktop chat"),
+                    "status": .object(["type": .string("idle")]),
+                    "turns": .array([.object([
+                        "id": .string("old-\(threadID)"),
+                        "status": .string("completed"),
+                        "items": .array([]),
+                    ])]),
+                ]),
+            ]))
+        }
+        await flushAsyncSideEffects()
+        XCTAssertTrue(threadIDs.allSatisfy { service.threadRunBadgeState(for: $0) == nil })
+        XCTAssertNil(service.activeThreadId, "Desktop metadata must not select a chat on the phone")
+
+        for threadID in threadIDs.prefix(2) {
+            service.handleNotification(method: "turn/started", params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string("live-\(threadID)"),
+                "remodexDesktopMirror": .bool(true),
+                "remodexBackgroundDiscovery": .bool(true),
+            ]))
+        }
+        await flushAsyncSideEffects()
+        XCTAssertEqual(threadIDs.filter { service.threadRunBadgeState(for: $0) == .running },
+                       Array(threadIDs.prefix(2)))
+        XCTAssertFalse(methods.contains { ["thread/read", "thread/resume", "thread/turns/list"].contains($0) },
+                       "Sidebar metadata and lifecycle must not eagerly load chat histories")
+    }
+
     // A mirrored item/completed proves finished work: an idle Desktop thread
     // mirroring its prompt this way must not light up the running indicator.
     func testDesktopMirroredItemCompletedAloneDoesNotMarkThreadRunning() {

@@ -12,6 +12,7 @@ import SwiftUI
 struct SidebarThreadStatusIcon: View {
     let thread: CodexThread
     let pointSize: CGFloat
+    var prioritizesWorktree: Bool = false
 
     var body: some View {
         Group {
@@ -26,6 +27,7 @@ struct SidebarThreadStatusIcon: View {
     // on every nested row and hide the worktree scope that actually varies.
     private var showsForkBadge: Bool {
         thread.isForkedThread && !thread.isSubagent
+            && !(prioritizesWorktree && thread.isManagedWorktreeProject)
     }
 
     @ViewBuilder

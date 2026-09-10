@@ -68,6 +68,12 @@ const {
 } = require("./desktop-ipc-action-follower");
 const { createDesktopIpcLiveOwner } = require("./desktop-ipc-live-owner");
 const { createThreadRuntimeSettingsStore } = require("./thread-runtime-settings-store");
+const {
+  APP_SERVER_SOURCE,
+  DESKTOP_IPC_SOURCE,
+  createThreadActivityProjector,
+} = require("./thread-activity-projector");
+const { createThreadActivityStore } = require("./thread-activity-store");
 const { createThreadListProvenanceEnricher } = require("./thread-list-provenance");
 const { createWorktreeOriginEnricher } = require("./worktree-origin");
 const { forEachThreadRowInResponse } = require("./thread-row-enrichment");
@@ -784,6 +790,13 @@ function startBridge({
   const threadRuntimeSettingsStore = createThreadRuntimeSettingsStore();
   const threadListProvenanceEnricher = createThreadListProvenanceEnricher();
   const worktreeOriginEnricher = createWorktreeOriginEnricher();
+  const activityProjector = createThreadActivityProjector();
+  const activityStore = createThreadActivityStore({
+    sendApplicationResponse,
+    onEvict(threadId, source) {
+      activityProjector.forget(threadId, source);
+    },
+  });
   const trackedForwardedRequestMethods = new Set([
     "account/login/start",
     "account/login/cancel",
@@ -813,6 +826,7 @@ function startBridge({
       sendRelayRegistrationUpdate(nextDeviceState);
     },
     onSecureSessionReady(session) {
+      activityStore.resetSubscriber();
       activePhoneSummary = buildActivePhoneSummary(session, deviceState);
       const lastPublishedBridgeStatus = bridgeStatusPublisher.latest();
       if (lastPublishedBridgeStatus) {
@@ -865,6 +879,7 @@ function startBridge({
       onFollowerStateChanged(threadId, following) {
         desktopRefresher.handleFollowerStateChanged(threadId, following);
       },
+      onActivityObservation: handleDesktopActivityObservation,
     })
     : null;
   const desktopIpcLiveOwner = !config.codexEndpoint
@@ -969,6 +984,7 @@ function startBridge({
     clearRelayWatchdog();
     bridgeStatusPublisher.stopHeartbeat();
     stopContextUsageWatcher();
+    activityStore.dispose();
     rolloutLiveMirror?.stopAll();
     desktopIpcActionFollower?.stopAll();
     desktopIpcLiveOwner?.stopAll();
@@ -1167,6 +1183,7 @@ function startBridge({
     trackCodexHandshakeState(message, parsedMessage);
     desktopRefresher.handleOutbound(message, parsedMessage);
     desktopIpcLiveOwner?.observeOutbound(message, parsedMessage);
+    observeAppServerActivity(parsedMessage);
     pushNotificationTracker.handleOutbound(message, parsedMessage);
     rememberThreadFromMessage("codex", message, parsedMessage);
     secureTransport.queueOutboundApplicationMessage(
@@ -1176,6 +1193,7 @@ function startBridge({
   });
 
   codex.onClose(() => {
+    activityStore.markSourceStale(APP_SERVER_SOURCE);
     const wasShuttingDown = isShuttingDown;
     clearRelayWatchdog();
     bridgeStatusPublisher.stopHeartbeat();
@@ -1208,6 +1226,9 @@ function startBridge({
   // Routes decrypted app payloads through the same bridge handlers as before.
   function handleApplicationMessage(rawMessage) {
     const parsedMessage = parseBridgeMessage(rawMessage);
+    if (activityStore.handleRequest(parsedMessage)) {
+      return;
+    }
     if (handleBridgeManagedHandshakeMessage(rawMessage, sendApplicationResponse, parsedMessage)) {
       return;
     }
@@ -1311,6 +1332,58 @@ function startBridge({
       return JSON.parse(rawMessage);
     } catch {
       return null;
+    }
+  }
+
+  function observeAppServerActivity(message) {
+    if (isShuttingDown) {
+      return;
+    }
+    const projection = activityProjector.observeAppServer(message);
+    if (projection?.entry) {
+      const entry = projection.entry;
+      const previous = activityStore.get(entry.threadId);
+      if (previous?.source === DESKTOP_IPC_SOURCE
+          && !desktopIpcLiveOwner?.isThreadOwned(entry.threadId)) {
+        // Catalog changes do not transfer runtime ownership to this app-server.
+        if (message.method === "thread/name/updated" || message.method === "thread/started") {
+          activityStore.upsert({
+            ...previous,
+            ...(entry.title ? { title: entry.title } : {}),
+            ...(entry.cwd ? { cwd: entry.cwd } : {}),
+          });
+        }
+        return;
+      }
+      activityStore.upsert({
+        ...(previous?.title ? { title: previous.title } : {}),
+        ...(previous?.cwd ? { cwd: previous.cwd } : {}),
+        ...entry,
+      });
+    } else if (projection?.removedThreadId) {
+      activityStore.remove(projection.removedThreadId);
+    }
+  }
+
+  function handleDesktopActivityObservation(observation) {
+    if (isShuttingDown) {
+      return;
+    }
+    if (observation?.type === "state") {
+      const entry = activityProjector.projectDesktopState(
+        observation.threadId,
+        observation.state,
+        observation.sourceGeneration
+      );
+      activityStore.upsert(entry);
+      return;
+    }
+    if (observation?.type === "disconnected") {
+      activityStore.markSourceStale(DESKTOP_IPC_SOURCE, observation.sourceGeneration);
+      return;
+    }
+    if (observation?.type === "removed") {
+      activityStore.remove(observation.threadId, { source: DESKTOP_IPC_SOURCE });
     }
   }
 
@@ -1642,6 +1715,9 @@ function startBridge({
     if (relaySanitizedRequestMethods.has(method)) {
       const trackedRequest = {
         method,
+        isActiveThreadCatalog: method === "thread/list"
+          && parsed.params?.archived !== true
+          && !parsed.params?.cursor,
         threadId: method === "thread/turns/list" || method === "thread/read" || method === "thread/resume"
           ? threadIdFromRequestParams(parsed.params)
           : "",
@@ -1700,6 +1776,9 @@ function startBridge({
         worktreeOriginEnricher.attachToThread(thread);
       });
       normalizedMessage = JSON.stringify(parsed);
+      if (trackedRequest.isActiveThreadCatalog) {
+        desktopIpcActionFollower?.observeThreadListResponse(parsed.result);
+      }
     }
 
     return sanitizeThreadHistoryImagesForRelay(normalizedMessage, trackedRequest.method, trackedRequest);

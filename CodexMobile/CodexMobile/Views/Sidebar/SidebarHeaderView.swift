@@ -26,6 +26,7 @@ struct SidebarOverflowMenuActions {
 }
 
 struct SidebarHeaderView: View {
+    @Binding var taskViewMode: SidebarTaskViewMode
     var showsCloseButton: Bool = true
     var onClose: () -> Void
     var overflowActions: SidebarOverflowMenuActions
@@ -139,6 +140,20 @@ struct SidebarHeaderView: View {
     private func buildOverflowMenu() -> UIMenu {
         var sections: [UIMenuElement] = [
             UIMenu(
+                title: "View",
+                options: [.displayInline, .singleSelection],
+                children: SidebarTaskViewMode.allCases.map { mode in
+                    UIAction(
+                        title: mode.title,
+                        image: RemodexIcon.menuUIImage(systemName: mode.iconSystemName),
+                        state: taskViewMode == mode ? .on : .off
+                    ) { _ in
+                        HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                        taskViewMode = mode
+                    }
+                }
+            ),
+            UIMenu(
                 title: "",
                 options: [.displayInline],
                 children: [
@@ -214,7 +229,9 @@ struct SidebarHeaderView: View {
 
 #if DEBUG
 #Preview {
+    @Previewable @State var taskViewMode: SidebarTaskViewMode = .projects
     SidebarHeaderView(
+        taskViewMode: $taskViewMode,
         onClose: {},
         overflowActions: SidebarOverflowMenuActions(
             isEnabled: true,

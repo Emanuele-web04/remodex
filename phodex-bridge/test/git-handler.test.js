@@ -89,6 +89,53 @@ test("gitStatus reports non-repository directories without failing", async () =>
   }
 });
 
+test("Git totals and Changes include nested untracked files with quoted names, excluding ignored files", async () => {
+  const repoDir = makeTempRepo();
+  try {
+    fs.writeFileSync(path.join(repoDir, ".gitignore"), "ignored/\n");
+    git(repoDir, "add", ".gitignore");
+    git(repoDir, "commit", "-m", "Ignore local output");
+    git(repoDir, "update-ref", "refs/remotes/origin/main", "HEAD");
+    fs.appendFileSync(path.join(repoDir, "README.md"), "tracked addition\n");
+    fs.unlinkSync(path.join(repoDir, "phodex-bridge/src/index.js"));
+    fs.mkdirSync(path.join(repoDir, "new folder"));
+    fs.writeFileSync(path.join(repoDir, 'new folder/naïve "file".txt'), "nested one\nnested two\n");
+    fs.writeFileSync(path.join(repoDir, "new folder/line\nbreak.txt"), "unusual name\n");
+    fs.writeFileSync(path.join(repoDir, "new folder/binary.bin"), Buffer.from([0, 1, 2, 3]));
+    fs.mkdirSync(path.join(repoDir, "ignored"));
+    fs.writeFileSync(path.join(repoDir, "ignored/output.txt"), "must stay ignored\n");
+
+    const status = await gitStatus(repoDir);
+    assert.deepEqual(status.diff, { additions: 4, deletions: 1, binaryFiles: 1 });
+    const response = await new Promise((resolve) => {
+      handleGitRequest(JSON.stringify({ id: 1, method: "git/diff", params: { cwd: repoDir } }), (raw) => resolve(JSON.parse(raw)));
+    });
+    assert.equal(response.error, undefined);
+    assert.match(response.result.patch, /\+nested one/);
+    assert.match(response.result.patch, /\+unusual name/);
+    assert.match(response.result.patch, /GIT binary patch/);
+    assert.doesNotMatch(response.result.patch, /must stay ignored/);
+  } finally {
+    fs.rmSync(repoDir, { recursive: true, force: true });
+  }
+});
+
+test("Git totals use the checkout root when a task cwd is a project subdirectory", async () => {
+  const repoDir = makeTempRepo();
+  try {
+    fs.mkdirSync(path.join(repoDir, "new folder"));
+    fs.writeFileSync(path.join(repoDir, "new folder/outside-project.txt"), "outside project\n");
+    fs.writeFileSync(path.join(repoDir, "phodex-bridge/inside-project.txt"), "inside project\n");
+    const rootStatus = await gitStatus(repoDir);
+    const nestedStatus = await gitStatus(path.join(repoDir, "phodex-bridge"));
+    assert.deepEqual(nestedStatus.diff, rootStatus.diff);
+    // This repository has no remote, so its initial two lines are also local changes.
+    assert.equal(rootStatus.diff.additions, 4);
+  } finally {
+    fs.rmSync(repoDir, { recursive: true, force: true });
+  }
+});
+
 test("gitInit creates a main unborn branch without committing files", async () => {
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-git-handler-init-"));
 

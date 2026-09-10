@@ -419,6 +419,7 @@ extension CodexService {
     // Mirrored metadata/lifecycle events describe list or prompt state, not live
     // desktop work; they must never mark a thread as running.
     private static let nonActivityDesktopMirrorMethods: Set<String> = [
+        "thread/started",
         "thread/archived",
         "thread/unarchived",
         "thread/replaced",
@@ -632,10 +633,15 @@ extension CodexService {
         }
 
         upsertThread(thread, treatAsServerState: true)
-        if activeThreadId == nil {
+        let isDesktopMetadata = isDesktopMirroredBridgeEvent(paramsObject)
+        if activeThreadId == nil, !isDesktopMetadata {
             activeThreadId = thread.id
         }
-        requestImmediateSync(threadId: thread.id)
+        // Desktop can publish thread metadata for every mounted chat. Refresh
+        // history only for the phone's open chat; metadata is not a new run.
+        if !isDesktopMetadata || thread.id == activeThreadId {
+            requestImmediateSync(threadId: thread.id)
+        }
     }
 
     // Mirrors desktop behavior: when server pushes a thread rename, update local

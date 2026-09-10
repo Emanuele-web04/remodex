@@ -774,6 +774,238 @@ test("bridge observes held desktop IPC turns only after local fallback", async (
   assert.equal(fakeCodex.sent.filter((message) => message.id === "held-turn-start").length, 1);
 });
 
+test("bridge Activity is opt-in and canonical-only endpoints need no Desktop IPC", async (t) => {
+  const relayServer = new WebSocket.Server({ port: 0 });
+  const relayMessages = [];
+  let relaySocket = null;
+  let bridge = null;
+  let fakeCodex = null;
+
+  await new Promise((resolve) => relayServer.once("listening", resolve));
+  relayServer.on("connection", (socket) => {
+    relaySocket = socket;
+    socket.on("message", (data) => relayMessages.push(JSON.parse(data.toString("utf8"))));
+  });
+  const { startBridge } = loadBridgeWithTestDoubles({
+    createCodexTransportImpl() {
+      fakeCodex = createFakeCodexTransport();
+      return fakeCodex;
+    },
+  });
+  t.after(() => {
+    bridge?.stop();
+    relaySocket?.close();
+    relayServer.close();
+  });
+
+  bridge = startBridge({
+    printPairingQr: false,
+    config: bridgeTestConfig(relayServer, { codexEndpoint: "ws://fake-codex" }),
+  });
+  await waitFor(() => relaySocket?.readyState === WebSocket.OPEN);
+
+  fakeCodex.emitMessage({
+    method: "thread/started",
+    params: {
+      thread: {
+        id: "canonical-thread",
+        name: "Canonical task",
+        cwd: "/repo/canonical",
+        status: { type: "idle" },
+      },
+    },
+  });
+  await waitFor(() => relayMessages.some((message) => message.method === "thread/started"));
+  assert.equal(
+    relayMessages.some((message) => message.method === "remodex/activity/updated"),
+    false
+  );
+
+  relaySocket.send(JSON.stringify({
+    id: 91,
+    method: "remodex/activity/subscribe",
+    params: { schemaVersion: 1 },
+  }));
+  const snapshot = await waitForMessage(relayMessages, (message) => message.id === 91);
+  assert.equal(snapshot.result.entries[0].threadId, "canonical-thread");
+  assert.equal(snapshot.result.entries[0].source, "app-server");
+  assert.equal(fakeCodex.sent.some((message) => message.id === 91), false);
+
+  fakeCodex.emitMessage({
+    method: "turn/started",
+    params: {
+      threadId: "canonical-thread",
+      turn: { id: "canonical-turn", status: "inProgress", startedAt: 1_700_000_000 },
+    },
+  });
+  const update = await waitForMessage(
+    relayMessages,
+    (message) => message.method === "remodex/activity/updated"
+  );
+  assert.equal(update.params.baseRevision, snapshot.result.revision);
+  assert.deepEqual(update.params.upserts[0].activeTurnIds, ["canonical-turn"]);
+
+  relaySocket.send(JSON.stringify({
+    id: "stop-activity",
+    method: "remodex/activity/unsubscribe",
+  }));
+  await waitForMessage(relayMessages, (message) => message.id === "stop-activity");
+  const activityCount = relayMessages.filter(
+    (message) => message.method === "remodex/activity/updated"
+  ).length;
+  fakeCodex.emitMessage({
+    method: "item/started",
+    params: {
+      threadId: "canonical-thread",
+      turnId: "canonical-turn",
+      item: { id: "reasoning", type: "reasoning", content: ["private"] },
+      startedAtMs: 1_700_000_000_100,
+    },
+  });
+  await wait(250);
+  assert.equal(
+    relayMessages.filter((message) => message.method === "remodex/activity/updated").length,
+    activityCount
+  );
+});
+
+test("Activity subscribe performs no reads and snapshots an unopened Desktop thread", async (t) => {
+  const { tempDir, socketPath: ipcSocketPath } = createIpcTestSocket("remodex-activity-ipc-");
+  const relayServer = new WebSocket.Server({ port: 0 });
+  const ipcServer = net.createServer();
+  const relayMessages = [];
+  const ipcFrames = [];
+  let relaySocket = null;
+  let ipcSocket = null;
+  let bridge = null;
+  let fakeCodex = null;
+
+  await new Promise((resolve) => relayServer.once("listening", resolve));
+  await new Promise((resolve) => ipcServer.listen(ipcSocketPath, resolve));
+  relayServer.on("connection", (socket) => {
+    relaySocket = socket;
+    socket.on("message", (data) => relayMessages.push(JSON.parse(data.toString("utf8"))));
+  });
+  ipcServer.on("connection", (socket) => {
+    ipcSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      ipcFrames.push(frame);
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "desktop",
+          result: { clientId: "activity-test" },
+        });
+      }
+    });
+  });
+  const { startBridge } = loadBridgeWithTestDoubles({
+    createCodexTransportImpl() {
+      fakeCodex = createFakeCodexTransport();
+      return fakeCodex;
+    },
+  });
+  t.after(() => {
+    bridge?.stop();
+    relaySocket?.close();
+    ipcSocket?.destroy();
+    ipcServer.close();
+    relayServer.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  bridge = startBridge({
+    printPairingQr: false,
+    config: bridgeTestConfig(relayServer, {
+      desktopIpcSocketPath: ipcSocketPath,
+      desktopIpcLiveSyncEnabled: false,
+    }),
+  });
+  await waitFor(() => relaySocket?.readyState === WebSocket.OPEN);
+  relaySocket.send(JSON.stringify({ id: "activity-first", method: "remodex/activity/subscribe" }));
+  await waitForMessage(relayMessages, (message) => message.id === "activity-first");
+  await wait(20);
+  assert.equal(ipcSocket, null, "Activity subscription must not connect to Desktop IPC");
+  assert.equal(fakeCodex.sent.some((message) => message.id === "activity-first"), false);
+
+  relaySocket.send(JSON.stringify({ id: "existing-sidebar", method: "thread/list", params: {} }));
+  await waitFor(() => fakeCodex.sent.some((message) => message.id === "existing-sidebar"));
+  fakeCodex.emitMessage({
+    id: "existing-sidebar",
+    result: { data: [{ id: "unopened-desktop-thread", cwd: "/repo/desktop" }] },
+  });
+  await waitFor(() => ipcFrames.some((frame) => (
+    frame.method === "thread-stream-following-changed"
+      && frame.params?.conversationId === "unopened-desktop-thread"
+      && frame.params.following
+  )));
+  writeFrame(ipcSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop",
+    version: 11,
+    params: {
+      conversationId: "unopened-desktop-thread",
+      change: {
+        type: "snapshot",
+        conversationState: {
+          title: "Unopened Desktop task",
+          cwd: "/repo/desktop",
+          threadRuntimeStatus: { type: "active", activeFlags: [] },
+          hasUnreadTurn: true,
+          unreadMessageCount: 2,
+          requests: [],
+          turns: [{
+            id: "desktop-turn",
+            status: "inProgress",
+            turnStartedAtMs: 1_700_000_000_500,
+            items: [{
+              id: "desktop-tool",
+              type: "mcpToolCall",
+              arguments: { secret: "not relayed" },
+            }],
+          }],
+        },
+      },
+    },
+  });
+  const update = await waitForMessage(
+    relayMessages,
+    (message) => message.method === "remodex/activity/updated"
+      && message.params?.upserts?.[0]?.threadId === "unopened-desktop-thread"
+  );
+  assert.equal(update.params.upserts[0].source, "desktop-ipc");
+  assert.equal(update.params.upserts[0].runtime, "active");
+  assert.equal(JSON.stringify(update).includes("not relayed"), false);
+  assert.deepEqual(
+    ipcFrames.map((frame) => frame.method).filter(Boolean),
+    ["initialize", "thread-stream-following-changed"]
+  );
+  relaySocket.send(JSON.stringify({ id: "archived-sidebar", method: "thread/list", params: { archived: true } }));
+  await waitFor(() => fakeCodex.sent.some((message) => message.id === "archived-sidebar"));
+  fakeCodex.emitMessage({ id: "archived-sidebar", result: { data: [{ id: "archived-thread" }] } });
+  await waitForMessage(relayMessages, (message) => message.id === "archived-sidebar");
+  assert.equal(ipcFrames.length, 2, "archived lists must not change active subscriptions");
+  fakeCodex.emitMessage({
+    method: "thread/name/updated",
+    params: { threadId: "unopened-desktop-thread", threadName: "Renamed task" },
+  });
+  fakeCodex.emitMessage({
+    method: "thread/status/changed",
+    params: { threadId: "unopened-desktop-thread", status: { type: "notLoaded" } },
+  });
+  const renamed = await waitForMessage(relayMessages, (message) => (
+    message.method === "remodex/activity/updated"
+      && message.params?.upserts?.[0]?.title === "Renamed task"
+  ));
+  assert.equal(renamed.params.upserts[0].source, "desktop-ipc");
+  assert.equal(renamed.params.upserts[0].runtime, "active");
+  assert.equal(renamed.params.upserts[0].desktopUnread.hasUnreadTurn, true);
+});
+
 // Loads bridge.js with plaintext test transports while leaving the production module untouched.
 function loadBridgeWithTestDoubles({
   createCodexTransportImpl,
@@ -897,12 +1129,33 @@ function createFakeCodexTransport({
       listeners.started = handler;
       setImmediate(() => handler({ mode: "test" }));
     },
+    emitMessage(message) {
+      listeners.message?.(JSON.stringify(message));
+    },
     shutdown() {
       this.emitClose();
     },
     emitClose() {
       listeners.close?.();
     },
+  };
+}
+
+function bridgeTestConfig(relayServer, overrides = {}) {
+  return {
+    relayUrl: `ws://127.0.0.1:${relayServer.address().port}`,
+    pushServiceUrl: "",
+    pushPreviewMaxChars: 160,
+    refreshEnabled: false,
+    desktopAutoFollowEnabled: false,
+    refreshDebounceMs: 1,
+    keepMacAwakeEnabled: false,
+    codexEndpoint: "",
+    refreshCommand: "",
+    codexBundleId: "",
+    codexAppPath: "",
+    desktopIpcLiveSyncEnabled: false,
+    ...overrides,
   };
 }
 

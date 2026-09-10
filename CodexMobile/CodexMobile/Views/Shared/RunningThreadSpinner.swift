@@ -39,6 +39,9 @@ struct RunningThreadSpinner: View {
         .onAppear {
             isSpinning = true
         }
+        .onDisappear {
+            isSpinning = false
+        }
         .accessibilityHidden(true)
     }
 }

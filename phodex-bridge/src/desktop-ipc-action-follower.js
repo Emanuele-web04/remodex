@@ -6,6 +6,7 @@
 
 const { createHash } = require("crypto");
 const net = require("net");
+const { projectSemanticItem } = require("./thread-activity-projector");
 
 const {
   createDesktopConversationProjector,
@@ -242,9 +243,11 @@ function createDesktopIpcActionFollower({
   clearTimeoutFn = clearTimeout,
   onNormalizedHistoryIndexRebuilt = () => {},
   onFollowerStateChanged = null,
+  onActivityObservation = null,
   requestTimeoutMs = REQUEST_TIMEOUT_MS,
   ownershipProbeTimeoutMs = OWNERSHIP_PROBE_TIMEOUT_MS,
 } = {}) {
+  let desktopSourceGeneration = 0;
   const ipc = createDesktopIpcClient({
     socketPath,
     netModule,
@@ -253,6 +256,11 @@ function createDesktopIpcActionFollower({
     logPrefix,
     onEnvelope,
     onConnected() {
+      desktopSourceGeneration += 1;
+      onActivityObservation?.({
+        type: "connected",
+        sourceGeneration: desktopSourceGeneration,
+      });
       announceDesktopFollowForActiveThreads();
       probeHeldFollowerRequests();
     },
@@ -276,6 +284,7 @@ function createDesktopIpcActionFollower({
   const pendingRoutesByRequestId = new Map();
   const activeThreadIds = new Set();
   const desktopFollowThreadIds = new Set();
+  const backgroundCatalogThreadIds = new Set();
   const followerClientIdsByThreadId = new Map();
   // Threads discovered from Litter snapshots before the phone reads them.
   // Their raw state is retained for lifecycle detection, but their transcript
@@ -314,6 +323,7 @@ function createDesktopIpcActionFollower({
   }
 
   function unfollowDesktopThread(threadId) {
+    backgroundCatalogThreadIds.delete(threadId);
     if (!desktopFollowThreadIds.delete(threadId)) {
       return false;
     }
@@ -326,6 +336,38 @@ function createDesktopIpcActionFollower({
 
   function announceDesktopFollowForActiveThreads() {
     for (const threadId of desktopFollowThreadIds) {
+      followDesktopThread(threadId);
+    }
+  }
+
+  // Current Desktop sends initial snapshots only to explicit followers. Warm a
+  // bounded recent catalog window without opening chats or claiming a writer.
+  // The existing background path forwards lifecycle only, never transcript items.
+  function observeThreadListResponse(result) {
+    const rows = result?.data || result?.items || result?.threads;
+    if (!Array.isArray(rows)) {
+      return;
+    }
+    const candidates = new Set(rows
+      .map((thread) => readString(thread?.id))
+      .filter((threadId) => threadId && !isLocallyOwnedThread(threadId) && !liveOwnerThreadIds.has(threadId))
+      .slice(0, MAX_ACTIVE_THREAD_IDS));
+    for (const threadId of backgroundCatalogThreadIds) {
+      if (!candidates.has(threadId) && !announcedBackgroundTurnsByThreadId.has(threadId)) {
+        backgroundCatalogThreadIds.delete(threadId);
+        if (backgroundOnlyThreadIds.has(threadId) || !activeThreadIds.has(threadId)) {
+          unfollowDesktopThread(threadId);
+        }
+      }
+    }
+    for (const threadId of candidates) {
+      if (backgroundCatalogThreadIds.has(threadId) || desktopFollowThreadIds.has(threadId)) {
+        continue;
+      }
+      backgroundCatalogThreadIds.add(threadId);
+      if (!activeThreadIds.has(threadId)) {
+        backgroundOnlyThreadIds.add(threadId);
+      }
       followDesktopThread(threadId);
     }
   }
@@ -372,6 +414,7 @@ function createDesktopIpcActionFollower({
     ownershipProbeDeadlinesByThreadId.delete(threadId);
     pendingOwnershipProbeTokensByThreadId.delete(threadId);
     desktopOwnedByProbeThreadIds.delete(threadId);
+    notifyActivityRemoval(threadId, "evicted");
   }
   const recoveringThreadIds = new Set();
   const queuedChangesByThreadId = new Map();
@@ -551,6 +594,7 @@ function createDesktopIpcActionFollower({
       unfollowDesktopThread(threadId);
     }
     desktopFollowThreadIds.clear();
+    backgroundCatalogThreadIds.clear();
     activeThreadIds.clear();
     followerClientIdsByThreadId.clear();
     backgroundOnlyThreadIds.clear();
@@ -709,6 +753,7 @@ function createDesktopIpcActionFollower({
     }
     rawStatesByThreadId.set(threadId, speculativeState);
     rawStateUpdatedAtByThreadId.set(threadId, now());
+    notifyActivityState(threadId, speculativeState);
     if (!backgroundOnlyThreadIds.has(threadId)) {
       conversationProjector.seed(threadId, speculativeState);
     }
@@ -769,6 +814,7 @@ function createDesktopIpcActionFollower({
     const previousState = rawStatesByThreadId.get(threadId) || null;
     rawStatesByThreadId.set(threadId, nextState);
     rawStateUpdatedAtByThreadId.set(threadId, now());
+    notifyActivityState(threadId, nextState);
     // A usable state arrived: recovery bookkeeping and pre-baseline queued
     // patches are obsolete (snapshots replace state wholesale).
     baselineRecoveryStateByThreadId.delete(threadId);
@@ -814,6 +860,10 @@ function createDesktopIpcActionFollower({
   }
 
   function onDisconnect() {
+    onActivityObservation?.({
+      type: "disconnected",
+      sourceGeneration: Math.max(1, desktopSourceGeneration),
+    });
     // Patch baselines are connection-scoped (Desktop re-sends a snapshot after
     // reconnect), but the projector cache is not: keeping it lets the reconnect
     // snapshot diff against already-mirrored content instead of replaying it.
@@ -869,8 +919,15 @@ function createDesktopIpcActionFollower({
 
     const followers = followerClientIdsByThreadId.get(threadId) || new Set();
     if (params.following === true) {
+      // A Desktop renderer opening a chat is not phone transcript interest.
+      // Only an inbound phone read/resume may promote it out of background.
+      if (!activeThreadIds.has(threadId)) {
+        backgroundOnlyThreadIds.add(threadId);
+      }
       rememberActiveThread(threadId);
-      followDesktopThread(threadId);
+      if (!desktopFollowThreadIds.has(threadId)) {
+        followDesktopThread(threadId);
+      }
       const wasUnfollowed = followers.size === 0;
       followers.add(clientId);
       followerClientIdsByThreadId.set(threadId, followers);
@@ -937,6 +994,7 @@ function createDesktopIpcActionFollower({
     conversationProjector.remove(threadId);
     queuedChangesByThreadId.delete(threadId);
     baselineRecoveryStateByThreadId.delete(threadId);
+    notifyActivityRemoval(threadId, "ownership-handoff");
     releaseHeldFollowerRequests(threadId, { toDesktop: false });
   }
 
@@ -968,6 +1026,7 @@ function createDesktopIpcActionFollower({
     conversationProjector.remove(threadId);
     queuedChangesByThreadId.delete(threadId);
     baselineRecoveryStateByThreadId.delete(threadId);
+    notifyActivityRemoval(threadId, "removed");
     rejectHeldFollowerRequests(threadId, "This thread is no longer available for Desktop routing.");
   }
 
@@ -1375,6 +1434,33 @@ function createDesktopIpcActionFollower({
       projectedLiveActiveTurnIdsByThreadId.get(threadId) || new Set(),
       normalizedLiveIndexesByThreadId.get(threadId) || null
     );
+  }
+
+  function notifyActivityState(threadId, state) {
+    if (typeof onActivityObservation !== "function") {
+      return;
+    }
+    const index = normalizedLiveIndexesByThreadId.get(threadId);
+    const turns = index
+      ? boundedIndexedDesktopLiveTurns(
+        state, index, now(), projectedLiveActiveTurnIdsByThreadId.get(threadId) || new Set(), true
+      )
+      : (Array.isArray(state?.turns) ? state.turns.slice(-3) : []);
+    onActivityObservation({
+      type: "state",
+      threadId,
+      sourceGeneration: Math.max(1, desktopSourceGeneration),
+      state: boundedDesktopActivityState({ ...state, turns }),
+    });
+  }
+
+  function notifyActivityRemoval(threadId, reason) {
+    onActivityObservation?.({
+      type: "removed",
+      threadId,
+      reason,
+      sourceGeneration: Math.max(1, desktopSourceGeneration),
+    });
   }
 
   function rememberDesktopLiveProjection(threadId, liveState) {
@@ -1792,6 +1878,7 @@ function createDesktopIpcActionFollower({
       normalizedReviewFingerprintsByThreadId.delete(threadId);
       conversationProjector.remove(threadId);
       syncProjectedActions(threadId, []);
+      notifyActivityRemoval(threadId, "archived");
     }
     sendApplicationResponse(JSON.stringify({
       method: envelope.method === "thread-archived" ? "thread/archived" : "thread/unarchived",
@@ -2135,6 +2222,7 @@ function createDesktopIpcActionFollower({
     rawStatesByThreadId.set(threadId, nextState);
     rawStateUpdatedAtByThreadId.set(threadId, now());
     rebuildNormalizedLiveIndex(threadId, nextState);
+    notifyActivityState(threadId, nextState);
     if (baselineState && typeof baselineState === "object"
       && !backgroundOnlyThreadIds.has(threadId)) {
       const liveState = boundedDesktopLiveState(
@@ -2157,6 +2245,7 @@ function createDesktopIpcActionFollower({
 
   return {
     observeInbound,
+    observeThreadListResponse,
     stopAll,
     // True while this thread has live Desktop-owned IPC state mirrored to the
     // phone; used to keep fallback mirrors (rollout tail) silent.
@@ -3014,6 +3103,84 @@ function boundedDesktopLiveState(
   };
 }
 
+function boundedDesktopActivityState(state) {
+  const rawState = state && typeof state === "object" ? state : {};
+  return {
+    title: readString(rawState.title) || readString(rawState.name),
+    cwd: readString(rawState.cwd) || readString(rawState.current_working_directory),
+    threadRuntimeStatus: compactDesktopRuntimeStatus(rawState.threadRuntimeStatus),
+    status: compactDesktopRuntimeStatus(rawState.status),
+    hasUnreadTurn: rawState.hasUnreadTurn ?? rawState.has_unread_turn,
+    unreadMessageCount: rawState.unreadMessageCount ?? rawState.unread_message_count,
+    requests: (Array.isArray(rawState.requests) ? rawState.requests : []).map((request) => ({
+      id: request?.id,
+      method: readString(request?.method),
+      completed: request?.completed === true,
+    })),
+    turns: (Array.isArray(rawState.turns) ? rawState.turns : []).map(compactDesktopActivityTurn),
+  };
+}
+
+function compactDesktopRuntimeStatus(status) {
+  if (status && typeof status === "object" && !Array.isArray(status)) {
+    return {
+      type: readString(status.type),
+      activeFlags: Array.isArray(status.activeFlags) ? status.activeFlags.filter((flag) => (
+        flag === "waitingOnApproval" || flag === "waitingOnUserInput"
+      )) : [],
+    };
+  }
+  return readString(status);
+}
+
+function compactDesktopActivityTurn(turn) {
+  return {
+    id: readString(turn?.id),
+    turnId: readString(turn?.turnId),
+    turn_id: readString(turn?.turn_id),
+    status: readString(turn?.status),
+    error: turn?.error ? true : null,
+    startedAt: finiteTimestamp(turn?.startedAt),
+    started_at: finiteTimestamp(turn?.started_at),
+    completedAt: finiteTimestamp(turn?.completedAt),
+    completed_at: finiteTimestamp(turn?.completed_at),
+    turnStartedAtMs: finiteTimestamp(turn?.turnStartedAtMs),
+    turn_started_at_ms: finiteTimestamp(turn?.turn_started_at_ms),
+    turnCompletedAtMs: finiteTimestamp(turn?.turnCompletedAtMs),
+    turn_completed_at_ms: finiteTimestamp(turn?.turn_completed_at_ms),
+    startedAtMs: finiteTimestamp(turn?.startedAtMs ?? turn?.started_at_ms),
+    completedAtMs: finiteTimestamp(turn?.completedAtMs ?? turn?.completed_at_ms),
+    items: compactLatestActivityItems(turn),
+  };
+}
+
+function compactLatestActivityItems(turn) {
+  const items = Array.isArray(turn?.items) ? turn.items : [];
+  // Token patches must not copy the growing item history. A small tail is
+  // enough for a current semantic label; absence remains unknown.
+  for (let index = items.length - 1; index >= Math.max(0, items.length - 32); index -= 1) {
+    const item = items[index];
+    if (!projectSemanticItem(item)) {
+      continue;
+    }
+    return [{
+      id: readString(item?.id),
+      itemId: readString(item?.itemId),
+      item_id: readString(item?.item_id),
+      type: readString(item?.type),
+    }];
+  }
+  return [];
+}
+
+function finiteTimestamp(value) {
+  if (value == null || value === "") {
+    return null;
+  }
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
 function boundedDesktopLiveTurns(
   state,
   nowValue = Date.now(),
@@ -3063,7 +3230,7 @@ function boundedDesktopLiveTurns(
   return normalizeBoundedTurnsForRuntime(selectedTurns, state, retainedTurnIds);
 }
 
-function boundedIndexedDesktopLiveTurns(state, index, nowValue, retainedTurnIds) {
+function boundedIndexedDesktopLiveTurns(state, index, nowValue, retainedTurnIds, canonicalActivity = false) {
   if (index.entries.length === 0) {
     return [];
   }
@@ -3104,10 +3271,11 @@ function boundedIndexedDesktopLiveTurns(state, index, nowValue, retainedTurnIds)
       if (!turn) {
         return null;
       }
-      return turnIdOf(turn) ? turn : { ...turn, id: entry.id };
+      return turnIdOf(turn) || (canonicalActivity && entry.rawIndex != null)
+        ? turn : { ...turn, id: entry.id };
     })
     .filter(Boolean);
-  return normalizeBoundedTurnsForRuntime(selectedTurns, state, retainedTurnIds);
+  return canonicalActivity ? selectedTurns : normalizeBoundedTurnsForRuntime(selectedTurns, state, retainedTurnIds);
 }
 
 function resolveIndexedTurn(state, entry) {
