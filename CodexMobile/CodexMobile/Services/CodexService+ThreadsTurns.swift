@@ -1697,7 +1697,7 @@ extension CodexService {
         var imageURLKey = "url"
         var effectiveCollaborationMode = supportsTurnCollaborationMode ? collaborationMode : nil
         var didDowngradePlanModeForRuntime = false
-        var includesServiceTier = runtimeServiceTierForTurn(threadId: threadId) != nil
+        var includesServiceTier = supportsServiceTier
         let accessConfiguration = runtimeAccessConfiguration()
 
         if collaborationMode != nil, effectiveCollaborationMode == nil {

@@ -62,7 +62,7 @@ test("migrates v1 preferences without replaying them as confirmed owner state", 
   store.attachToThread(thread);
   assert.deepEqual(thread, { id: "task", model: "server-model" });
   const settings = store.commit("task", { model: "server-model", effort: "high" }, { source: "runtime" });
-  assert.equal(settings.serviceTier, null);
+  assert.equal(settings.serviceTier, undefined);
   assert.equal(settings.revision, 1);
   assert.equal(JSON.parse(fs.readFileSync(storeFile)).version, 2);
 });
@@ -124,3 +124,16 @@ test("unsolicited settings updates survive a cache-write failure and retry on th
   assert.equal(restored.revision, 1);
   assert.equal(restored.reasoningEffort, "ultra");
 });
+
+for (const tier of ["priority", null]) {
+  test(`first speed-only acknowledgement persists ${tier ?? "Normal"} without inventing other settings`, (t) => {
+    const { storeFile, store } = fixture(t);
+    const settings = store.commit("new-task", { serviceTier: tier }, { source: "phone" });
+    assert.equal(settings?.serviceTier, tier);
+    assert.equal(Object.hasOwn(settings, "model"), false);
+    assert.equal(Object.hasOwn(settings, "reasoningEffort"), false);
+    assert.deepEqual(createThreadRuntimeSettingsStore({ storeFile }).get("new-task"), settings);
+    const complete = store.commit("new-task", { model: "astra", effort: "ultra" }, { source: "runtime" });
+    assert.equal(complete.serviceTier, tier);
+  });
+}

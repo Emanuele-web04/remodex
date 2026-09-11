@@ -22,6 +22,18 @@ function normalizeThreadSettingsUpdate(params, options = {}) {
   return settings;
 }
 
+// Confirmations may be partial (for example the first edit only selects Fast).
+// Preserve omission instead of manufacturing resets for unknown fields.
+function threadSettingsFromRuntimeSettings(settings) {
+  const patch = runtimeSettingsPatch(settings);
+  const result = { ...patch };
+  if (hasOwn(patch, "reasoningEffort")) {
+    result.effort = patch.reasoningEffort;
+    delete result.reasoningEffort;
+  }
+  return result;
+}
+
 function normalizeServiceTier(value) {
   const tier = string(value);
   if (!tier || tier === "default") return null;
@@ -95,6 +107,7 @@ module.exports = {
   normalizeServiceTier,
   normalizeThreadSettingsUpdate,
   THREAD_SETTINGS_UPDATE_KEYS,
+  threadSettingsFromRuntimeSettings,
   runtimeSettingsFromConversation,
   runtimeSettingsPatch,
 };

@@ -484,6 +484,10 @@ extension CodexService {
         guard supportsServiceTier else {
             return nil
         }
+        // Existing tasks inherit owner speed until a per-task choice is known.
+        // Device defaults apply to creation, not to an unhydrated Desktop task.
+        if threadId != nil, supportsRuntimeSettingsSync,
+           threadRuntimeOverride(for: threadId)?.overridesServiceTier != true { return nil }
         return effectiveServiceTier(for: threadId)?.rawValue ?? "default"
     }
 

@@ -7,6 +7,7 @@ enum CodexServiceError: Error {
 }
 
 @MainActor final class CodexService {
+    var supportsServiceTier = true
     var supportsRuntimeSettingsSync = true
     var isConnected = true
     var isInitialized = true
@@ -32,11 +33,11 @@ enum CodexServiceError: Error {
     }
     var responses: [CheckedContinuation<RPCMessage, Error>] = []
 
-    func threadRuntimeOverride(for id: String) -> CodexThreadRuntimeOverride? { threadRuntimeOverridesByThreadID[id] }
+    func threadRuntimeOverride(for id: String?) -> CodexThreadRuntimeOverride? { id.flatMap { threadRuntimeOverridesByThreadID[$0] } }
     func applyThreadRuntimeOverride(_ value: CodexThreadRuntimeOverride, to id: String) { threadRuntimeOverridesByThreadID[id] = value }
     func runtimeModelIdentifierForTurn(threadId: String) -> String? { threadRuntimeOverride(for: threadId)?.modelId ?? globalModel }
     func selectedReasoningEffortForSelectedModel(threadId: String) -> String? { threadRuntimeOverride(for: threadId)?.reasoningEffort ?? globalEffort }
-    func effectiveServiceTier(for id: String) -> CodexServiceTier? { threadRuntimeOverride(for: id)?.serviceTier }
+    func effectiveServiceTier(for id: String?) -> CodexServiceTier? { threadRuntimeOverride(for: id)?.serviceTier }
     func decodeModel<T: Decodable>(_ type: T.Type, from value: JSONValue) -> T? { try? JSONDecoder().decode(type, from: JSONEncoder().encode(value)) }
     func sendRequest(method: String, params: JSONValue) async throws -> RPCMessage {
         precondition(method == "thread/settings/update")
@@ -51,7 +52,7 @@ enum CodexServiceError: Error {
 
 @main struct RuntimeSettingsHarness {
     @MainActor static func settings(_ revision: Int, model: String = "astra", effort: String? = "high", tier: String? = nil, epoch: String = "epoch-a") -> CodexRuntimeSettings {
-        CodexRuntimeSettings(model: model, reasoningEffort: effort, serviceTier: tier, revision: revision, updatedAt: Double(revision) + (epoch == "epoch-b" ? 100 : 0), epoch: epoch, source: "runtime")
+        CodexRuntimeSettings(model: model, reasoningEffort: effort, serviceTier: tier, revision: revision, updatedAt: Double(revision) + (epoch == "epoch-b" ? 100 : 0), epoch: epoch, source: "runtime", knownFields: ["model", "reasoningEffort", "serviceTier"])
     }
     @MainActor static func until(_ condition: () -> Bool) async throws {
         for _ in 0..<1000 {
@@ -61,6 +62,32 @@ enum CodexServiceError: Error {
         fatalError("Timed out waiting for the settings queue")
     }
     @MainActor static func main() async throws {
+        let unknown = CodexService()
+        precondition(unknown.runtimeServiceTierForTurn(threadId: "unhydrated") == nil,
+                     "Device Normal must not overwrite the owner's unknown speed")
+        precondition(unknown.runtimeServiceTierForTurn() == "default", "New tasks use device defaults")
+        unknown.threadRuntimeOverridesByThreadID["explicit-normal"] = CodexThreadRuntimeOverride(
+            overridesReasoning: false, overridesServiceTier: true)
+        precondition(unknown.runtimeServiceTierForTurn(threadId: "explicit-normal") == "default")
+        unknown.isConnected = false
+        unknown.threadRuntimeOverridesByThreadID["model-only"] = CodexThreadRuntimeOverride(
+            modelId: "chosen-model", overridesModel: true, overridesReasoning: false, overridesServiceTier: false)
+        unknown.queueThreadRuntimeSettingsUpdate(threadId: "model-only")
+        precondition(unknown.threadRuntimeOverride(for: "model-only")?.pendingRuntimeSettings["serviceTier"] == nil)
+        let legacy = try JSONDecoder().decode(CodexModelOption.self, from: Data(
+            #"{"id":"legacy-model","model":"legacy-model","additional_speed_tiers":[" Fast "]}"#.utf8))
+        precondition(legacy.supportsFastMode, "Legacy speed metadata remains case insensitive")
+
+        let partial = try JSONDecoder().decode(CodexRuntimeSettings.self, from: Data(
+            #"{"serviceTier":"priority","revision":1,"updatedAt":1,"epoch":"partial","source":"phone"}"#.utf8))
+        unknown.threadRuntimeOverridesByThreadID["speed-only"] = CodexThreadRuntimeOverride(
+            modelId: "local-model", reasoningEffort: "ultra", overridesModel: true,
+            overridesReasoning: true, overridesServiceTier: false)
+        unknown.applyConfirmedRuntimeSettings(partial, threadId: "speed-only")
+        precondition(unknown.threadRuntimeOverride(for: "speed-only")?.modelId == "local-model")
+        precondition(unknown.threadRuntimeOverride(for: "speed-only")?.reasoningEffort == "ultra")
+        precondition(unknown.runtimeServiceTierForTurn(threadId: "speed-only") == "priority")
+
         let service = CodexService()
         let id = "task"
         service.delayResume = true

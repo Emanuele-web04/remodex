@@ -46,7 +46,7 @@ function createThreadRuntimeSettingsStore({
     }
     const previous = get(normalizedThreadId);
     const nextValues = runtimeSettingsFromTurnParams(turnParams, previous, { authoritative: source === "runtime" });
-    if (!nextValues.model && !nextValues.reasoningEffort && !previous) {
+    if (Object.keys(nextValues).length === 0) {
       return null;
     }
 
@@ -59,9 +59,7 @@ function createThreadRuntimeSettingsStore({
     }
 
     const next = {
-      model: nextValues.model || null,
-      reasoningEffort: nextValues.reasoningEffort || null,
-      serviceTier: nextValues.serviceTier,
+      ...nextValues,
       revision: Math.max(0, Number(previous?.revision) || 0) + 1,
       updatedAt: Math.max(now(), (previous?.updatedAt || 0) + 1),
       epoch: previous?.epoch || randomUUID(),
@@ -114,8 +112,8 @@ function createThreadRuntimeSettingsStore({
     // Legacy phone fields remain readable, while the v2 object explicitly
     // represents next-turn choices rather than an executing turn's metadata.
     thread.model ||= settings.model;
-    thread.reasoningEffort = settings.reasoningEffort;
-    thread.serviceTier = settings.serviceTier === "priority" ? "fast" : settings.serviceTier;
+    if (Object.hasOwn(settings, "reasoningEffort")) thread.reasoningEffort = settings.reasoningEffort;
+    if (Object.hasOwn(settings, "serviceTier")) thread.serviceTier = settings.serviceTier === "priority" ? "fast" : settings.serviceTier;
     thread.runtimeSettingsRevision = settings.revision;
     thread.runtimeSettingsUpdatedAt = settings.updatedAt;
     thread.runtimeSettingsSource = settings.source;
@@ -141,9 +139,7 @@ function createThreadRuntimeSettingsStore({
 
 function runtimeSettingsFromTurnParams(turnParams, previous = null, options = {}) {
   return {
-    model: previous?.model || null,
-    reasoningEffort: previous?.reasoningEffort ?? null,
-    serviceTier: previous?.serviceTier ?? null,
+    ...runtimeSettingsPatch(previous || {}),
     ...runtimeSettingsPatch(turnParams, options),
   };
 }

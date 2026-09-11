@@ -3234,7 +3234,7 @@ test("live owner applies Desktop runtime overrides to later follower turn starts
       input: [{ type: "text", text: "use my desktop model" }],
       model: "gpt-desktop-pick",
       effort: "high",
-      serviceTier: "fast",
+      serviceTier: "priority",
     },
   }]);
 });
@@ -3589,11 +3589,19 @@ test("live owner runs Desktop queued follow-ups between turns", async (t) => {
 
   await wait(25);
   assert.equal(codexRequests.filter((request) => request.method === "turn/start").length, 0);
+  writeFrame(serverSocket, {
+    type: "request", requestId: "queue-refresh", sourceClientId: "desktop", version: 1,
+    method: "thread-follower-set-queued-follow-ups-state",
+    params: { conversationId: "thread-queue", state: { "thread-queue": [
+      { id: "queued-1", context: { text: "updated queued follow-up" } },
+    ] } },
+  });
+  await waitForFrame(serverSocket, (frame) => frame.requestId === "queue-refresh");
   acknowledgeSettings();
   await update;
   await waitFor(() => codexRequests.some((request) => request.method === "turn/start"));
   const queuedStart = codexRequests.find((request) => request.method === "turn/start");
-  assert.deepEqual(queuedStart.params.input, [{ type: "text", text: "queued follow-up from desktop" }]);
+  assert.deepEqual(queuedStart.params.input, [{ type: "text", text: "updated queued follow-up" }]);
   assert.equal(queuedStart.params.threadId, "thread-queue");
   assert.equal(queuedStart.params.model, "new-model");
   assert.equal(queuedStart.params.effort, "ultra");

@@ -10,12 +10,15 @@ extension CodexService {
     func queueThreadRuntimeSettingsUpdate(threadId: String, fields: Set<String> = ["model", "effort", "serviceTier"]) {
         var override = threadRuntimeOverride(for: threadId)
             ?? CodexThreadRuntimeOverride(overridesReasoning: false, overridesServiceTier: false)
-        let desired: RPCObject = [
+        var desired: RPCObject = [
             "model": runtimeModelIdentifierForTurn(threadId: threadId).map(JSONValue.string) ?? .null,
             "effort": selectedReasoningEffortForSelectedModel(threadId: threadId).map(JSONValue.string) ?? .null,
             "serviceTier": effectiveServiceTier(for: threadId).map { .string($0.rawValue) } ?? .null,
         ]
-        for field in fields { override.pendingRuntimeSettings[field] = desired[field] }
+        if supportsRuntimeSettingsSync, !override.overridesServiceTier {
+            desired.removeValue(forKey: "serviceTier")
+        }
+        for field in fields where desired[field] != nil { override.pendingRuntimeSettings[field] = desired[field] }
         applyThreadRuntimeOverride(override, to: threadId)
         if lastErrorMessage == runtimeSettingsUpdateErrors[threadId] { lastErrorMessage = nil }
         runtimeSettingsUpdateErrors.removeValue(forKey: threadId)
@@ -75,16 +78,21 @@ extension CodexService {
         // Keep unsent/in-flight edits visible. The latest owner state is retained
         // separately and applied once the queue drains.
         guard current?.pendingRuntimeSettings.isEmpty != false else { return }
-        var override = CodexThreadRuntimeOverride(
-            modelId: settings.model,
-            reasoningEffort: settings.reasoningEffort,
-            serviceTierRawValue: settings.serviceTier.flatMap(CodexServiceTier.init(rawValue:))?.rawValue,
-            overridesModel: settings.model != nil,
-            overridesReasoning: true,
-            overridesServiceTier: true,
-            runtimeSettingsRevision: settings.revision,
-            runtimeSettingsUpdatedAt: settings.updatedAt
-        )
+        var override = current ?? CodexThreadRuntimeOverride(overridesReasoning: false, overridesServiceTier: false)
+        if settings.contains("model") {
+            override.modelId = settings.model
+            override.overridesModel = settings.model != nil
+        }
+        if settings.contains("reasoningEffort") {
+            override.reasoningEffort = settings.reasoningEffort
+            override.overridesReasoning = true
+        }
+        if settings.contains("serviceTier") {
+            override.serviceTierRawValue = settings.serviceTier.flatMap(CodexServiceTier.init(rawValue:))?.rawValue
+            override.overridesServiceTier = true
+        }
+        override.runtimeSettingsRevision = settings.revision
+        override.runtimeSettingsUpdatedAt = settings.updatedAt
         override.runtimeSettingsEpoch = settings.epoch
         applyThreadRuntimeOverride(override, to: threadId)
     }

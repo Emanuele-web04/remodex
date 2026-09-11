@@ -217,7 +217,7 @@ private enum CodexModelCapabilityResolver {
         in additionalSpeedTiers: [String]
     ) -> Bool {
         additionalSpeedTiers.contains { tier in
-            CodexServiceTier(rawValue: tier) == serviceTier
+            CodexServiceTier(rawValue: tier.lowercased()) == serviceTier
         }
     }
 

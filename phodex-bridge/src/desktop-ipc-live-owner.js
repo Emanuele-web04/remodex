@@ -10,6 +10,7 @@ const {
   createThreadMutationQueue,
   hasOwn,
   normalizeThreadSettingsUpdate,
+  threadSettingsFromRuntimeSettings,
 } = require("./codex-runtime-settings");
 
 const {
@@ -1693,7 +1694,7 @@ function createDesktopIpcLiveOwner({
         ? current
         : runtimeSettingsStore?.commit?.(conversationId, settings, { source });
       const applied = confirmed ? {
-        ...settings, model: confirmed.model, effort: confirmed.reasoningEffort, serviceTier: confirmed.serviceTier,
+        ...settings, ...threadSettingsFromRuntimeSettings(confirmed),
       } : settings;
       const overrides = followerRuntimeOverridesByThreadId.get(conversationId) || {};
       followerRuntimeOverridesByThreadId.set(conversationId, { ...overrides, ...applied });
@@ -1738,40 +1739,22 @@ function createDesktopIpcLiveOwner({
     if (!Array.isArray(queue) || queue.length === 0 || runningQueuedFollowUpThreadIds.has(threadId)) {
       return;
     }
-    const entry = queue[0];
-    if (entry?.pausedReason) {
-      return;
-    }
-    const text = readString(entry?.context?.text)
-      || readString(entry?.text)
-      || readString(entry?.prompt);
-    if (!text) {
-      // Unrecognized entry shape: pause it visibly instead of discarding the
-      // user's draft. The queue stays blocked (matching Desktop's first-entry
-      // semantics) and the user can edit or resend it from any window.
-      if (!entry || typeof entry !== "object") {
-        queue.shift();
-        if (queue.length === 0) {
-          queuedFollowUpsByThreadId.delete(threadId);
-        }
+    runningQueuedFollowUpThreadIds.add(threadId);
+    let retryChangedQueue = false;
+    enqueueMutation(threadId, async () => {
+      // Desktop replaces queue arrays on refresh. Resolve the current entry only
+      // after settings settle, and retry if another refresh changes it while
+      // request normalization is awaiting context.
+      const entry = queuedFollowUpsByThreadId.get(threadId)?.[0];
+      const canRun = () => ownedThreadIds.has(threadId) && !activeTurnIdForConversation(threadId);
+      if (!entry || entry.pausedReason || !canRun()) return;
+      const text = readString(entry.context?.text) || readString(entry.text) || readString(entry.prompt);
+      if (!text) {
+        if (typeof entry === "object") entry.pausedReason = "remodex-unsupported-entry";
+        else queuedFollowUpsByThreadId.get(threadId)?.shift();
         broadcastQueuedFollowUps(threadId);
         return;
       }
-      console.warn(`${logPrefix} desktop queued follow-up entry has no extractable text; pausing it for ${threadId}`);
-      entry.pausedReason = "remodex-unsupported-entry";
-      broadcastQueuedFollowUps(threadId);
-      return;
-    }
-
-    runningQueuedFollowUpThreadIds.add(threadId);
-    enqueueMutation(threadId, async () => {
-      // Settings may still be awaiting acknowledgement when the active turn
-      // completes. Resolve choices only when this queued turn reaches the owner.
-      const canStart = () => ownedThreadIds.has(threadId)
-        && queuedFollowUpsByThreadId.get(threadId)?.[0] === entry
-        && !entry.pausedReason
-        && !activeTurnIdForConversation(threadId);
-      if (!canStart()) return;
       const revisionBefore = runtimeSettingsStore?.get?.(threadId)?.revision ?? 0;
       const conversation = conversations.get(threadId);
       const startParams = mergeFollowerRuntimeOverrides(threadId, sanitizeTurnStartParams({
@@ -1780,7 +1763,11 @@ function createDesktopIpcLiveOwner({
         cwd: readString(entry?.cwd) || readString(conversation?.cwd) || undefined,
       }));
       const normalized = await normalizeTurnStartParams(cloneJSON(startParams));
-      if (!canStart()) return;
+      if (queuedFollowUpsByThreadId.get(threadId)?.[0] !== entry) {
+        retryChangedQueue = true;
+        return;
+      }
+      if (!canRun() || entry.pausedReason) return;
       const params = normalized && typeof normalized === "object" && !Array.isArray(normalized)
         ? normalized : startParams;
       const pendingEntry = rememberPendingTurnStart(threadId, params);
@@ -1803,6 +1790,7 @@ function createDesktopIpcLiveOwner({
       })
       .finally(() => {
         runningQueuedFollowUpThreadIds.delete(threadId);
+        if (retryChangedQueue) runNextQueuedFollowUp(threadId);
       });
   }
 
@@ -1810,11 +1798,7 @@ function createDesktopIpcLiveOwner({
   // the request itself does not specify them. Phone-origin turns are untouched.
   function mergeFollowerRuntimeOverrides(conversationId, params) {
     const persisted = runtimeSettingsStore?.get?.(conversationId) || null;
-    const persistedOverrides = persisted ? {
-      model: persisted.model,
-      effort: persisted.reasoningEffort,
-      serviceTier: persisted.serviceTier,
-    } : null;
+    const persistedOverrides = persisted ? threadSettingsFromRuntimeSettings(persisted) : null;
     const liveOverrides = followerRuntimeOverridesByThreadId.get(conversationId) || null;
     const overrides = persistedOverrides || liveOverrides
       ? { ...(persistedOverrides || {}), ...(liveOverrides || {}) }
@@ -1845,7 +1829,7 @@ function createDesktopIpcLiveOwner({
         ? current : runtimeSettingsStore?.commit?.(threadId, params, { source, turnId });
       const conversation = conversations.get(threadId);
       if (settings && conversation) {
-        applyRuntimeSettingsToConversation(conversation, { model: settings.model, effort: settings.reasoningEffort, serviceTier: settings.serviceTier }, { authoritative: true });
+        applyRuntimeSettingsToConversation(conversation, threadSettingsFromRuntimeSettings(settings), { authoritative: true });
         runtimeSettingsStore.attachToConversation(threadId, conversation);
       }
       return settings;
