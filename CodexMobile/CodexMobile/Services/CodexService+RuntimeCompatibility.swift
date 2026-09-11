@@ -33,13 +33,14 @@ extension CodexService {
         }
 
         let message = rpcError.message.lowercased()
-        return message.contains("servicetier")
+        let identifiesServiceTier = message.contains("servicetier")
             || message.contains("service tier")
-            || message.contains("unknown field")
+            || message.contains("service_tier")
+        return identifiesServiceTier && (message.contains("unknown field")
             || message.contains("unexpected field")
             || message.contains("unrecognized field")
-            || message.contains("invalid param")
-            || message.contains("invalid params")
+            || message.contains("unsupported field")
+            || message.contains("field is not supported"))
     }
 
     func markServiceTierUnsupportedForCurrentBridge() {

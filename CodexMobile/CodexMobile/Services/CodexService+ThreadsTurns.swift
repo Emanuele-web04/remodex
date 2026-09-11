@@ -164,11 +164,12 @@ extension CodexService {
             guard runtimeOverride?.overridesServiceTier == true else {
                 return runtimeServiceTierForTurn()
             }
+            guard supportsServiceTier else { return nil }
             guard let requestedTier = runtimeOverride?.serviceTier else {
-                return nil
+                return "default"
             }
             let model = runtimeOverrideModel ?? selectedModelOption()
-            return model?.supportsServiceTier(requestedTier) == false ? nil : requestedTier.rawValue
+            return model?.supportsServiceTier(requestedTier) == false ? "default" : requestedTier.rawValue
         }()
         var includesServiceTier = explicitServiceTier != nil
         let accessConfiguration = runtimeAccessConfiguration()
@@ -1696,7 +1697,7 @@ extension CodexService {
         var imageURLKey = "url"
         var effectiveCollaborationMode = supportsTurnCollaborationMode ? collaborationMode : nil
         var didDowngradePlanModeForRuntime = false
-        var includesServiceTier = runtimeServiceTierForTurn(threadId: threadId) != nil
+        var includesServiceTier = supportsServiceTier
         let accessConfiguration = runtimeAccessConfiguration()
 
         if collaborationMode != nil, effectiveCollaborationMode == nil {
@@ -1707,6 +1708,7 @@ extension CodexService {
 
         while true {
             do {
+                try await waitForRuntimeSettingsUpdate(threadId: threadId)
                 let requestParams = try buildTurnStartRequestParams(
                     threadId: threadId,
                     userInput: userInput,
@@ -2589,6 +2591,9 @@ extension CodexService {
                 )
             ),
         ]
+        if supportsRuntimeSettingsSync {
+            params["remodexRuntimeSettingsVersion"] = .integer(2)
+        }
         // Keep the legacy top-level fields populated so plan-mode turns still honor
         // the user's selected model on runtimes that do not read collaboration settings.
         if let modelIdentifier = runtimeModelIdentifierForTurn(threadId: threadId) {

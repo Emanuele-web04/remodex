@@ -68,6 +68,7 @@ const {
 } = require("./desktop-ipc-action-follower");
 const { createDesktopIpcLiveOwner } = require("./desktop-ipc-live-owner");
 const { createThreadRuntimeSettingsStore } = require("./thread-runtime-settings-store");
+const { normalizeServiceTier, hasOwn } = require("./codex-runtime-settings");
 const {
   APP_SERVER_SOURCE,
   DESKTOP_IPC_SOURCE,
@@ -582,6 +583,7 @@ function annotateTurnStateProbeWithMirrorActiveTurn(request, response, getMirror
 
 function canonicalThreadTurnsListRequest(request) {
   const params = { ...(request?.params || {}) };
+  params.itemsView ??= params.remodexTurnStateOnly === true ? "summary" : "full";
   delete params.remodexRequireCanonical;
   delete params.remodexTurnStateOnly;
   if (params.cursor === JSONL_OLDER_HANDOFF_CURSOR || threadTurnsListHandoffDescriptor(params.cursor)) {
@@ -787,7 +789,14 @@ function startBridge({
   const jsonlTurnsListRolloutCacheByThread = new Map();
   const jsonlTurnsListRolloutMissCacheByThread = new Map();
   const threadTurnsListFastPageCoordinator = createThreadTurnsListFastPageCoordinator();
-  const threadRuntimeSettingsStore = createThreadRuntimeSettingsStore();
+  const threadRuntimeSettingsStore = createThreadRuntimeSettingsStore({
+    onChange(threadId, runtimeSettings) {
+      sendApplicationResponse(JSON.stringify({
+        method: "remodex/runtimeSettings/updated",
+        params: { threadId, runtimeSettings },
+      }));
+    },
+  });
   const threadListProvenanceEnricher = createThreadListProvenanceEnricher();
   const worktreeOriginEnricher = createWorktreeOriginEnricher();
   const activityProjector = createThreadActivityProjector();
@@ -867,6 +876,7 @@ function startBridge({
         await sendCodexRequest("thread/read", buildCompleteThreadReadParams(threadId))
       ),
       forwardToLocalCodex: (rawMessage) => {
+        if (handleLocalRuntimeSettingsRequest(parseBridgeMessage(rawMessage))) return;
         observeDesktopIpcLiveOwnerInbound(rawMessage);
         forwardInboundRequestToCodex(rawMessage);
       },
@@ -1177,6 +1187,14 @@ function startBridge({
     // Streaming deltas make this the hottest path in the bridge: parse the
     // envelope once and share the read-only object with every observer.
     const parsedMessage = parseBridgeMessage(message);
+    if (parsedMessage?.result && forwardedInitializeRequestIds.has(String(parsedMessage.id))) {
+      parsedMessage.result.remodexRuntimeSettingsVersion = 2;
+      message = JSON.stringify(parsedMessage);
+    }
+    if (parsedMessage?.method === "thread/settings/updated"
+      && parsedMessage.params?.threadSettings) {
+      threadRuntimeSettingsStore.observe(parsedMessage.params.threadId, parsedMessage.params.threadSettings);
+    }
     if (handleBridgeManagedCodexResponse(message, parsedMessage)) {
       return;
     }
@@ -1226,6 +1244,7 @@ function startBridge({
 
   // Routes decrypted app payloads through the same bridge handlers as before.
   function handleApplicationMessage(rawMessage) {
+    rawMessage = normalizePhoneRuntimeRequest(rawMessage);
     const parsedMessage = parseBridgeMessage(rawMessage);
     if (activityStore.handleRequest(parsedMessage)) {
       return;
@@ -1279,11 +1298,30 @@ function startBridge({
     if (desktopIpcActionFollower?.observeInbound(rawMessage, parsedMessage)) {
       return;
     }
+    if (handleLocalRuntimeSettingsRequest(parsedMessage)) return;
     observeDesktopIpcLiveOwnerInbound(rawMessage, parsedMessage);
     if (handleBridgeManagedThreadTurnsListRequest(rawMessage, sendApplicationResponse)) {
       return;
     }
     forwardInboundRequestToCodex(rawMessage);
+  }
+
+  function handleLocalRuntimeSettingsRequest(parsedMessage) {
+    if (parsedMessage?.method === "thread/settings/update" && parsedMessage.id != null) {
+      const { threadId, ...settings } = parsedMessage.params || {};
+      const update = desktopIpcLiveOwner?.updateThreadSettings
+        ? desktopIpcLiveOwner.updateThreadSettings(threadId, settings)
+        : sendCodexRequest("thread/settings/update", { threadId, ...settings }).then(() => ({
+          runtimeSettings: threadRuntimeSettingsStore.commit(threadId, settings, { source: "phone" }),
+        }));
+      Promise.resolve(update).then((result) => {
+        sendApplicationResponse(JSON.stringify({ id: parsedMessage.id, result }));
+      }).catch((error) => {
+        sendApplicationResponse(createJsonRpcErrorResponse(parsedMessage.id, error, "runtime_settings_update_failed"));
+      });
+      return true;
+    }
+    return false;
   }
 
   function forwardInboundRequestToCodex(rawMessage) {
@@ -1980,6 +2018,7 @@ function startBridge({
         id: parsed.id,
         result: {
           bridgeManaged: true,
+          remodexRuntimeSettingsVersion: 2,
         },
       }));
       return true;
@@ -2491,6 +2530,25 @@ function disableUnsupportedReasoningSummaryForTurnStart(rawMessage) {
       summary: "none",
     },
   });
+}
+
+// Upgrade the old phone wire convention once at ingress. Internally an omitted
+// speed always inherits; modern clients distinguish that from explicit Standard.
+function normalizePhoneRuntimeRequest(rawMessage) {
+  const parsed = parseBridgeJSON(rawMessage);
+  if (!parsed || !["turn/start", "thread/start", "thread/settings/update"].includes(parsed.method)
+    || !parsed.params || typeof parsed.params !== "object") return rawMessage;
+  const params = { ...parsed.params };
+  if (parsed.method === "turn/start" && params.remodexRuntimeSettingsVersion !== 2
+    && !hasOwn(params, "serviceTier") && !hasOwn(params, "service_tier")) {
+    params.serviceTier = "default";
+  }
+  delete params.remodexRuntimeSettingsVersion;
+  if (hasOwn(params, "serviceTier") && params.serviceTier != null) {
+    params.serviceTier = normalizeServiceTier(params.serviceTier)
+      ?? (parsed.method === "thread/settings/update" ? null : "default");
+  }
+  return JSON.stringify({ ...parsed, params });
 }
 
 function normalizeTurnStartParamsForCodex(params) {
@@ -5122,6 +5180,7 @@ module.exports = {
   isContextualUserItemNotification,
   maybeMergeLatestJsonlTurnIntoTurnsListResponse,
   normalizeTurnStartForCodex,
+  normalizePhoneRuntimeRequest,
   normalizeRelayBoundJsonRpcMessage,
   persistBridgePreferences,
   resolveJsonlTurnsListRolloutPathForFallback,

@@ -1,0 +1,311 @@
+{
+  "provenance": {
+    "appServer": "0.154.0",
+    "desktopAppServer": "0.153.4",
+    "desktopApp": "26.903.71938",
+    "source": "Installed generate-json-schema --experimental and read-only model/list"
+  },
+  "threadSettingsUpdateKeys": [
+    "approvalPolicy",
+    "approvalsReviewer",
+    "collaborationMode",
+    "cwd",
+    "effort",
+    "model",
+    "multiAgentMode",
+    "permissions",
+    "personality",
+    "sandboxPolicy",
+    "serviceTier",
+    "summary"
+  ],
+  "threadSettingsNotification": {
+    "method": "thread/settings/updated",
+    "params": {
+      "threadId": "fixture-task",
+      "threadSettings": {
+        "model": "gpt-6-astra",
+        "effort": "ultra",
+        "serviceTier": null
+      }
+    }
+  },
+  "desktopVersions": {
+    "thread-stream-state-changed": 11,
+    "thread-follower-start-turn": 2,
+    "thread-follower-steer-turn": 1,
+    "thread-follower-interrupt-turn": 4,
+    "thread-follower-update-thread-settings": 1,
+    "thread-follower-permissions-request-approval-response": 1
+  },
+  "models": [
+    {
+      "id": "gpt-6-astra",
+      "model": "gpt-6-astra",
+      "displayName": "GPT-6-Astra",
+      "description": "Our most capable model for complex, demanding work.",
+      "isDefault": true,
+      "supportedReasoningEfforts": [
+        {
+          "reasoningEffort": "low",
+          "description": "Fast responses with lighter reasoning"
+        },
+        {
+          "reasoningEffort": "medium",
+          "description": "Balances speed and reasoning depth for everyday tasks"
+        },
+        {
+          "reasoningEffort": "high",
+          "description": "Greater reasoning depth for complex problems"
+        },
+        {
+          "reasoningEffort": "xhigh",
+          "description": "Extra high reasoning depth for complex problems"
+        },
+        {
+          "reasoningEffort": "max",
+          "description": "Maximum reasoning depth for the hardest problems"
+        },
+        {
+          "reasoningEffort": "ultra",
+          "description": "Maximum reasoning with automatic task delegation"
+        }
+      ],
+      "defaultReasoningEffort": "medium",
+      "serviceTiers": [
+        {
+          "id": "priority",
+          "name": "Fast",
+          "description": "2x speed, increased usage"
+        }
+      ],
+      "defaultServiceTier": null
+    },
+    {
+      "id": "gpt-5.6-sol",
+      "model": "gpt-5.6-sol",
+      "displayName": "GPT-5.6-Sol",
+      "description": "Reliable agentic workhorse for everyday tasks.",
+      "isDefault": false,
+      "supportedReasoningEfforts": [
+        {
+          "reasoningEffort": "low",
+          "description": "Fast responses with lighter reasoning"
+        },
+        {
+          "reasoningEffort": "medium",
+          "description": "Balances speed and reasoning depth for everyday tasks"
+        },
+        {
+          "reasoningEffort": "high",
+          "description": "Greater reasoning depth for complex problems"
+        },
+        {
+          "reasoningEffort": "xhigh",
+          "description": "Extra high reasoning depth for complex problems"
+        },
+        {
+          "reasoningEffort": "max",
+          "description": "Maximum reasoning depth for the hardest problems"
+        },
+        {
+          "reasoningEffort": "ultra",
+          "description": "Maximum reasoning with automatic task delegation"
+        }
+      ],
+      "defaultReasoningEffort": "low",
+      "serviceTiers": [
+        {
+          "id": "priority",
+          "name": "Fast",
+          "description": "1.5x speed, increased usage"
+        }
+      ],
+      "defaultServiceTier": null
+    },
+    {
+      "id": "gpt-5.6-terra",
+      "model": "gpt-5.6-terra",
+      "displayName": "GPT-5.6-Terra",
+      "description": "Balanced agentic coding model for everyday work.",
+      "isDefault": false,
+      "supportedReasoningEfforts": [
+        {
+          "reasoningEffort": "low",
+          "description": "Fast responses with lighter reasoning"
+        },
+        {
+          "reasoningEffort": "medium",
+          "description": "Balances speed and reasoning depth for everyday tasks"
+        },
+        {
+          "reasoningEffort": "high",
+          "description": "Greater reasoning depth for complex problems"
+        },
+        {
+          "reasoningEffort": "xhigh",
+          "description": "Extra high reasoning depth for complex problems"
+        },
+        {
+          "reasoningEffort": "max",
+          "description": "Maximum reasoning depth for the hardest problems"
+        },
+        {
+          "reasoningEffort": "ultra",
+          "description": "Maximum reasoning with automatic task delegation"
+        }
+      ],
+      "defaultReasoningEffort": "medium",
+      "serviceTiers": [
+        {
+          "id": "priority",
+          "name": "Fast",
+          "description": "1.5x speed, increased usage"
+        }
+      ],
+      "defaultServiceTier": null
+    },
+    {
+      "id": "gpt-5.6-luna",
+      "model": "gpt-5.6-luna",
+      "displayName": "GPT-5.6-Luna",
+      "description": "Fast and affordable agentic coding model.",
+      "isDefault": false,
+      "supportedReasoningEfforts": [
+        {
+          "reasoningEffort": "low",
+          "description": "Fast responses with lighter reasoning"
+        },
+        {
+          "reasoningEffort": "medium",
+          "description": "Balances speed and reasoning depth for everyday tasks"
+        },
+        {
+          "reasoningEffort": "high",
+          "description": "Greater reasoning depth for complex problems"
+        },
+        {
+          "reasoningEffort": "xhigh",
+          "description": "Extra high reasoning depth for complex problems"
+        },
+        {
+          "reasoningEffort": "max",
+          "description": "Maximum reasoning depth for the hardest problems"
+        }
+      ],
+      "defaultReasoningEffort": "medium",
+      "serviceTiers": [
+        {
+          "id": "priority",
+          "name": "Fast",
+          "description": "1.5x speed, increased usage"
+        }
+      ],
+      "defaultServiceTier": null
+    },
+    {
+      "id": "gpt-daybreak-blue-latest",
+      "model": "gpt-daybreak-blue-latest",
+      "displayName": "Daybreak Blue",
+      "description": "Latest frontier agentic coding model for broad defensive cybersecurity work.",
+      "isDefault": false,
+      "supportedReasoningEfforts": [
+        {
+          "reasoningEffort": "low",
+          "description": "Fast responses with lighter reasoning"
+        },
+        {
+          "reasoningEffort": "medium",
+          "description": "Balances speed and reasoning depth for everyday tasks"
+        },
+        {
+          "reasoningEffort": "high",
+          "description": "Greater reasoning depth for complex problems"
+        },
+        {
+          "reasoningEffort": "xhigh",
+          "description": "Extra high reasoning depth for complex problems"
+        },
+        {
+          "reasoningEffort": "max",
+          "description": "Maximum reasoning depth for the hardest problems"
+        },
+        {
+          "reasoningEffort": "ultra",
+          "description": "Maximum reasoning with automatic task delegation"
+        }
+      ],
+      "defaultReasoningEffort": "low",
+      "serviceTiers": [],
+      "defaultServiceTier": null
+    },
+    {
+      "id": "gpt-5.5",
+      "model": "gpt-5.5",
+      "displayName": "GPT-5.5",
+      "description": "Proven previous-generation model for coding and general work.",
+      "isDefault": false,
+      "supportedReasoningEfforts": [
+        {
+          "reasoningEffort": "low",
+          "description": "Fast responses with lighter reasoning"
+        },
+        {
+          "reasoningEffort": "medium",
+          "description": "Balances speed and reasoning depth for everyday tasks"
+        },
+        {
+          "reasoningEffort": "high",
+          "description": "Greater reasoning depth for complex problems"
+        },
+        {
+          "reasoningEffort": "xhigh",
+          "description": "Extra high reasoning depth for complex problems"
+        }
+      ],
+      "defaultReasoningEffort": "medium",
+      "serviceTiers": [
+        {
+          "id": "priority",
+          "name": "Fast",
+          "description": "1.5x speed, increased usage"
+        }
+      ],
+      "defaultServiceTier": null
+    },
+    {
+      "id": "gpt-5.3-codex-spark",
+      "model": "gpt-5.3-codex-spark",
+      "displayName": "GPT-5.3-Codex-Spark",
+      "description": "Ultra-fast coding model.",
+      "isDefault": false,
+      "supportedReasoningEfforts": [
+        {
+          "reasoningEffort": "low",
+          "description": "Fast responses with lighter reasoning"
+        },
+        {
+          "reasoningEffort": "medium",
+          "description": "Balances speed and reasoning depth for everyday tasks"
+        },
+        {
+          "reasoningEffort": "high",
+          "description": "Greater reasoning depth for complex problems"
+        },
+        {
+          "reasoningEffort": "xhigh",
+          "description": "Extra high reasoning depth for complex problems"
+        }
+      ],
+      "defaultReasoningEffort": "high",
+      "serviceTiers": [],
+      "defaultServiceTier": null
+    }
+  ],
+  "verifiedSettingsSemantics": {
+    "effortNull": "inherit",
+    "serviceTierNull": "clear",
+    "clearedServiceTierNotification": "default",
+    "collaborationEffortNull": "clear"
+  }
+}

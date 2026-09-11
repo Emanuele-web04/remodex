@@ -13,6 +13,8 @@ struct CodexModelOption: Identifiable, Codable, Hashable, Sendable {
     let description: String
     let isDefault: Bool
     let supportsFastMode: Bool
+    let serviceTiers: [CodexServiceTier]
+    let defaultServiceTier: String?
     let supportedReasoningEfforts: [CodexReasoningEffortOption]
     let defaultReasoningEffort: String?
 
@@ -23,6 +25,8 @@ struct CodexModelOption: Identifiable, Codable, Hashable, Sendable {
         description: String,
         isDefault: Bool,
         supportsFastMode: Bool = false,
+        serviceTiers: [CodexServiceTier]? = nil,
+        defaultServiceTier: String? = nil,
         supportedReasoningEfforts: [CodexReasoningEffortOption],
         defaultReasoningEffort: String?
     ) {
@@ -31,7 +35,9 @@ struct CodexModelOption: Identifiable, Codable, Hashable, Sendable {
         self.displayName = displayName
         self.description = description
         self.isDefault = isDefault
-        self.supportsFastMode = supportsFastMode
+        self.serviceTiers = serviceTiers ?? (supportsFastMode ? [.fast] : [])
+        self.supportsFastMode = self.serviceTiers.contains(.fast)
+        self.defaultServiceTier = defaultServiceTier
         self.supportedReasoningEfforts = supportedReasoningEfforts
         self.defaultReasoningEffort = defaultReasoningEffort
     }
@@ -52,6 +58,10 @@ struct CodexModelOption: Identifiable, Codable, Hashable, Sendable {
         case fastModeSnake = "fast_mode"
         case fastServiceTier
         case fastServiceTierSnake = "fast_service_tier"
+        case serviceTiers
+        case serviceTiersSnake = "service_tiers"
+        case defaultServiceTier
+        case defaultServiceTierSnake = "default_service_tier"
         case additionalSpeedTiers
         case additionalSpeedTiersSnake = "additional_speed_tiers"
         case supportedReasoningEfforts
@@ -108,12 +118,20 @@ struct CodexModelOption: Identifiable, Codable, Hashable, Sendable {
         displayName = normalizedDisplayName.isEmpty ? normalizedModel : normalizedDisplayName
         description = rawDescription.trimmingCharacters(in: .whitespacesAndNewlines)
         isDefault = camelDefaultFlag ?? snakeDefaultFlag ?? false
-        supportsFastMode = CodexModelCapabilityResolver.supportsFastMode(
+        let legacyFastMode = CodexModelCapabilityResolver.supportsFastMode(
             model: normalizedModel,
             id: normalizedID,
             explicitFastMode: explicitFastMode,
             additionalSpeedTiers: additionalSpeedTiers
         )
+        let catalogTiers = try container.decodeIfPresent([CodexServiceTier].self, forKey: .serviceTiers)
+            ?? container.decodeIfPresent([CodexServiceTier].self, forKey: .serviceTiersSnake)
+        // An explicit empty modern catalog is authoritative, including for older
+        // model names that used to appear in the static capability fallback.
+        serviceTiers = catalogTiers ?? (legacyFastMode ? [.fast] : [])
+        supportsFastMode = serviceTiers.contains(.fast)
+        defaultServiceTier = try container.decodeIfPresent(String.self, forKey: .defaultServiceTier)
+            ?? container.decodeIfPresent(String.self, forKey: .defaultServiceTierSnake)
         supportedReasoningEfforts = normalizedEfforts
 
         let normalizedDefault = defaultEffort?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -151,10 +169,7 @@ struct CodexModelOption: Identifiable, Codable, Hashable, Sendable {
     }
 
     func supportsServiceTier(_ serviceTier: CodexServiceTier) -> Bool {
-        switch serviceTier {
-        case .fast:
-            return supportsFastMode
-        }
+        serviceTiers.contains(serviceTier)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -165,6 +180,8 @@ struct CodexModelOption: Identifiable, Codable, Hashable, Sendable {
         try container.encode(description, forKey: .description)
         try container.encode(isDefault, forKey: .isDefault)
         try container.encode(supportsFastMode, forKey: .supportsFastMode)
+        try container.encode(serviceTiers, forKey: .serviceTiers)
+        try container.encodeIfPresent(defaultServiceTier, forKey: .defaultServiceTier)
         try container.encode(supportedReasoningEfforts, forKey: .supportedReasoningEfforts)
         try container.encodeIfPresent(defaultReasoningEffort, forKey: .defaultReasoningEffort)
     }
@@ -200,7 +217,7 @@ private enum CodexModelCapabilityResolver {
         in additionalSpeedTiers: [String]
     ) -> Bool {
         additionalSpeedTiers.contains { tier in
-            tier.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == serviceTier.rawValue
+            CodexServiceTier(rawValue: tier.lowercased()) == serviceTier
         }
     }
 

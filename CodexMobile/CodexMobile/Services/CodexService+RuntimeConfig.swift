@@ -247,6 +247,7 @@ extension CodexService {
             override.modelId = normalizedModelID
             override.overridesModel = true
         }
+        queueThreadRuntimeSettingsUpdate(threadId: normalizedThreadID)
     }
 
     func clearThreadModelOverride(for threadId: String?) {
@@ -257,6 +258,7 @@ extension CodexService {
             override.modelId = nil
             override.overridesModel = false
         }
+        queueThreadRuntimeSettingsUpdate(threadId: normalizedThreadID)
     }
 
     func setThreadReasoningEffortOverride(_ effort: String, for threadId: String?) {
@@ -274,6 +276,7 @@ extension CodexService {
             override.reasoningEffort = normalizedEffort
             override.overridesReasoning = true
         }
+        queueThreadRuntimeSettingsUpdate(threadId: normalizedThreadID, fields: ["effort"])
     }
 
     func clearThreadReasoningEffortOverride(for threadId: String?) {
@@ -285,6 +288,7 @@ extension CodexService {
             override.reasoningEffort = nil
             override.overridesReasoning = false
         }
+        queueThreadRuntimeSettingsUpdate(threadId: normalizedThreadID, fields: ["effort"])
     }
 
     func setSelectedServiceTier(_ serviceTier: CodexServiceTier?) {
@@ -302,6 +306,7 @@ extension CodexService {
             override.serviceTierRawValue = normalizedServiceTier?.rawValue
             override.overridesServiceTier = true
         }
+        queueThreadRuntimeSettingsUpdate(threadId: normalizedThreadID, fields: ["serviceTier"])
     }
 
     func clearThreadServiceTierOverride(for threadId: String?) {
@@ -313,6 +318,7 @@ extension CodexService {
             override.serviceTierRawValue = nil
             override.overridesServiceTier = false
         }
+        queueThreadRuntimeSettingsUpdate(threadId: normalizedThreadID, fields: ["serviceTier"])
     }
 
     func applyThreadRuntimeOverride(_ runtimeOverride: CodexThreadRuntimeOverride?, to threadId: String?) {
@@ -430,11 +436,10 @@ extension CodexService {
             return nil
         }
 
-        if let threadOverride = threadRuntimeOverride(for: threadId),
-           threadOverride.overridesReasoning,
-           let selected = threadOverride.reasoningEffort,
-           supported.contains(selected) {
-            return selected
+        if let threadOverride = threadRuntimeOverride(for: threadId), threadOverride.overridesReasoning {
+            if let selected = threadOverride.reasoningEffort, supported.contains(selected) { return selected }
+            return model.defaultReasoningEffort.flatMap { supported.contains($0) ? $0 : nil }
+                ?? model.supportedReasoningEfforts.first?.reasoningEffort
         }
 
         if let selected = selectedReasoningEffort,
@@ -461,6 +466,7 @@ extension CodexService {
     }
 
     func effectiveServiceTier(for threadId: String? = nil) -> CodexServiceTier? {
+        guard !inheritsOwnerServiceTier(for: threadId) else { return nil }
         let candidate: CodexServiceTier?
         if let threadOverride = threadRuntimeOverride(for: threadId),
            threadOverride.overridesServiceTier {
@@ -475,11 +481,19 @@ extension CodexService {
         return selectedModelSupportsServiceTier(candidate, threadId: threadId) ? candidate : nil
     }
 
+    func inheritsOwnerServiceTier(for threadId: String?) -> Bool {
+        threadId != nil && supportsRuntimeSettingsSync
+            && threadRuntimeOverride(for: threadId)?.overridesServiceTier != true
+    }
+
     func runtimeServiceTierForTurn(threadId: String? = nil) -> String? {
         guard supportsServiceTier else {
             return nil
         }
-        return effectiveServiceTier(for: threadId)?.rawValue
+        // Existing tasks inherit owner speed until a per-task choice is known.
+        // Device defaults apply to creation, not to an unhydrated Desktop task.
+        if inheritsOwnerServiceTier(for: threadId) { return nil }
+        return effectiveServiceTier(for: threadId)?.rawValue ?? "default"
     }
 
     // Copies per-chat runtime overrides forward when we continue an archived thread.
@@ -499,9 +513,12 @@ extension CodexService {
         // Revisions are scoped to one thread in the bridge store. Carrying the
         // source cursor into a fork makes the destination reject its own first
         // remote updates, whose revision correctly starts again from one.
+        inheritedOverride.runtimeSettingsEpoch = nil
+        inheritedOverride.pendingRuntimeSettings = [:]
         inheritedOverride.runtimeSettingsRevision = 0
         inheritedOverride.runtimeSettingsUpdatedAt = 0
         applyThreadRuntimeOverride(inheritedOverride, to: normalizedDestinationThreadID)
+        queueThreadRuntimeSettingsUpdate(threadId: normalizedDestinationThreadID)
     }
 
     func shouldFallbackFromSandboxPolicy(_ error: Error) -> Bool {
@@ -771,9 +788,12 @@ extension CodexService {
     }
 
     func applyRemoteRuntimeSettings(from thread: CodexThread) {
-        // Runtime selection is deliberately phone-authoritative. Ignore stale
-        // Desktop-origin records produced by older bidirectional bridge builds.
-        guard thread.runtimeSettingsSource == "phone" else {
+        if let settings = thread.runtimeSettings {
+            applyConfirmedRuntimeSettings(settings, threadId: thread.id)
+            return
+        }
+        // Read old bridge records until the host advertises settings protocol v2.
+        guard !supportsRuntimeSettingsSync, thread.runtimeSettingsSource == "phone" else {
             return
         }
         guard let revision = thread.runtimeSettingsRevision, revision > 0 else {

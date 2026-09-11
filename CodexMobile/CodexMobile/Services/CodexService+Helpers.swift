@@ -129,6 +129,7 @@ extension CodexService {
            merged.runtimeSettingsRevision == nil {
             merged.serviceTier = existing.serviceTier
         }
+        merged.runtimeSettings = merged.runtimeSettings ?? existing.runtimeSettings
         if merged.runtimeSettingsRevision == nil {
             merged.runtimeSettingsRevision = existing.runtimeSettingsRevision
             merged.runtimeSettingsUpdatedAt = existing.runtimeSettingsUpdatedAt

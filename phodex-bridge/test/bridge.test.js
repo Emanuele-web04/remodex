@@ -861,6 +861,7 @@ test("canonical turns-list requests strip bridge-only handoff state", () => {
     params: {
       threadId: "thread-handoff-strip",
       limit: 1,
+      itemsView: "summary",
     },
   });
   assert.equal(request.params.cursor, "remodex-jsonl-handoff-v1:token");

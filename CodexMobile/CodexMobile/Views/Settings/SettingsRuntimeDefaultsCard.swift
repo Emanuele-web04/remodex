@@ -32,7 +32,7 @@ struct SettingsRuntimeDefaultsCard: View {
                 isDisabled: runtimeReasoningOptions.isEmpty
             )
 
-            if codex.selectedModelSupportsServiceTier(.fast) {
+            if codex.selectedModelOption()?.serviceTiers.isEmpty == false {
                 SettingsMenuPickerRow(
                     title: "Speed",
                     value: runtimeServiceTierTitle,
@@ -84,7 +84,7 @@ struct SettingsRuntimeDefaultsCard: View {
 
     private var runtimeServiceTierPickerOptions: [SettingsMenuPickerOption<String>] {
         [SettingsMenuPickerOption(value: runtimeNormalValue, title: "Normal")]
-            + CodexServiceTier.allCases.map {
+            + (codex.selectedModelOption()?.serviceTiers ?? []).map {
                 SettingsMenuPickerOption(value: $0.rawValue, title: $0.displayName)
             }
     }

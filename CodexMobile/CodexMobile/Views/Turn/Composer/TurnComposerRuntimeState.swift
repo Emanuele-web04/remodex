@@ -13,13 +13,16 @@ struct TurnComposerRuntimeState: Equatable {
     let reasoningMenuDisabled: Bool
     let selectedServiceTier: CodexServiceTier?
     let supportsFastMode: Bool
+    var serviceTiers: [CodexServiceTier] = []
+    var settingsStatus: String? = nil
+    var inheritsServiceTier = false
 
     var selectedReasoningTitle: String {
         effectiveReasoningEffort.map(TurnComposerMetaMapper.reasoningTitle(for:)) ?? "Select reasoning"
     }
 
     var showsFastModeBadgeOnPill: Bool {
-        supportsFastMode && selectedServiceTier != nil
+        supportsFastMode && isSelectedServiceTier(.fast)
     }
 
     func isSelectedReasoning(_ effort: String) -> Bool {
@@ -27,7 +30,7 @@ struct TurnComposerRuntimeState: Equatable {
     }
 
     func isSelectedServiceTier(_ serviceTier: CodexServiceTier?) -> Bool {
-        selectedServiceTier == serviceTier
+        !inheritsServiceTier && selectedServiceTier == serviceTier
     }
 
     static func resolve(
@@ -35,6 +38,7 @@ struct TurnComposerRuntimeState: Equatable {
         threadId: String?,
         reasoningDisplayOptions: [TurnComposerReasoningDisplayOption]
     ) -> TurnComposerRuntimeState {
+        let inheritsServiceTier = codex.inheritsOwnerServiceTier(for: threadId)
         return TurnComposerRuntimeState(
             reasoningDisplayOptions: reasoningDisplayOptions,
             effectiveReasoningEffort: codex.selectedReasoningEffortForSelectedModel(threadId: threadId),
@@ -44,7 +48,19 @@ struct TurnComposerRuntimeState: Equatable {
             reasoningMenuDisabled: reasoningDisplayOptions.isEmpty
                 || codex.selectedModelOption(threadId: threadId) == nil,
             selectedServiceTier: codex.effectiveServiceTier(for: threadId),
-            supportsFastMode: codex.selectedModelSupportsServiceTier(.fast, threadId: threadId)
+            supportsFastMode: codex.selectedModelSupportsServiceTier(.fast, threadId: threadId),
+            serviceTiers: codex.selectedModelOption(threadId: threadId)?.serviceTiers ?? [],
+            settingsStatus: threadId.flatMap { id in
+                if codex.threadRuntimeOverride(for: id)?.pendingRuntimeSettings.isEmpty == false {
+                    if !codex.isConnected { return "Settings saved locally" }
+                    if !codex.supportsRuntimeSettingsSync { return "Applies when you send" }
+                    if codex.runtimeSettingsUpdateErrors[id] != nil { return "Settings not applied" }
+                    return "Updating settings…"
+                }
+                if inheritsServiceTier { return "Using task speed" }
+                return codex.runningThreadIDs.contains(id) ? "Applies to the next turn" : nil
+            },
+            inheritsServiceTier: inheritsServiceTier
         )
     }
 }
