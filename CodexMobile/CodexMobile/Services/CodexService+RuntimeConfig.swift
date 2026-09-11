@@ -466,6 +466,7 @@ extension CodexService {
     }
 
     func effectiveServiceTier(for threadId: String? = nil) -> CodexServiceTier? {
+        guard !inheritsOwnerServiceTier(for: threadId) else { return nil }
         let candidate: CodexServiceTier?
         if let threadOverride = threadRuntimeOverride(for: threadId),
            threadOverride.overridesServiceTier {
@@ -480,14 +481,18 @@ extension CodexService {
         return selectedModelSupportsServiceTier(candidate, threadId: threadId) ? candidate : nil
     }
 
+    func inheritsOwnerServiceTier(for threadId: String?) -> Bool {
+        threadId != nil && supportsRuntimeSettingsSync
+            && threadRuntimeOverride(for: threadId)?.overridesServiceTier != true
+    }
+
     func runtimeServiceTierForTurn(threadId: String? = nil) -> String? {
         guard supportsServiceTier else {
             return nil
         }
         // Existing tasks inherit owner speed until a per-task choice is known.
         // Device defaults apply to creation, not to an unhydrated Desktop task.
-        if threadId != nil, supportsRuntimeSettingsSync,
-           threadRuntimeOverride(for: threadId)?.overridesServiceTier != true { return nil }
+        if inheritsOwnerServiceTier(for: threadId) { return nil }
         return effectiveServiceTier(for: threadId)?.rawValue ?? "default"
     }
 

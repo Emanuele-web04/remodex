@@ -15,13 +15,14 @@ struct TurnComposerRuntimeState: Equatable {
     let supportsFastMode: Bool
     var serviceTiers: [CodexServiceTier] = []
     var settingsStatus: String? = nil
+    var inheritsServiceTier = false
 
     var selectedReasoningTitle: String {
         effectiveReasoningEffort.map(TurnComposerMetaMapper.reasoningTitle(for:)) ?? "Select reasoning"
     }
 
     var showsFastModeBadgeOnPill: Bool {
-        supportsFastMode && selectedServiceTier == .fast
+        supportsFastMode && isSelectedServiceTier(.fast)
     }
 
     func isSelectedReasoning(_ effort: String) -> Bool {
@@ -29,7 +30,7 @@ struct TurnComposerRuntimeState: Equatable {
     }
 
     func isSelectedServiceTier(_ serviceTier: CodexServiceTier?) -> Bool {
-        selectedServiceTier == serviceTier
+        !inheritsServiceTier && selectedServiceTier == serviceTier
     }
 
     static func resolve(
@@ -37,6 +38,7 @@ struct TurnComposerRuntimeState: Equatable {
         threadId: String?,
         reasoningDisplayOptions: [TurnComposerReasoningDisplayOption]
     ) -> TurnComposerRuntimeState {
+        let inheritsServiceTier = codex.inheritsOwnerServiceTier(for: threadId)
         return TurnComposerRuntimeState(
             reasoningDisplayOptions: reasoningDisplayOptions,
             effectiveReasoningEffort: codex.selectedReasoningEffortForSelectedModel(threadId: threadId),
@@ -55,8 +57,10 @@ struct TurnComposerRuntimeState: Equatable {
                     if codex.runtimeSettingsUpdateErrors[id] != nil { return "Settings not applied" }
                     return "Updating settings…"
                 }
+                if inheritsServiceTier { return "Using task speed" }
                 return codex.runningThreadIDs.contains(id) ? "Applies to the next turn" : nil
-            }
+            },
+            inheritsServiceTier: inheritsServiceTier
         )
     }
 }

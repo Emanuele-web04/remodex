@@ -162,7 +162,7 @@ struct ComposerRuntimeSliderOverlay: View {
             .contentShape(Circle())
         }
         .accessibilityLabel("Fast mode")
-        .accessibilityValue(isFastModeOn ? "On" : "Off")
+        .accessibilityValue(runtimeState.inheritsServiceTier ? "Using task speed" : (isFastModeOn ? "On" : "Off"))
         .accessibilityAddTraits(isFastModeOn ? .isSelected : [])
     }
 

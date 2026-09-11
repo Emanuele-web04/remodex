@@ -15,10 +15,12 @@ extension CodexService {
             "effort": selectedReasoningEffortForSelectedModel(threadId: threadId).map(JSONValue.string) ?? .null,
             "serviceTier": effectiveServiceTier(for: threadId).map { .string($0.rawValue) } ?? .null,
         ]
-        if supportsRuntimeSettingsSync, !override.overridesServiceTier {
+        if inheritsOwnerServiceTier(for: threadId) {
             desired.removeValue(forKey: "serviceTier")
         }
-        for field in fields where desired[field] != nil { override.pendingRuntimeSettings[field] = desired[field] }
+        // Assigning an omitted field removes an older staged edit when the user
+        // clears that override before owner discovery or reconnect completes.
+        for field in fields { override.pendingRuntimeSettings[field] = desired[field] }
         applyThreadRuntimeOverride(override, to: threadId)
         if lastErrorMessage == runtimeSettingsUpdateErrors[threadId] { lastErrorMessage = nil }
         runtimeSettingsUpdateErrors.removeValue(forKey: threadId)

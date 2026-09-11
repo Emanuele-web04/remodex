@@ -21,6 +21,9 @@ enum CodexServiceError: Error {
     let globalModel = "device-default"
     let globalEffort = "medium"
     let globalTier = CodexServiceTier.fast
+    var selectedServiceTier: CodexServiceTier?
+    var selectedReasoningEffort: String?
+    var runningThreadIDs: Set<String> = []
     var requests: [RPCObject] = []
     var resumedThreadIDs: Set<String> = []
     var resumeGate: CheckedContinuation<Void, Error>?
@@ -36,8 +39,9 @@ enum CodexServiceError: Error {
     func threadRuntimeOverride(for id: String?) -> CodexThreadRuntimeOverride? { id.flatMap { threadRuntimeOverridesByThreadID[$0] } }
     func applyThreadRuntimeOverride(_ value: CodexThreadRuntimeOverride, to id: String) { threadRuntimeOverridesByThreadID[id] = value }
     func runtimeModelIdentifierForTurn(threadId: String) -> String? { threadRuntimeOverride(for: threadId)?.modelId ?? globalModel }
-    func selectedReasoningEffortForSelectedModel(threadId: String) -> String? { threadRuntimeOverride(for: threadId)?.reasoningEffort ?? globalEffort }
-    func effectiveServiceTier(for id: String?) -> CodexServiceTier? { threadRuntimeOverride(for: id)?.serviceTier }
+    func selectedReasoningEffortForSelectedModel(threadId: String?) -> String? { threadRuntimeOverride(for: threadId)?.reasoningEffort ?? globalEffort }
+    func selectedModelSupportsServiceTier(_ tier: CodexServiceTier, threadId: String?) -> Bool { true }
+    func selectedModelOption(threadId: String?) -> CodexModelOption? { nil }
     func decodeModel<T: Decodable>(_ type: T.Type, from value: JSONValue) -> T? { try? JSONDecoder().decode(type, from: JSONEncoder().encode(value)) }
     func sendRequest(method: String, params: JSONValue) async throws -> RPCMessage {
         precondition(method == "thread/settings/update")
@@ -74,6 +78,42 @@ enum CodexServiceError: Error {
             modelId: "chosen-model", overridesModel: true, overridesReasoning: false, overridesServiceTier: false)
         unknown.queueThreadRuntimeSettingsUpdate(threadId: "model-only")
         precondition(unknown.threadRuntimeOverride(for: "model-only")?.pendingRuntimeSettings["serviceTier"] == nil)
+        for deviceTier: CodexServiceTier? in [nil, .fast] {
+            unknown.selectedServiceTier = deviceTier
+            let state = TurnComposerRuntimeState.resolve(codex: unknown, threadId: "unhydrated", reasoningDisplayOptions: [])
+            precondition(!state.isSelectedServiceTier(nil) && !state.isSelectedServiceTier(.fast),
+                         "Unhydrated task speed must not mark either device default as selected")
+            precondition(!state.showsFastModeBadgeOnPill)
+            let newTask = TurnComposerRuntimeState.resolve(codex: unknown, threadId: nil, reasoningDisplayOptions: [])
+            precondition(newTask.isSelectedServiceTier(deviceTier), "New tasks still display device defaults")
+        }
+        let normalState = TurnComposerRuntimeState.resolve(codex: unknown, threadId: "explicit-normal", reasoningDisplayOptions: [])
+        precondition(normalState.isSelectedServiceTier(nil), "Explicit Normal is selected even when the device default is Fast")
+        unknown.supportsRuntimeSettingsSync = false
+        precondition(TurnComposerRuntimeState.resolve(codex: unknown, threadId: "legacy", reasoningDisplayOptions: []).isSelectedServiceTier(.fast),
+                     "Legacy bridges still use the device speed default")
+        unknown.supportsRuntimeSettingsSync = true
+        unknown.selectedServiceTier = nil
+
+        // Clear a speed edit while resume is awaiting owner discovery. Preserve unrelated edits.
+        let cleared = CodexService()
+        cleared.delayResume = true
+        cleared.threadRuntimeOverridesByThreadID["clear-speed"] = CodexThreadRuntimeOverride(
+            reasoningEffort: "high", serviceTierRawValue: "priority", overridesReasoning: true, overridesServiceTier: true)
+        cleared.queueThreadRuntimeSettingsUpdate(threadId: "clear-speed", fields: ["effort", "serviceTier"])
+        try await until { cleared.resumeGate != nil }
+        precondition(cleared.threadRuntimeOverride(for: "clear-speed")?.pendingRuntimeSettings["serviceTier"] == .string("priority"))
+        cleared.threadRuntimeOverridesByThreadID["clear-speed"]!.serviceTierRawValue = nil
+        cleared.threadRuntimeOverridesByThreadID["clear-speed"]!.overridesServiceTier = false
+        cleared.queueThreadRuntimeSettingsUpdate(threadId: "clear-speed", fields: ["serviceTier"])
+        precondition(cleared.threadRuntimeOverride(for: "clear-speed")?.pendingRuntimeSettings["serviceTier"] == nil,
+                     "Returning to inherited speed removes the staged speed update")
+        cleared.resumeGate!.resume()
+        try await until { cleared.responses.count == 1 }
+        precondition(cleared.requests[0] == ["threadId": .string("clear-speed"), "effort": .string("high")])
+        try cleared.acknowledge(0, settings(1))
+        try await cleared.waitForRuntimeSettingsUpdate(threadId: "clear-speed")
+
         let legacy = try JSONDecoder().decode(CodexModelOption.self, from: Data(
             #"{"id":"legacy-model","model":"legacy-model","additional_speed_tiers":[" Fast "]}"#.utf8))
         precondition(legacy.supportsFastMode, "Legacy speed metadata remains case insensitive")
@@ -87,6 +127,8 @@ enum CodexServiceError: Error {
         precondition(unknown.threadRuntimeOverride(for: "speed-only")?.modelId == "local-model")
         precondition(unknown.threadRuntimeOverride(for: "speed-only")?.reasoningEffort == "ultra")
         precondition(unknown.runtimeServiceTierForTurn(threadId: "speed-only") == "priority")
+        precondition(TurnComposerRuntimeState.resolve(codex: unknown, threadId: "speed-only", reasoningDisplayOptions: []).showsFastModeBadgeOnPill,
+                     "The owner confirmation selects Fast in the composer")
 
         let service = CodexService()
         let id = "task"
