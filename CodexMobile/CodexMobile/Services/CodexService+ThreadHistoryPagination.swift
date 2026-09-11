@@ -149,6 +149,7 @@ extension CodexService {
             "threadId": .string(threadId),
             "limit": .integer(limit),
             "sortDirection": .string("desc"),
+            "itemsView": .string("full"),
         ]
         if let cursor, cursorHasValue(cursor) {
             params["cursor"] = cursor

@@ -847,11 +847,11 @@ test("builds desktop follower reply payloads from iOS responses", () => {
       },
     }),
     {
-      method: "thread-follower-file-approval-decision",
+      method: "thread-follower-permissions-request-approval-response",
       params: {
         conversationId: "thread-1",
         requestId: "req-permissions",
-        decision: "accept",
+        response: { permissions: { network: { enabled: true } }, scope: "turn" },
       },
     }
   );
@@ -869,11 +869,11 @@ test("builds desktop follower reply payloads from iOS responses", () => {
       },
     }),
     {
-      method: "thread-follower-file-approval-decision",
+      method: "thread-follower-permissions-request-approval-response",
       params: {
         conversationId: "thread-1",
         requestId: "req-permissions",
-        decision: "decline",
+        response: { permissions: {}, scope: "turn" },
       },
     }
   );
@@ -2171,7 +2171,9 @@ test("desktop IPC follower routes phone turns to Desktop-owned threads", async (
           handledByClientId: "desktop",
           result: frame.method === "thread-follower-start-turn"
             ? { result: { turn: { id: "turn-from-phone" } } }
-            : { turn: { id: "turn-from-phone" } },
+            : frame.method === "thread-follower-steer-turn"
+              ? { result: { turnId: "turn-from-phone" } }
+              : { turn: { id: "turn-from-phone" } },
         });
       }
     });
@@ -2250,7 +2252,7 @@ test("desktop IPC follower routes phone turns to Desktop-owned threads", async (
     threadSettings: {
       model: "gpt-test",
       effort: "low",
-      serviceTier: "fast",
+      serviceTier: "priority",
     },
   });
   assert.ok(
@@ -2358,9 +2360,19 @@ test("desktop IPC follower routes phone turns to Desktop-owned threads", async (
     await waitFor(() => outbound.find((message) => message.id === request.id));
     assert.deepEqual(outbound.find((message) => message.id === request.id), {
       id: request.id,
-      result: { turn: { id: "turn-from-phone" } },
+      result: request.method === "turn/steer" ? { turnId: "turn-from-phone" } : { turn: { id: "turn-from-phone" } },
     });
   }
+
+  follower.observeInbound(JSON.stringify({
+    id: "phone-settings-update-1", method: "thread/settings/update",
+    params: { threadId: "thread-desktop-owned", model: "gpt-6-astra", effort: "ultra", serviceTier: null },
+  }));
+  await waitFor(() => outbound.some((message) => message.id === "phone-settings-update-1"));
+  assert.equal(outbound.find((message) => message.id === "phone-settings-update-1").error, undefined);
+  assert.deepEqual(serverFrames.filter((frame) => frame.method === "thread-follower-update-thread-settings").at(-1).params.threadSettings, {
+    model: "gpt-6-astra", effort: "ultra", serviceTier: null,
+  });
 
   const serverFrameCountBeforeUnsupportedMutations = serverFrames.length;
   const unsupportedMutations = [
@@ -2375,12 +2387,6 @@ test("desktop IPC follower routes phone turns to Desktop-owned threads", async (
       method: "review/start",
       params: { target: { type: "uncommittedChanges" } },
       message: "Start this review in Codex Desktop.",
-    },
-    {
-      id: "phone-settings-update-1",
-      method: "thread/settings/update",
-      params: { approvalsReviewer: "auto_review" },
-      message: "Change these thread settings in Codex Desktop.",
     },
   ];
   for (const mutation of unsupportedMutations) {
@@ -2506,7 +2512,8 @@ test("desktop IPC follower falls back locally when no Desktop client can handle 
   );
 });
 
-test("desktop IPC follower falls back locally when Desktop settings sync times out before turn delivery", async (t) => {
+for (const failure of ["timeout", "no-client-found"]) {
+test(`desktop IPC follower keeps Desktop ownership when pre-turn settings fail with ${failure}`, async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-follower-settings-timeout-");
   const serverFrames = [];
   const localForwards = [];
@@ -2525,6 +2532,9 @@ test("desktop IPC follower falls back locally when Desktop settings sync times o
           handledByClientId: "desktop",
           result: { clientId: "remodex-test" },
         });
+      }
+      if (failure === "no-client-found" && frame.method === "thread-follower-update-thread-settings") {
+        writeFrame(socket, { type: "response", requestId: frame.requestId, resultType: "error", error: failure });
       }
       // Model an inactive/stale Desktop owner: the router accepts the settings
       // request, but no renderer answers it before the bridge timeout.
@@ -2582,20 +2592,21 @@ test("desktop IPC follower falls back locally when Desktop settings sync times o
   }));
   assert.equal(handled, true);
 
-  await waitFor(() => localForwards.length === 1, 1_000);
-  assert.equal(localForwards[0].id, "phone-turn-start-settings-timeout");
-  assert.equal(localForwards[0].method, "turn/start");
+  await waitFor(() => outbound.some((message) => message.id === "phone-turn-start-settings-timeout"), 1_000);
+  assert.equal(localForwards.length, 0);
   assert.equal(
     serverFrames.some((frame) => frame.method === "thread-follower-start-turn"),
     false,
     "the Desktop turn must not be sent after settings sync times out"
   );
   assert.equal(
-    outbound.some((message) => message.id === "phone-turn-start-settings-timeout"),
-    false,
-    "the local app-server owns the eventual response"
+    Boolean(outbound.find((message) => message.id === "phone-turn-start-settings-timeout")?.error),
+    true,
+    "the phone must receive the settings failure without starting a competing writer"
   );
 });
+
+}
 
 test("desktop IPC follower does not rerun ambiguous Desktop failures locally", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-follower-ambiguous-error-");
@@ -4987,7 +4998,8 @@ test("desktop IPC follower keeps held phone turns queued when discovery denies o
   );
 });
 
-test("desktop IPC follower forwards held phone turns to local codex when no snapshot arrives", async (t) => {
+for (const method of ["turn/start", "thread/settings/update"]) {
+test(`desktop IPC follower routes held ${method} locally after a definitive no-owner response`, async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-hold-timeout-");
   const serverFrames = [];
   const localForwards = [];
@@ -5043,7 +5055,7 @@ test("desktop IPC follower forwards held phone turns to local codex when no snap
   }));
   const handled = follower.observeInbound(JSON.stringify({
     id: "phone-turn-start-timeout",
-    method: "turn/start",
+    method,
     params: {
       threadId: "thread-hold-timeout",
       input: [{ type: "input_text", text: "no desktop here" }],
@@ -5053,8 +5065,10 @@ test("desktop IPC follower forwards held phone turns to local codex when no snap
 
   await waitFor(() => localForwards.length > 0, 1_000);
   assert.equal(localForwards[0].id, "phone-turn-start-timeout");
-  assert.equal(localForwards[0].method, "turn/start");
+  assert.equal(localForwards[0].method, method);
 });
+
+}
 
 test("desktop IPC follower ignores Remodex-owned live owner broadcasts", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-owner-echo-");

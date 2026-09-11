@@ -175,6 +175,13 @@ extension CodexService {
 
     // Handles stream notifications to keep UI state in sync.
     func handleNotification(method: String, params: JSONValue?) {
+        if method == "remodex/runtimeSettings/updated",
+           let threadId = params?.objectValue?["threadId"]?.stringValue,
+           let value = params?.objectValue?["runtimeSettings"],
+           let settings = decodeModel(CodexRuntimeSettings.self, from: value) {
+            applyConfirmedRuntimeSettings(settings, threadId: threadId)
+            return
+        }
         let paramsObject = params?.objectValue
         let previousReplayScope = isApplyingReplayedBridgeEvent
         if isBufferedReplayResetEvent(paramsObject) {

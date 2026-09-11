@@ -117,6 +117,7 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
     var modelProvider: String?
     var reasoningEffort: String?
     var serviceTier: String?
+    var runtimeSettings: CodexRuntimeSettings?
     var runtimeSettingsRevision: Int?
     var runtimeSettingsUpdatedAt: Double?
     var runtimeSettingsSource: String?
@@ -144,6 +145,7 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
         modelProvider: String? = nil,
         reasoningEffort: String? = nil,
         serviceTier: String? = nil,
+        runtimeSettings: CodexRuntimeSettings? = nil,
         runtimeSettingsRevision: Int? = nil,
         runtimeSettingsUpdatedAt: Double? = nil,
         runtimeSettingsSource: String? = nil,
@@ -168,6 +170,7 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
         self.modelProvider = Self.normalizeIdentifier(modelProvider)
         self.reasoningEffort = Self.normalizeIdentifier(reasoningEffort)
         self.serviceTier = Self.normalizeIdentifier(serviceTier)
+        self.runtimeSettings = runtimeSettings
         self.runtimeSettingsRevision = runtimeSettingsRevision
         self.runtimeSettingsUpdatedAt = runtimeSettingsUpdatedAt
         self.runtimeSettingsSource = Self.normalizeIdentifier(runtimeSettingsSource)
@@ -212,6 +215,7 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
         case reasoningEffortSnake = "reasoning_effort"
         case serviceTier
         case serviceTierSnake = "service_tier"
+        case runtimeSettings
         case runtimeSettingsRevision
         case runtimeSettingsRevisionSnake = "runtime_settings_revision"
         case runtimeSettingsUpdatedAt
@@ -292,6 +296,7 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
             keys: [.reasoningEffort, .reasoningEffortSnake]
         )
         serviceTier = Self.decodeIdentifierIfPresent(from: container, keys: [.serviceTier, .serviceTierSnake])
+        runtimeSettings = try container.decodeIfPresent(CodexRuntimeSettings.self, forKey: .runtimeSettings)
         runtimeSettingsRevision = Self.decodeIntegerIfPresent(
             from: container,
             keys: [.runtimeSettingsRevision, .runtimeSettingsRevisionSnake]
@@ -331,6 +336,7 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
         try container.encodeIfPresent(Self.normalizeIdentifier(modelProvider), forKey: .modelProvider)
         try container.encodeIfPresent(Self.normalizeIdentifier(reasoningEffort), forKey: .reasoningEffort)
         try container.encodeIfPresent(Self.normalizeIdentifier(serviceTier), forKey: .serviceTier)
+        try container.encodeIfPresent(runtimeSettings, forKey: .runtimeSettings)
         try container.encodeIfPresent(runtimeSettingsRevision, forKey: .runtimeSettingsRevision)
         try container.encodeIfPresent(runtimeSettingsUpdatedAt, forKey: .runtimeSettingsUpdatedAt)
         try container.encodeIfPresent(Self.normalizeIdentifier(runtimeSettingsSource), forKey: .runtimeSettingsSource)

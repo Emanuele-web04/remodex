@@ -55,7 +55,7 @@ struct TurnComposerRuntimeMenuBuilder {
     }
 
     private func makeSpeedMenu() -> UIMenu? {
-        guard runtimeState.supportsFastMode else {
+        guard !runtimeState.serviceTiers.isEmpty else {
             return nil
         }
 
@@ -69,7 +69,7 @@ struct TurnComposerRuntimeMenuBuilder {
         ]
 
         children.append(
-            contentsOf: CodexServiceTier.allCases.map { serviceTier in
+            contentsOf: runtimeState.serviceTiers.map { serviceTier in
                 UIAction(
                     title: serviceTier.displayName,
                     image: RemodexIcon.menuUIImage(systemName: serviceTier.iconName),

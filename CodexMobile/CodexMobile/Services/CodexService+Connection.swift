@@ -153,6 +153,7 @@ extension CodexService {
         cancelCurrentSocketConnection()
 
         isConnected = false
+        cancelRuntimeSettingsUpdates()
         isInitialized = false
         isLoadingThreads = false
         isLoadingModels = false
@@ -358,6 +359,7 @@ extension CodexService {
                 timeoutNanoseconds: Self.connectionBootstrapRequestTimeoutNanoseconds,
                 timeoutMessage: "Connection timed out while reconnecting. Try again."
             )
+            supportsRuntimeSettingsSync = initializeResponse.result?.objectValue?["remodexRuntimeSettingsVersion"]?.intValue == 2
             learnTurnPaginationSupportFromInitializeResponse(initializeResponse)
             // A successful modern initialize means the runtime accepted the experimental
             // capability negotiation. Keep plan-mode sends enabled unless the runtime
@@ -384,6 +386,7 @@ extension CodexService {
                     timeoutNanoseconds: Self.connectionBootstrapRequestTimeoutNanoseconds,
                     timeoutMessage: "Connection timed out while reconnecting. Try again."
                 )
+                supportsRuntimeSettingsSync = initializeResponse.result?.objectValue?["remodexRuntimeSettingsVersion"]?.intValue == 2
                 learnTurnPaginationSupportFromInitializeResponse(initializeResponse)
             } catch {
                 if let incompatibleAppVersionError = incompatibleBridgeAppVersionError(from: error) {
@@ -397,6 +400,7 @@ extension CodexService {
 
         try await sendNotification(method: "initialized", params: nil)
         isInitialized = true
+        resumePendingRuntimeSettingsUpdates()
         if shouldProbePlanCollaborationMode {
             schedulePlanCollaborationModeProbe()
         }
@@ -497,6 +501,7 @@ extension CodexService {
 
         cancelCurrentSocketConnection()
 
+        cancelRuntimeSettingsUpdates()
         let disposition = receiveErrorDisposition(for: error, relayCloseCode: relayCloseCode)
         isConnected = false
         isInitialized = false
@@ -675,6 +680,7 @@ extension CodexService {
 
     // Clears volatile runtime state on server switch.
     func resetThreadRuntimeStateForServerSwitch() {
+        resetRuntimeSettingsSyncState()
         activeThreadId = nil
         activeTurnId = nil
         activeTurnIdByThread.removeAll()

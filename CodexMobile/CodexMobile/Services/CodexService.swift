@@ -165,6 +165,8 @@ struct CodexThreadRuntimeOverride: Codable, Equatable, Sendable {
     var overridesServiceTier: Bool
     var runtimeSettingsRevision: Int
     var runtimeSettingsUpdatedAt: Double
+    var runtimeSettingsEpoch: String? = nil
+    var pendingRuntimeSettings: RPCObject = [:]
 
     init(
         modelId: String? = nil,
@@ -195,6 +197,8 @@ struct CodexThreadRuntimeOverride: Codable, Equatable, Sendable {
         case overridesServiceTier
         case runtimeSettingsRevision
         case runtimeSettingsUpdatedAt
+        case runtimeSettingsEpoch
+        case pendingRuntimeSettings
     }
 
     init(from decoder: Decoder) throws {
@@ -207,6 +211,8 @@ struct CodexThreadRuntimeOverride: Codable, Equatable, Sendable {
         overridesServiceTier = try container.decodeIfPresent(Bool.self, forKey: .overridesServiceTier) ?? false
         runtimeSettingsRevision = try container.decodeIfPresent(Int.self, forKey: .runtimeSettingsRevision) ?? 0
         runtimeSettingsUpdatedAt = try container.decodeIfPresent(Double.self, forKey: .runtimeSettingsUpdatedAt) ?? 0
+        runtimeSettingsEpoch = try container.decodeIfPresent(String.self, forKey: .runtimeSettingsEpoch)
+        pendingRuntimeSettings = try container.decodeIfPresent(RPCObject.self, forKey: .pendingRuntimeSettings) ?? [:]
     }
 
     var serviceTier: CodexServiceTier? {
@@ -217,7 +223,7 @@ struct CodexThreadRuntimeOverride: Codable, Equatable, Sendable {
     }
 
     var isEmpty: Bool {
-        !overridesModel && !overridesReasoning && !overridesServiceTier
+        !overridesModel && !overridesReasoning && !overridesServiceTier && pendingRuntimeSettings.isEmpty
     }
 }
 
@@ -521,6 +527,12 @@ final class CodexService {
     var supportsTurnCollaborationMode = false
     // Runtime compatibility flag for `thread/start|turn/start.serviceTier` speed controls.
     var supportsServiceTier = true
+    var supportsRuntimeSettingsSync = false
+    @ObservationIgnored var runtimeSettingsUpdateTasks: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored var runtimeSettingsUpdateIDs: [String: UUID] = [:]
+    @ObservationIgnored var retiredRuntimeSettingsEpochs: [String: Set<String>] = [:]
+    var runtimeSettingsUpdateErrors: [String: String] = [:]
+    var confirmedRuntimeSettings: [String: CodexRuntimeSettings] = [:]
     // Runtime compatibility flag for the bridge-owned voice transcription flow.
     var supportsBridgeVoiceTranscription = true
     var supportedBridgeVoiceTranscriptionFormats: Set<String> = ["wav"]
@@ -916,9 +928,7 @@ final class CodexService {
 
         let savedServiceTier = defaults.string(forKey: Self.selectedServiceTierDefaultsKey)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        if savedServiceTier == "flex" {
-            self.selectedServiceTier = nil
-        } else if let savedServiceTier,
+        if let savedServiceTier,
            let parsedServiceTier = CodexServiceTier(rawValue: savedServiceTier) {
             self.selectedServiceTier = parsedServiceTier
         } else {

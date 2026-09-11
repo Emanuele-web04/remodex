@@ -256,6 +256,7 @@ extension CodexService {
 
     // Clears in-memory state that is tied to the active Mac before another Mac is loaded.
     func clearInMemoryMacScopedState() {
+        resetRuntimeSettingsSyncState()
         withApplyingMacScopedState {
             threads = []
             restoredThreadSnapshotIDs.removeAll()

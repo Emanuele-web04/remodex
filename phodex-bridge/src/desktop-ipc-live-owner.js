@@ -5,6 +5,12 @@
 // Depends on: net, ./desktop-ipc-conversation-adapter, ./desktop-ipc-owner-transport, ./desktop-ipc-state-patches, ./desktop-ipc-shared
 
 const net = require("net");
+const {
+  applyRuntimeSettingsToConversation,
+  createThreadMutationQueue,
+  hasOwn,
+  normalizeThreadSettingsUpdate,
+} = require("./codex-runtime-settings");
 
 const {
   CLIENT_STATUS_CHANGED,
@@ -187,6 +193,7 @@ function createDesktopIpcLiveOwner({
   // until the first user item and turn completion prove the rollout was written.
   const pendingSidebarMaterializationThreadIds = new Set();
   const replayedSidebarMaterializationThreadIds = new Set();
+  const enqueueMutation = createThreadMutationQueue();
   const pendingTurnStartParamsByThreadId = new Map();
   const pendingTurnStartEntriesByRequestId = new Map();
   const followerRuntimeOverridesByThreadId = new Map();
@@ -315,6 +322,19 @@ function createDesktopIpcLiveOwner({
       pendingReadStateByThreadId.clear();
     }
 
+    if (message.method === "thread/settings/updated") {
+      const threadId = readThreadIdFromParams(message.params);
+      const settings = message.params?.threadSettings;
+      if (threadId && settings && ownedThreadIds.has(threadId)) {
+        followerRuntimeOverridesByThreadId.set(threadId, {
+          ...(followerRuntimeOverridesByThreadId.get(threadId) || {}),
+          ...normalizeThreadSettingsUpdate(settings, { authoritative: true }),
+        });
+        applyRuntimeSettingsToConversation(conversations.get(threadId), settings, { authoritative: true });
+        runtimeSettingsStore?.observe?.(threadId, settings);
+        scheduleSnapshot(threadId);
+      }
+    }
     const responseId = message.id == null ? "" : String(message.id);
     if (responseId && !message.method) {
       resolvePendingTurnStartResponse(responseId, message);
@@ -525,7 +545,7 @@ function createDesktopIpcLiveOwner({
     }
     const sanitizedParams = sanitizeTurnStartParams(cloneJSON(params));
     sanitizedParams.input = normalizeInputEntriesForDesktop(sanitizedParams.input);
-    const entry = { params: sanitizedParams, requestId: normalizedRequestId || null };
+    const entry = { params: sanitizedParams, requestId: normalizedRequestId || null, runtimeSettingsRevision: runtimeSettingsStore?.get?.(normalizedThreadId)?.revision ?? 0 };
     const queue = pendingTurnStartParamsByThreadId.get(normalizedThreadId) || [];
     queue.push(entry);
     pendingTurnStartParamsByThreadId.set(normalizedThreadId, queue);
@@ -585,7 +605,8 @@ function createDesktopIpcLiveOwner({
       pending.threadId,
       pending.entry?.params,
       "phone",
-      readTurnIdFromResult(message.result)
+      readTurnIdFromResult(message.result),
+      pending.entry?.runtimeSettingsRevision
     );
     scheduleSnapshot(pending.threadId);
   }
@@ -1438,10 +1459,15 @@ function createDesktopIpcLiveOwner({
     return { revision };
   }
 
-  async function handleFollowerStartTurn(conversationId, params) {
+  function handleFollowerStartTurn(conversationId, params) {
+    return enqueueMutation(conversationId, () => startFollowerTurn(conversationId, params));
+  }
+
+  async function startFollowerTurn(conversationId, params) {
     if (params.turnStart?.context?.responseItems?.length > 0) {
       throw new Error("Remodex does not support untrusted app input yet.");
     }
+    const revisionBefore = runtimeSettingsStore?.get?.(conversationId)?.revision ?? 0;
     const rawTurnStartParams = readFollowerTurnStartParams(params);
     const codexParams = mergeFollowerRuntimeOverrides(conversationId, sanitizeTurnStartParams({
       ...rawTurnStartParams,
@@ -1474,7 +1500,8 @@ function createDesktopIpcLiveOwner({
         conversationId,
         nextCodexParams,
         isKnownHeldPhoneStart ? "phone" : "desktop",
-        readTurnIdFromResult(turnStartResult)
+        readTurnIdFromResult(turnStartResult),
+        revisionBefore
       );
       scheduleSnapshot(conversationId);
       if (!isKnownHeldPhoneStart) {
@@ -1538,11 +1565,13 @@ function createDesktopIpcLiveOwner({
     if (!expectedTurnId) {
       throw new Error("Missing expectedTurnId for follower steer request.");
     }
-    return await sendCodexRequest("turn/steer", {
+    const result = await sendCodexRequest("turn/steer", {
       threadId: conversationId,
       input: Array.isArray(rawSteerParams.input) ? rawSteerParams.input : [],
       expectedTurnId,
+      ...Object.fromEntries(["clientUserMessageId", "additionalContext", "toolOutput"].filter((key) => hasOwn(rawSteerParams, key)).map((key) => [key, cloneJSON(rawSteerParams[key])])),
     });
+    return { result };
   }
 
   async function handleFollowerInterruptTurn(conversationId, params) {
@@ -1629,100 +1658,49 @@ function createDesktopIpcLiveOwner({
     return { ok: true };
   }
 
-  // Desktop runtime option changes are persisted as per-thread overrides and
-  // merged into later Desktop-origin turn starts, so acknowledging them is honest
-  // instead of a cosmetic broadcast-only update.
+  // Legacy IPC verbs enter the same acknowledged settings path.
   function applyFollowerModelAndReasoning(conversationId, params) {
-    const overrides = followerRuntimeOverridesByThreadId.get(conversationId) || {};
-    const conversation = conversations.get(conversationId);
-    if (Object.prototype.hasOwnProperty.call(params, "model")) {
-      overrides.model = readString(params.model);
-      if (conversation) {
-        conversation.latestModel = overrides.model;
-      }
-    }
-    if (Object.prototype.hasOwnProperty.call(params, "reasoningEffort")) {
-      overrides.effort = params.reasoningEffort || null;
-      if (conversation) {
-        conversation.latestReasoningEffort = overrides.effort;
-      }
-    }
-    if (Object.prototype.hasOwnProperty.call(params, "serviceTier")) {
-      overrides.serviceTier = readString(params.serviceTier) || null;
-      if (conversation) {
-        conversation.latestServiceTier = overrides.serviceTier;
-      }
-    }
-    followerRuntimeOverridesByThreadId.set(conversationId, overrides);
-    if (conversation) {
-      scheduleSnapshot(conversationId);
-    }
-    return { ok: true };
+    const settings = normalizeThreadSettingsUpdate(params);
+    if (hasOwn(params, "reasoningEffort")) settings.effort = params.reasoningEffort;
+    return applyFollowerThreadSettings(conversationId, settings);
   }
 
   function applyFollowerCollaborationMode(conversationId, params) {
-    if (!params.collaborationMode) {
-      return { ok: true };
-    }
-    const overrides = followerRuntimeOverridesByThreadId.get(conversationId) || {};
-    overrides.collaborationMode = cloneJSON(params.collaborationMode);
-    followerRuntimeOverridesByThreadId.set(conversationId, overrides);
-    const conversation = conversations.get(conversationId);
-    if (conversation) {
-      conversation.latestCollaborationMode = cloneJSON(params.collaborationMode);
-      scheduleSnapshot(conversationId);
-    }
-    return { ok: true };
+    return applyFollowerThreadSettings(conversationId, { collaborationMode: params.collaborationMode });
   }
 
-  // Current Desktop sends the whole thread-settings object; persist it so the
-  // composer fields stay accurate and future Desktop-origin turns pick it up.
-  function applyFollowerThreadSettings(conversationId, threadSettings) {
-    if (!threadSettings || typeof threadSettings !== "object" || Array.isArray(threadSettings)) {
-      return { ok: true };
-    }
-    const overrides = followerRuntimeOverridesByThreadId.get(conversationId) || {};
-    const model = readString(threadSettings.model)
-      || readString(threadSettings.collaborationMode?.settings?.model);
-    const effort = threadSettings.effort;
-    const hasServiceTier = Object.prototype.hasOwnProperty.call(threadSettings, "serviceTier");
-    if (model) {
-      overrides.model = model;
-    }
-    if (effort !== undefined) {
-      overrides.effort = effort ?? null;
-    }
-    if (hasServiceTier) {
-      overrides.serviceTier = readString(threadSettings.serviceTier) || null;
-    }
-    if (threadSettings.collaborationMode && typeof threadSettings.collaborationMode === "object") {
-      overrides.collaborationMode = cloneJSON(threadSettings.collaborationMode);
-    }
-    followerRuntimeOverridesByThreadId.set(conversationId, overrides);
-
-    const conversation = conversations.get(conversationId);
-    if (conversation) {
-      conversation.latestThreadSettings = {
-        ...(conversation.latestThreadSettings && typeof conversation.latestThreadSettings === "object"
-          ? conversation.latestThreadSettings
-          : {}),
-        ...cloneJSON(threadSettings),
-      };
-      if (model) {
-        conversation.latestModel = model;
+  // Settings are acknowledged by the app-server before they become composer
+  // state. Updating a mirror alone never changes the executing runtime.
+  function applyFollowerThreadSettings(conversationId, threadSettings, source = "desktop") {
+    return enqueueMutation(conversationId, async () => {
+      if (!threadSettings || typeof threadSettings !== "object" || Array.isArray(threadSettings)) {
+        throw new Error("Missing thread settings.");
       }
-      if (effort !== undefined) {
-        conversation.latestReasoningEffort = effort ?? null;
+      const revisionBefore = runtimeSettingsStore?.get?.(conversationId)?.revision;
+      const settings = normalizeThreadSettingsUpdate(threadSettings);
+      await sendCodexRequest("thread/settings/update", { threadId: conversationId, ...settings });
+      if (!ownedThreadIds.has(conversationId)) {
+        // A successful settings mutation proves the local runtime has this task
+        // loaded. Announce ownership only after that acknowledgement and hydrate
+        // complete history before publishing the first Desktop snapshot.
+        markOwnedThread(conversationId);
+        threadsAwaitingInitialHistoryByThreadId.add(conversationId);
+        seedOwnedConversation(conversationId);
+        requestInitialHistoryBaselineIfDue(conversationId);
       }
-      if (hasServiceTier) {
-        conversation.latestServiceTier = overrides.serviceTier;
-      }
-      if (overrides.collaborationMode) {
-        conversation.latestCollaborationMode = cloneJSON(overrides.collaborationMode);
-      }
+      const current = runtimeSettingsStore?.get?.(conversationId);
+      const confirmed = current && current.revision !== revisionBefore
+        ? current
+        : runtimeSettingsStore?.commit?.(conversationId, settings, { source });
+      const applied = confirmed ? {
+        ...settings, model: confirmed.model, effort: confirmed.reasoningEffort, serviceTier: confirmed.serviceTier,
+      } : settings;
+      const overrides = followerRuntimeOverridesByThreadId.get(conversationId) || {};
+      followerRuntimeOverridesByThreadId.set(conversationId, { ...overrides, ...applied });
+      applyRuntimeSettingsToConversation(conversations.get(conversationId), applied, { authoritative: !!confirmed });
       scheduleSnapshot(conversationId);
-    }
-    return { ok: true };
+      return { ok: true, runtimeSettings: confirmed || null };
+    });
   }
 
   // Desktop followers hand the owner the full queue map and expect it to run
@@ -1786,41 +1764,40 @@ function createDesktopIpcLiveOwner({
     }
 
     runningQueuedFollowUpThreadIds.add(threadId);
-    const conversation = conversations.get(threadId);
-    const startParams = mergeFollowerRuntimeOverrides(threadId, sanitizeTurnStartParams({
-      threadId,
-      input: [{ type: "text", text }],
-      cwd: readString(entry?.cwd) || readString(conversation?.cwd) || undefined,
-    }));
-    let queuedTurnParams = startParams;
-    Promise.resolve()
-      .then(() => normalizeTurnStartParams(cloneJSON(startParams)))
-      .then((normalized) => {
-        const params = normalized && typeof normalized === "object" && !Array.isArray(normalized)
-          ? normalized
-          : startParams;
-        queuedTurnParams = params;
-        const pendingEntry = rememberPendingTurnStart(threadId, params);
-        if (pendingEntry) {
-          insertOptimisticPendingTurn(threadId, pendingEntry);
-          scheduleSnapshot(threadId);
-        }
-        return sendCodexRequest("turn/start", params);
-      })
-      .then((turnStartResult) => {
-        commitAcceptedRuntimeSettings(
-          threadId,
-          queuedTurnParams,
-          "desktop",
-          readTurnIdFromResult(turnStartResult)
-        );
+    enqueueMutation(threadId, async () => {
+      // Settings may still be awaiting acknowledgement when the active turn
+      // completes. Resolve choices only when this queued turn reaches the owner.
+      const canStart = () => ownedThreadIds.has(threadId)
+        && queuedFollowUpsByThreadId.get(threadId)?.[0] === entry
+        && !entry.pausedReason
+        && !activeTurnIdForConversation(threadId);
+      if (!canStart()) return;
+      const revisionBefore = runtimeSettingsStore?.get?.(threadId)?.revision ?? 0;
+      const conversation = conversations.get(threadId);
+      const startParams = mergeFollowerRuntimeOverrides(threadId, sanitizeTurnStartParams({
+        threadId,
+        input: [{ type: "text", text }],
+        cwd: readString(entry?.cwd) || readString(conversation?.cwd) || undefined,
+      }));
+      const normalized = await normalizeTurnStartParams(cloneJSON(startParams));
+      if (!canStart()) return;
+      const params = normalized && typeof normalized === "object" && !Array.isArray(normalized)
+        ? normalized : startParams;
+      const pendingEntry = rememberPendingTurnStart(threadId, params);
+      if (pendingEntry) {
+        insertOptimisticPendingTurn(threadId, pendingEntry);
         scheduleSnapshot(threadId);
-        queue.shift();
-        if (queue.length === 0) {
-          queuedFollowUpsByThreadId.delete(threadId);
-        }
-        broadcastQueuedFollowUps(threadId);
-      })
+      }
+      const turnStartResult = await sendCodexRequest("turn/start", params);
+      commitAcceptedRuntimeSettings(threadId, params, "desktop", readTurnIdFromResult(turnStartResult), revisionBefore);
+      scheduleSnapshot(threadId);
+      const currentQueue = queuedFollowUpsByThreadId.get(threadId);
+      const sentIndex = currentQueue?.findIndex((candidate) => candidate === entry
+        || (readString(entry.id) && candidate.id === entry.id)) ?? -1;
+      if (sentIndex >= 0) currentQueue.splice(sentIndex, 1);
+      if (currentQueue?.length === 0) queuedFollowUpsByThreadId.delete(threadId);
+      broadcastQueuedFollowUps(threadId);
+    })
       .catch((error) => {
         console.warn(`${logPrefix} desktop queued follow-up failed for ${threadId}: ${error?.message || "unknown error"}`);
       })
@@ -1849,11 +1826,11 @@ function createDesktopIpcLiveOwner({
     if (overrides.model && !readString(merged.model)) {
       merged.model = overrides.model;
     }
-    if (overrides.effort != null && merged.effort == null) {
+    if (hasOwn(overrides, "effort") && !hasOwn(merged, "effort")) {
       merged.effort = overrides.effort;
     }
-    if (overrides.serviceTier && merged.serviceTier == null) {
-      merged.serviceTier = overrides.serviceTier;
+    if (hasOwn(overrides, "serviceTier") && !hasOwn(merged, "serviceTier")) {
+      merged.serviceTier = overrides.serviceTier || "default";
     }
     if (overrides.collaborationMode && merged.collaborationMode == null) {
       merged.collaborationMode = cloneJSON(overrides.collaborationMode);
@@ -1861,11 +1838,14 @@ function createDesktopIpcLiveOwner({
     return merged;
   }
 
-  function commitAcceptedRuntimeSettings(threadId, params, source, turnId) {
+  function commitAcceptedRuntimeSettings(threadId, params, source, turnId, revisionBefore) {
     try {
-      const settings = runtimeSettingsStore?.commit?.(threadId, params, { source, turnId });
+      const current = runtimeSettingsStore?.get?.(threadId);
+      const settings = current && revisionBefore != null && current.revision !== revisionBefore
+        ? current : runtimeSettingsStore?.commit?.(threadId, params, { source, turnId });
       const conversation = conversations.get(threadId);
       if (settings && conversation) {
+        applyRuntimeSettingsToConversation(conversation, { model: settings.model, effort: settings.reasoningEffort, serviceTier: settings.serviceTier }, { authoritative: true });
         runtimeSettingsStore.attachToConversation(threadId, conversation);
       }
       return settings;
@@ -1909,6 +1889,7 @@ function createDesktopIpcLiveOwner({
   }
 
   return {
+    updateThreadSettings: (threadId, params) => applyFollowerThreadSettings(threadId, params, "phone"),
     observeInbound,
     observeOutbound,
     stopAll,

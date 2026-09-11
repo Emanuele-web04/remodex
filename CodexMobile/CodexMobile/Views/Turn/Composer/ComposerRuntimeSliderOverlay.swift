@@ -59,6 +59,11 @@ struct ComposerRuntimeSliderOverlay: View {
             // matter where it was opened from or whether the keyboard is up.
             VStack(spacing: 18) {
                 modelRow
+                if let status = runtimeState.settingsStatus {
+                    Text(status)
+                        .font(AppFont.caption())
+                        .foregroundStyle(.secondary)
+                }
 
                 if !ascendingEffortOptions.isEmpty {
                     ComposerEffortSlider(

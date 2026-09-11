@@ -6,6 +6,7 @@
 
 const { createHash } = require("crypto");
 const net = require("net");
+const { createThreadMutationQueue, runtimeSettingsPatch, hasOwn, normalizeThreadSettingsUpdate } = require("./codex-runtime-settings");
 const { projectSemanticItem } = require("./thread-activity-projector");
 
 const {
@@ -74,6 +75,7 @@ const STALE_ACTIVE_READ_MAX_AGE_MS = 20_000;
 const CONNECTED_IPC_ACTIVITY_LEASE_MS = 5 * 60_000;
 const MAX_NORMALIZED_REVIEW_FINGERPRINTS_PER_THREAD = 128;
 const DESKTOP_FOLLOWER_REQUEST_METHODS = new Set([
+  "thread/settings/update",
   "turn/start",
   "turn/steer",
   "turn/interrupt",
@@ -84,7 +86,6 @@ const DESKTOP_FOLLOWER_REQUEST_METHODS = new Set([
 // owner for the same persisted thread.
 const DESKTOP_OWNER_UNSUPPORTED_MUTATION_ERRORS = new Map([
   ["review/start", "Start this review in Codex Desktop."],
-  ["thread/settings/update", "Change these thread settings in Codex Desktop."],
   ["thread/approveGuardianDeniedAction", "Approve this retry in Codex Desktop."],
 ]);
 const ACTION_METHODS = new Set([
@@ -98,7 +99,7 @@ const REPLY_METHOD_BY_ACTION_METHOD = new Map([
   ["item/commandExecution/requestApproval", "thread-follower-command-approval-decision"],
   ["item/fileChange/requestApproval", "thread-follower-file-approval-decision"],
   ["item/fileRead/requestApproval", "thread-follower-file-approval-decision"],
-  ["item/permissions/requestApproval", "thread-follower-file-approval-decision"],
+  ["item/permissions/requestApproval", "thread-follower-permissions-request-approval-response"],
   ["item/tool/requestUserInput", "thread-follower-submit-user-input"],
 ]);
 const APPROVAL_DECISIONS = new Set(["accept", "acceptForSession", "decline", "cancel"]);
@@ -248,6 +249,7 @@ function createDesktopIpcActionFollower({
   ownershipProbeTimeoutMs = OWNERSHIP_PROBE_TIMEOUT_MS,
 } = {}) {
   let desktopSourceGeneration = 0;
+  const enqueueMutation = createThreadMutationQueue();
   const ipc = createDesktopIpcClient({
     socketPath,
     netModule,
@@ -826,6 +828,7 @@ function createDesktopIpcActionFollower({
       releaseDesktopThreadState(threadId);
       return false;
     }
+    runtimeSettingsStore?.observeConversation?.(threadId, nextState);
     runtimeSettingsStore?.attachToConversation?.(threadId, nextState);
     if (isFullSnapshot) {
       rebuildNormalizedLiveIndex(threadId, nextState);
@@ -1969,6 +1972,14 @@ function createDesktopIpcActionFollower({
       return null;
     }
 
+    if (method === "thread/settings/update") {
+      const threadSettings = normalizeThreadSettingsUpdate(params);
+      return {
+        threadId,
+        method: "thread-follower-update-thread-settings",
+        params: { conversationId: threadId, threadSettings },
+      };
+    }
     if (method === "turn/start") {
       return {
         threadId,
@@ -1985,6 +1996,7 @@ function createDesktopIpcActionFollower({
         params: {
           conversationId: threadId,
           input: Array.isArray(params.input) ? params.input : [],
+          ...Object.fromEntries(["clientUserMessageId", "additionalContext", "toolOutput"].filter((key) => hasOwn(params, key)).map((key) => [key, cloneJSON(params[key])])),
           expectedTurnId: readString(params.expectedTurnId) || readString(params.expected_turn_id),
         },
       };
@@ -2014,27 +2026,36 @@ function createDesktopIpcActionFollower({
   }
 
   function submitDesktopFollowerRequest(route, originalMessage) {
-    Promise.resolve()
-      .then(() => resolveFollowerRequest(route))
-      .then(async (resolvedRequest) => {
-        if (route.method === "thread-follower-start-turn") {
-          try {
-            await syncDesktopOwnerRuntimeSettings(route.threadId, resolvedRequest.turnStartParams);
-          } catch (error) {
-            // The actual turn has not reached Desktop yet. Even if the settings
-            // request timed out after being applied, continuing through the local
-            // app-server is safe because there is no Desktop turn to duplicate.
-            throw markDeliveryFailureError(error);
-          }
+    enqueueMutation(route.threadId, async () => {
+      const revisionBefore = runtimeSettingsStore?.get?.(route.threadId)?.revision;
+      const resolvedRequest = await resolveFollowerRequest(route);
+      if (route.method === "thread-follower-start-turn") {
+        // A rejected settings update does not relinquish the Desktop writer.
+        // Propagate it without turning a timeout into local delivery failure.
+        try {
+          await syncDesktopOwnerRuntimeSettings(route.threadId, resolvedRequest.turnStartParams);
+        } catch (error) {
+          // Failure to deliver settings does not prove that a turn sent locally
+          // would be safe. Only the start-turn route can authorize that fallback.
+          throw new Error(error.message, { cause: error });
         }
-        return {
-          resolvedRequest,
-          result: await ipc.sendRequest(route.method, resolvedRequest.params),
-        };
-      })
-      .then(({ resolvedRequest, result }) => {
-        const appServerResult = appServerResultForFollowerRequest(route.method, result);
-        if (route.method === "thread-follower-start-turn") {
+      }
+      return {
+        resolvedRequest,
+        revisionBefore,
+        result: await ipc.sendRequest(route.method, resolvedRequest.params),
+      };
+    })
+      .then(({ resolvedRequest, revisionBefore, result }) => {
+        const currentSettings = runtimeSettingsStore?.get?.(route.threadId);
+        const receivedOwnerSettings = currentSettings && currentSettings.revision !== revisionBefore;
+        let appServerResult = appServerResultForFollowerRequest(route.method, result);
+        if (route.method === "thread-follower-update-thread-settings") {
+          const settings = receivedOwnerSettings ? currentSettings
+            : runtimeSettingsStore?.commit?.(route.threadId, route.params.threadSettings, { source: "phone" });
+          appServerResult = { runtimeSettings: settings || null };
+        }
+        if (route.method === "thread-follower-start-turn" && !receivedOwnerSettings) {
           commitPhoneRuntimeSettings(
             route.threadId,
             resolvedRequest.turnStartParams,
@@ -2070,7 +2091,7 @@ function createDesktopIpcActionFollower({
   }
 
   function appServerResultForFollowerRequest(method, result) {
-    if (method === "thread-follower-start-turn"
+    if ((method === "thread-follower-start-turn" || method === "thread-follower-steer-turn")
       && result
       && typeof result === "object"
       && !Array.isArray(result)
@@ -2095,28 +2116,17 @@ function createDesktopIpcActionFollower({
     const params = turnStartParams && typeof turnStartParams === "object"
       ? turnStartParams
       : {};
-    const collaborationMode = params.collaborationMode && typeof params.collaborationMode === "object"
-      ? cloneJSON(params.collaborationMode)
-      : null;
-    const collaborationSettings = collaborationMode?.settings;
-    const model = readString(params.model) || readString(collaborationSettings?.model);
-    const effort = readString(params.effort)
-      || readString(params.reasoningEffort)
-      || readString(collaborationSettings?.reasoning_effort)
-      || readString(collaborationSettings?.reasoningEffort);
-    if (!model && !effort && !collaborationMode) {
-      return;
-    }
-
+    const patch = runtimeSettingsPatch(params);
+    const threadSettings = {
+      ...(patch.model ? { model: patch.model } : {}),
+      ...(hasOwn(patch, "reasoningEffort") ? { effort: patch.reasoningEffort } : {}),
+      ...(hasOwn(patch, "serviceTier") ? { serviceTier: patch.serviceTier } : {}),
+      ...(params.collaborationMode ? { collaborationMode: cloneJSON(params.collaborationMode) } : {}),
+    };
+    if (Object.keys(threadSettings).length === 0) return;
     await ipc.sendRequest("thread-follower-update-thread-settings", {
       conversationId: threadId,
-      threadSettings: {
-        ...(model ? { model } : {}),
-        effort: effort || null,
-        // turn/start omission is the app-server representation of Normal speed.
-        serviceTier: readString(params.serviceTier) || readString(params.service_tier) || null,
-        ...(collaborationMode ? { collaborationMode } : {}),
-      },
+      threadSettings,
     });
   }
 
@@ -2629,6 +2639,22 @@ function desktopFollowerPayloadForResponse(route, responseMessage) {
     return null;
   }
 
+  if (route.method === "item/permissions/requestApproval") {
+    const result = responseMessage?.result;
+    if (!result?.permissions || typeof result.permissions !== "object"
+      || Array.isArray(result.permissions) || !["turn", "session"].includes(result.scope)) {
+      return null;
+    }
+    return {
+      method,
+      params: {
+        conversationId: route.threadId,
+        requestId: route.desktopRequestId ?? route.requestId,
+        response: cloneJSON(result),
+      },
+    };
+  }
+
   if (route.method === "item/tool/requestUserInput") {
     const answers = responseMessage?.result?.answers;
     if (!answers || typeof answers !== "object" || Array.isArray(answers)) {
@@ -2647,7 +2673,7 @@ function desktopFollowerPayloadForResponse(route, responseMessage) {
     };
   }
 
-  const decision = desktopApprovalDecisionForResponse(route.method, responseMessage?.result);
+  const decision = readString(responseMessage?.result?.decision);
   if (!APPROVAL_DECISIONS.has(decision)) {
     return null;
   }
@@ -2656,51 +2682,10 @@ function desktopFollowerPayloadForResponse(route, responseMessage) {
     method,
     params: {
       conversationId: route.threadId,
-      requestId: route.requestId,
+      requestId: route.desktopRequestId ?? route.requestId,
       decision,
     },
   };
-}
-
-function desktopApprovalDecisionForResponse(method, result) {
-  const explicitDecision = readString(result?.decision);
-  if (explicitDecision) {
-    return explicitDecision;
-  }
-
-  if (method !== "item/permissions/requestApproval") {
-    return "";
-  }
-
-  // Permission approvals use a grant payload on app-server, while Desktop IPC
-  // currently exposes only decision-style follower replies.
-  return hasGrantedPermission(result?.permissions) ? "accept" : "decline";
-}
-
-function hasGrantedPermission(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return false;
-  }
-
-  if (Object.keys(value).length === 0) {
-    return false;
-  }
-
-  return Object.values(value).some((entry) => {
-    if (entry == null) {
-      return false;
-    }
-    if (typeof entry === "boolean") {
-      return entry;
-    }
-    if (Array.isArray(entry)) {
-      return entry.length > 0;
-    }
-    if (typeof entry === "object") {
-      return Object.keys(entry).length > 0;
-    }
-    return true;
-  });
 }
 
 function projectPendingDesktopActions(threadId, conversationState) {

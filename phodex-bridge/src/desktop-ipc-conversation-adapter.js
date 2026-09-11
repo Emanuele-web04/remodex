@@ -5,6 +5,7 @@
 // Depends on: crypto, ./desktop-ipc-shared
 
 const { randomUUID } = require("crypto");
+const { applyRuntimeSettingsToConversation } = require("./codex-runtime-settings");
 
 const {
   cloneJSON,
@@ -450,7 +451,8 @@ function buildConversationStateFromThread(thread, {
   const createdAtMs = timestampSecondsToMs(thread?.createdAt) || previous?.createdAt || now();
   const updatedAtMs = timestampSecondsToMs(thread?.updatedAt) || now();
   const cwd = readString(thread?.cwd) || previous?.cwd || "";
-  const latestModel = readString(thread?.model) || readString(thread?.modelProvider) || previous?.latestModel || "";
+  const latestModel = readString(previous?.latestThreadSettings?.model)
+    || readString(thread?.model) || previous?.latestModel || "";
   const turns = mergeConversationTurnsFromThread(thread?.turns, {
     previousTurns: previous?.turns,
     threadId,
@@ -477,8 +479,9 @@ function buildConversationStateFromThread(thread, {
     threadStartKind: previous?.threadStartKind || "default",
     modelProvider: readString(thread?.modelProvider) || previous?.modelProvider || "openai",
     latestModel,
-    latestReasoningEffort: previous?.latestReasoningEffort || null,
-    latestServiceTier: previous?.latestServiceTier || null,
+    latestReasoningEffort: previous?.latestReasoningEffort ?? null,
+    latestServiceTier: previous?.latestServiceTier ?? null,
+    latestThreadSettings: cloneJSON(previous?.latestThreadSettings || null),
     previousTurnModel: previous?.previousTurnModel || null,
     latestCollaborationMode: previous?.latestCollaborationMode || {
       mode: "default",
@@ -720,14 +723,12 @@ function synchronizeDesktopConversationCompatibility(state) {
     modelProvider: readString(state.latestThreadSettings?.modelProvider)
       || readString(state.modelProvider)
       || "openai",
-    serviceTier: readString(state.latestThreadSettings?.serviceTier)
-      || readString(latestParams?.serviceTier)
-      || readString(state.latestServiceTier)
-      || null,
-    effort: state.latestThreadSettings?.effort
-      ?? latestParams?.effort
-      ?? state.latestReasoningEffort
-      ?? null,
+    serviceTier: Object.prototype.hasOwnProperty.call(state.latestThreadSettings || {}, "serviceTier")
+      ? state.latestThreadSettings.serviceTier
+      : latestParams?.serviceTier ?? state.latestServiceTier ?? null,
+    effort: Object.prototype.hasOwnProperty.call(state.latestThreadSettings || {}, "effort")
+      ? state.latestThreadSettings.effort
+      : latestParams?.effort ?? state.latestReasoningEffort ?? null,
     summary: latestParams?.summary ?? state.latestThreadSettings?.summary ?? "none",
     collaborationMode: cloneJSON(
       state.latestThreadSettings?.collaborationMode
@@ -898,35 +899,8 @@ function applyTurnRuntimeMetadata(conversation, turnParams) {
   if (!conversation || !turnParams) {
     return;
   }
-  const model = readString(turnParams.model);
-  const effort = readString(turnParams.effort);
-  const serviceTier = readString(turnParams.serviceTier) || null;
-  if (model) {
-    conversation.previousTurnModel = conversation.latestModel || null;
-    conversation.latestModel = model;
-  }
-  if (effort) {
-    conversation.latestReasoningEffort = effort;
-  }
-  conversation.latestServiceTier = serviceTier;
-  if (turnParams.collaborationMode && typeof turnParams.collaborationMode === "object") {
-    conversation.latestCollaborationMode = cloneJSON(turnParams.collaborationMode);
-    return;
-  }
-  if (!model && !effort) {
-    return;
-  }
-  const settings = conversation.latestCollaborationMode?.settings;
-  conversation.latestCollaborationMode = {
-    mode: conversation.latestCollaborationMode?.mode || "default",
-    settings: {
-      ...(settings && typeof settings === "object" ? settings : {
-        developer_instructions: null,
-      }),
-      model: model || settings?.model || "",
-      reasoning_effort: effort || settings?.reasoning_effort || null,
-    },
-  };
+  if (readString(turnParams.model)) conversation.previousTurnModel = conversation.latestModel || null;
+  applyRuntimeSettingsToConversation(conversation, turnParams);
 }
 
 function turnHasUserMessageItem(turn) {
