@@ -205,10 +205,9 @@ function createThreadRolloutLiveMirror({
 
     try {
       const currentTime = now();
-      const suppressedBeforeScan = isSuppressed();
+      const suppressedBeforeScan = isSuppressed({ probeFallbackActivity: true });
       if (suppressedBeforeScan) {
         if (!wasSuppressed) {
-          rolloutPath = null;
           lastSize = 0;
           partialLine = "";
           didBootstrap = false;
@@ -218,7 +217,6 @@ function createThreadRolloutLiveMirror({
         return;
       }
       if (wasSuppressed) {
-        rolloutPath = null;
         lastSize = 0;
         partialLine = "";
         didBootstrap = false;
@@ -251,7 +249,8 @@ function createThreadRolloutLiveMirror({
         fallbackActivityAt: Number(rolloutStat.mtimeMs) || 0,
       });
       if (suppressed) {
-        rolloutPath = null;
+        // Keep the resolved path so quiet Desktop work needs only a stat on
+        // later probes, without repeatedly searching the sessions directory.
         lastSize = 0;
         partialLine = "";
         didBootstrap = false;

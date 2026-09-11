@@ -853,9 +853,10 @@ function startBridge({
       // authoritative, but yields an active cache that stopped broadcasting;
       // a later Desktop snapshot is announced as a new source epoch so the
       // phone performs canonical repair instead of mixing both mirrors.
-      shouldSuppressThread: (threadId) => shouldSuppressRolloutMirrorForThread(
+      shouldSuppressThread: (threadId, context) => shouldSuppressRolloutMirrorForThread(
         threadId,
-        { desktopIpcActionFollower, desktopIpcLiveOwner }
+        { desktopIpcActionFollower, desktopIpcLiveOwner },
+        context
       ),
     })
     : null;
@@ -5095,12 +5096,12 @@ function persistBridgePreferences(
 function shouldSuppressRolloutMirrorForThread(
   threadId,
   { desktopIpcActionFollower = null, desktopIpcLiveOwner = null } = {},
-  { fallbackActivityAt = 0 } = {}
+  context = {}
 ) {
   // Desktop ownership is an expiring live lease, not a permanent boolean. A
   // stale IPC snapshot used to mute an actively growing rollout forever.
   const followerIsFresh = typeof desktopIpcActionFollower?.hasFreshLiveThreadState === "function"
-    ? desktopIpcActionFollower.hasFreshLiveThreadState(threadId, { fallbackActivityAt })
+    ? desktopIpcActionFollower.hasFreshLiveThreadState(threadId, context)
     : desktopIpcActionFollower?.hasLiveThreadState(threadId);
   const ownerIsFresh = typeof desktopIpcLiveOwner?.isFreshThreadOwned === "function"
     ? desktopIpcLiveOwner.isFreshThreadOwned(threadId)

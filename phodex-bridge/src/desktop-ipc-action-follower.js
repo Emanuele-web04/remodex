@@ -2298,7 +2298,7 @@ function createDesktopIpcActionFollower({
     // has actually moved recently. Keep hasLiveThreadState's broader meaning
     // for callers that need cached/idle Desktop state, but expose this explicit
     // lease check for source arbitration.
-    hasFreshLiveThreadState(threadId, { fallbackActivityAt = 0 } = {}) {
+    hasFreshLiveThreadState(threadId, { fallbackActivityAt = 0, probeFallbackActivity = false } = {}) {
       const normalizedThreadId = readString(threadId);
       if (pendingSnapshotsByThreadId.has(normalizedThreadId)) {
         return Boolean(normalizedThreadId);
@@ -2319,8 +2319,11 @@ function createDesktopIpcActionFollower({
       if (hasActiveProjectedTurn(thread)) {
         const updatedAt = rawStateUpdatedAtByThreadId.get(normalizedThreadId) || 0;
         const hasNewerFallbackActivity = Number(fallbackActivityAt) > updatedAt;
+        // Let a stale stream check file metadata before deciding who emits.
+        // The subsequent check with the real mtime still protects quiet work.
         return hasResponsiveDesktopIpc()
-          && (!isRawStateStaleForActiveRead(normalizedThreadId) || !hasNewerFallbackActivity);
+          && (!isRawStateStaleForActiveRead(normalizedThreadId)
+            || (!probeFallbackActivity && !hasNewerFallbackActivity));
       }
       return !isRawStateStaleForActiveRead(normalizedThreadId);
     },
