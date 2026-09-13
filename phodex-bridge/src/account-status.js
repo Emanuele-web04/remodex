@@ -170,6 +170,7 @@ function deriveHostCapabilities(platform) {
     desktopHandoff: isMacOS,
     displayWake: isMacOS,
     keepAwake: isMacOS,
+    keepAwakeModes: isMacOS,
     hostBrowserLogin: isMacOS,
     bridgeUpdate: isMacOS,
   };

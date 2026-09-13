@@ -107,12 +107,15 @@ final class DesktopHandoffService {
         try await sendWakeDisplayRequest(using: codex)
     }
 
-    func updateBridgeKeepMacAwakePreference(enabled: Bool) async throws {
+    func updateBridgeKeepMacAwakePreference(mode: CodexKeepAwakeMode) async throws {
         do {
             let response = try await codex.sendRequest(
                 method: "desktop/preferences/update",
                 params: .object([
-                    "keepMacAwake": .bool(enabled),
+                    "keepMacAwakeMode": .string(mode.rawValue),
+                    // Older bridges require the boolean. AC-only intentionally
+                    // degrades to off instead of holding a battery wake assertion.
+                    "keepMacAwake": .bool(mode == .always),
                 ])
             )
             guard let resultObject = response.result?.objectValue,

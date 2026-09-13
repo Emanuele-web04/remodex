@@ -8,6 +8,7 @@ const { execFile } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const { promisify } = require("util");
+const { resolveKeepAwakeMode } = require("./keep-awake-mode");
 const { findRolloutFileForThread, resolveSessionsRoot } = require("./rollout-watch");
 
 const execFileAsync = promisify(execFile);
@@ -350,7 +351,19 @@ async function updateBridgePreferences(params, options = {}) {
     );
   }
 
-  if (!params || typeof params !== "object" || typeof params.keepMacAwake !== "boolean") {
+  if (!params || typeof params !== "object") {
+    throw desktopError(
+      "invalid_bridge_preferences",
+      "The bridge preference payload is invalid."
+    );
+  }
+
+  const keepMacAwakeMode = resolveKeepAwakeMode({
+    mode: params.keepMacAwakeMode,
+    enabled: params.keepMacAwake,
+    fallback: null,
+  });
+  if (!keepMacAwakeMode) {
     throw desktopError(
       "invalid_bridge_preferences",
       "The bridge preference payload is invalid."
@@ -358,7 +371,7 @@ async function updateBridgePreferences(params, options = {}) {
   }
 
   return options.updateBridgePreferences({
-    keepMacAwake: params.keepMacAwake,
+    keepMacAwakeMode,
   });
 }
 

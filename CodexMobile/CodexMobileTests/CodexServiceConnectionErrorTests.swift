@@ -19,6 +19,49 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
         let service = CodexService(defaults: defaults)
 
         XCTAssertFalse(service.keepMacAwakeWhileBridgeRuns)
+        XCTAssertEqual(service.keepMacAwakeMode, .off)
+    }
+
+    func testLegacyKeepAwakePreferenceMigratesToAlways() {
+        let suiteName = "CodexServiceConnectionErrorTests.legacyKeepMacAwake.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        defaults.set(true, forKey: CodexService.keepMacAwakeWhileBridgeRunsDefaultsKey)
+
+        let service = CodexService(defaults: defaults)
+
+        XCTAssertEqual(service.keepMacAwakeMode, .always)
+        XCTAssertTrue(service.keepMacAwakeWhileBridgeRuns)
+    }
+
+    func testACOnlyKeepAwakePreferencePersistsWithoutEnablingLegacyBatteryWake() {
+        let suiteName = "CodexServiceConnectionErrorTests.acOnlyKeepMacAwake.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        let service = CodexService(defaults: defaults)
+
+        service.setKeepMacAwakeModePreference(.acPower)
+
+        XCTAssertEqual(service.keepMacAwakeMode, .acPower)
+        XCTAssertEqual(defaults.string(forKey: CodexService.keepMacAwakeModeDefaultsKey), "ac-power")
+        XCTAssertFalse(defaults.bool(forKey: CodexService.keepMacAwakeWhileBridgeRunsDefaultsKey))
+    }
+
+    func testACOnlyKeepAwakePreferenceSendsModeWithSafeLegacyFallback() async throws {
+        let service = CodexService()
+        service.requestTransportOverride = { method, params in
+            XCTAssertEqual(method, "desktop/preferences/update")
+            XCTAssertEqual(params?.objectValue?["keepMacAwakeMode"]?.stringValue, "ac-power")
+            XCTAssertEqual(params?.objectValue?["keepMacAwake"]?.boolValue, false)
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object(["success": .bool(true)]),
+                includeJSONRPC: false
+            )
+        }
+
+        try await DesktopHandoffService(codex: service)
+            .updateBridgeKeepMacAwakePreference(mode: .acPower)
     }
 
     func testBenignBackgroundAbortIsSuppressedFromUserFacingErrors() {
