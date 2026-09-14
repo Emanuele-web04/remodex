@@ -288,7 +288,7 @@ func timelineDisplayWindow(
     for message: CodexMessage,
     expansionLevel: Int = 0
 ) -> TimelineTextClippingPolicy.DisplayWindow {
-    let rawText = message.text
+    let rawText = timelineActionText(for: message)
     if message.isStreaming, isTimelineStreamingPlaceholder(rawText) {
         return TimelineTextClippingPolicy.DisplayWindow(text: "", isPartial: false, hiddenByteCount: 0)
     }
@@ -322,12 +322,13 @@ private func timelineTrimmedDisplaySource(_ text: String) -> String {
     return text
 }
 
-// Keeps user actions faithful to the underlying message even when display text is clipped.
+// Shares full presentation text with copy/selection before the timeline clips or splits it.
 func timelineActionText(for message: CodexMessage) -> String {
     if message.isStreaming, isTimelineStreamingPlaceholder(message.text) {
         return ""
     }
-    return message.text
+    guard message.role == .assistant else { return message.text }
+    return AssistantMemoryCitationParser.visibleText(in: message.text, isStreaming: message.isStreaming)
 }
 
 // Context-menu actions may receive the full unclipped row. Avoid trimming huge strings while

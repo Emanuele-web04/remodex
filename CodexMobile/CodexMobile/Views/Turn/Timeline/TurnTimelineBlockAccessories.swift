@@ -68,7 +68,7 @@ extension TurnTimelineView {
                 stoppedTurnIDs: stoppedTurnIDs
             )
             let hasAssistantText = (blockStart...blockEnd).contains {
-                messages[$0].role == .assistant && hasMeaningfulBlockText(messages[$0].text)
+                messages[$0].role == .assistant && hasMeaningfulBlockText(timelineActionText(for: messages[$0]))
             }
             // Keep the action at the visual end of the block. Hosting it on the
             // last assistant row leaves Copy stranded between prose and later tools.
@@ -123,7 +123,7 @@ extension TurnTimelineView {
         var totalBytes = 0
         for index in range {
             guard messages[index].role == .assistant else { continue }
-            let rawText = messages[index].text
+            let rawText = timelineActionText(for: messages[index])
             guard hasMeaningfulBlockText(rawText) else { continue }
             totalBytes += rawText.utf8.count
             guard totalBytes <= blockCopyTextByteLimit else {
@@ -200,7 +200,7 @@ extension TurnTimelineView {
             guard let sourceState else { continue }
 
             updated[finalMessage.id] = sourceState.replacingCopyText(
-                rehomedFinalCopyText(for: finalMessage.text)
+                rehomedFinalCopyText(for: timelineActionText(for: finalMessage))
             )
         }
         return updated

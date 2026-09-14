@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		EAC174A118B04EDC99C18401 /* AssistantMemoryCitationParserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EAC174A118B04EDC99C18402 /* AssistantMemoryCitationParserTests.swift */; };
 		11A2B3C4D5E6F708192A3B4C /* TurnFileAutocompleteTokenTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11A2B3C4D5E6F708192A3B4D /* TurnFileAutocompleteTokenTests.swift */; };
 		1BF7B512D49503A3C3290F00 /* BridgeMenuBarStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A1FC345ADD350213550F36C /* BridgeMenuBarStore.swift */; };
 		1DB06CCC628601FAF334C9B2 /* RemodexWidget.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = C31FD4BBF43CBB431839BBF8 /* RemodexWidget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
@@ -139,6 +140,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		EAC174A118B04EDC99C18402 /* AssistantMemoryCitationParserTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AssistantMemoryCitationParserTests.swift; sourceTree = "<group>"; };
 		02C96CD0916A43F38184398D /* AssistantTurnEndActionVisibilityTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AssistantTurnEndActionVisibilityTests.swift; sourceTree = "<group>"; };
 		11A2B3C4D5E6F708192A3B4D /* TurnFileAutocompleteTokenTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TurnFileAutocompleteTokenTests.swift; sourceTree = "<group>"; };
 		1C818F3EC0291EF8B6E5B541 /* Assets.xcassets */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -328,6 +330,7 @@
 				AB1C2D3E4F5061728394A5B6 /* TurnComposerReviewModeTests.swift */,
 				D0C0FFEE0000000000000002 /* RemodexTextKitMarkdownRenderingRegressionTests.swift */,
 				9D7C9A8B7E6D5C4B3A291818 /* TurnViewModelQueueTests.swift */,
+				EAC174A118B04EDC99C18402 /* AssistantMemoryCitationParserTests.swift */,
 				11A2B3C4D5E6F708192A3B4D /* TurnFileAutocompleteTokenTests.swift */,
 				B0C1D2E3F40516273849A5B6 /* TurnSlashCommandTokenTests.swift */,
 				A9F1B2C3D4E5F60718293A41 /* TurnSkillAutocompleteTokenTests.swift */,
@@ -744,6 +747,7 @@
 				AB1C2D3E4F5061728394A5B7 /* TurnComposerReviewModeTests.swift in Sources */,
 				D0C0FFEE0000000000000001 /* RemodexTextKitMarkdownRenderingRegressionTests.swift in Sources */,
 				9D7C9A8B7E6D5C4B3A291817 /* TurnViewModelQueueTests.swift in Sources */,
+				EAC174A118B04EDC99C18401 /* AssistantMemoryCitationParserTests.swift in Sources */,
 				11A2B3C4D5E6F708192A3B4C /* TurnFileAutocompleteTokenTests.swift in Sources */,
 				B0C1D2E3F40516273849A5B7 /* TurnSlashCommandTokenTests.swift in Sources */,
 				A9F1B2C3D4E5F60718293A40 /* TurnSkillAutocompleteTokenTests.swift in Sources */,
