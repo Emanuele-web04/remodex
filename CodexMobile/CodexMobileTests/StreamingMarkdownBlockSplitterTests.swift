@@ -46,6 +46,34 @@ final class StreamingMarkdownBlockSplitterTests: XCTestCase {
 
     // MARK: - Invariants the incremental streaming path relies on
 
+    func testLooseListAndContinuationStayInOneDocument() {
+        let list = "- First paragraph\n\n  Continued paragraph\n\n- Next item"
+        let split = StreamingMarkdownBlockSplitter.split("Intro\n\n" + list)
+        XCTAssertEqual(split.settled, "Intro\n")
+        XCTAssertEqual(split.active, list)
+    }
+
+    func testReferenceDefinitionStaysWithItsLink() {
+        let linkedText = "Read [the guide][guide]\n\n[guide]: https://example.com\n\nAfter"
+        XCTAssertEqual(StreamingMarkdownBlockSplitter.split(linkedText).active, linkedText)
+    }
+
+    func testShorterOrDifferentFenceDoesNotCloseCodeBlock() {
+        let code = "````markdown\nexample\n```\n\n~~~\n\nstill code\n````"
+        let split = StreamingMarkdownBlockSplitter.split("Intro\n\n" + code)
+        XCTAssertEqual(split.settled, "Intro\n")
+        XCTAssertEqual(split.active, code)
+        let closed = StreamingMarkdownBlockSplitter.split("Intro\n\n" + code + "\n\nAfter")
+        XCTAssertEqual(closed.active, "After")
+        XCTAssertEqual(closed.settled, "Intro\n\n" + code + "\n")
+    }
+
+    func testQuoteAndIndentedCodeStayTogetherAcrossBlankLines() {
+        for text in ["> First\n\n> Second", "    first\n\n    second"] {
+            XCTAssertEqual(StreamingMarkdownBlockSplitter.split(text).active, text)
+        }
+    }
+
     // fullText must always equal settled + "\n" + active (or just active when settled is
     // empty); StreamingAssistantMarkdownTextView derives the incremental tail offset from it.
     func testReconstructionInvariant() {

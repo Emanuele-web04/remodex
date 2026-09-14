@@ -98,6 +98,24 @@ final class StreamingInlineMarkupAutoCloserTests: XCTestCase {
         )
     }
 
+    func testShorterFenceAndDifferentMarkerKeepInlineMarkersLiteral() {
+        let text = "````markdown\n```\n~~~\n\n**literal `marker\n````"
+        XCTAssertEqual(StreamingInlineMarkupAutoCloser.autoClosed(text), text)
+        XCTAssertEqual(
+            StreamingInlineMarkupAutoCloser.autoClosed(text + "\n\nthen `inline"),
+            text + "\n\nthen `inline`"
+        )
+    }
+
+    func testUnclosedInlineSpanDoesNotLeakAcrossParagraphs() {
+        let text = "- An unmatched **marker\n\n- A different item"
+        XCTAssertEqual(StreamingInlineMarkupAutoCloser.autoClosed(text), text)
+        XCTAssertEqual(
+            StreamingInlineMarkupAutoCloser.autoClosed(text + " with `code"),
+            text + " with `code`"
+        )
+    }
+
     // MARK: - Left-flanking rule (operators stay literal)
 
     func testDoubleStarOperatorInProseStaysLiteral() {

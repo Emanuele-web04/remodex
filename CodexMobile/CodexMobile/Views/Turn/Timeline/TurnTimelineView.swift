@@ -527,7 +527,9 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                     messages: visible,
                     renderItems: nextState.visibleRenderItems
                 )
-                nextState.newestStreamingMessageID = visible.last(where: { $0.isStreaming })?.id
+                nextState.newestStreamingMessageID = visible.last(where: {
+                    $0.role == .assistant && $0.isStreaming
+                })?.id
                 didChange = true
             }
         }

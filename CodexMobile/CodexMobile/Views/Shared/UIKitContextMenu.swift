@@ -119,6 +119,10 @@ private struct UIKitContextMenuHost<Content: View>: UIViewControllerRepresentabl
 final class ContextMenuHostController<Content: View>: UIHostingController<Content> {
     override init(rootView: Content) {
         super.init(rootView: rootView)
+        // Streaming descendants update their own state after updateUIViewController.
+        // Propagate that growth to the outer SwiftUI layout instead of leaving it
+        // with the height measured before the hosted text adopted the latest delta.
+        sizingOptions = [.intrinsicContentSize]
         view.backgroundColor = .clear
         view.isOpaque = false
     }

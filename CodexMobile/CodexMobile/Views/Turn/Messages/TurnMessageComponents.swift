@@ -770,36 +770,34 @@ struct MessageRow: View, Equatable {
                 constrainsToAvailableWidth: true,
                 animatesReveal: showsStreamingAnimations
             )
-            .uiKitContextMenu {
+            // Keep streaming layout in the timeline's SwiftUI tree. A nested
+            // hosting controller can measure before the reveal adopts a delta,
+            // leaving the next tool row positioned at the old text height.
+            .contextMenu {
                 streamingAssistantTextMenu(text: actionText)
             }
         }
     }
 
-    private func streamingAssistantTextMenu(text: String) -> UIMenu {
-        guard let selectableText = timelineSelectableActionText(text) else {
-            return UIMenu()
-        }
-
-        return UIMenu(children: [
-            UIAction(
-                title: "Select Text",
-                image: RemodexIcon.menuUIImage(systemName: "text.cursor")
-            ) { _ in
+    @ViewBuilder
+    private func streamingAssistantTextMenu(text: String) -> some View {
+        if let selectableText = timelineSelectableActionText(text) {
+            Button {
                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
                 selectableTextSheet = SelectableMessageTextSheetState(
                     contentKind: .streamingAssistantMarkdown,
                     text: selectableText
                 )
-            },
-            UIAction(
-                title: "Copy",
-                image: RemodexIcon.menuUIImage(systemName: "doc.on.doc")
-            ) { _ in
+            } label: {
+                Label("Select Text", systemImage: "text.cursor")
+            }
+            Button {
                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
                 UIPasteboard.general.string = selectableText
-            },
-        ])
+            } label: {
+                Label("Copy", systemImage: "doc.on.doc")
+            }
+        }
     }
 
     private func expandVisibleText() {

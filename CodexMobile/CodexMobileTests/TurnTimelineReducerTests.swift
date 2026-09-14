@@ -7250,6 +7250,20 @@ final class TurnScrollStateTrackerTests: XCTestCase {
 
 final class ScrollGeometryCoalescerTests: XCTestCase {
     @MainActor
+    func testFollowBottomDropsDelayedCorrectionRepairedByNativeAnchor() async {
+        let coalescer = ScrollGeometryCoalescer()
+        coalescer.observe(ScrollBottomState(isAtBottom: false))
+        let correction = expectation(description: "Repaired drift must not animate again")
+        correction.isInverted = true
+        coalescer.scheduleFollowBottom(after: 10_000_000) { completion in
+            correction.fulfill()
+            completion()
+        }
+        coalescer.observe(ScrollBottomState(isAtBottom: true))
+        await fulfillment(of: [correction], timeout: 0.1)
+    }
+
+    @MainActor
     func testFollowBottomRetriesOneRequestQueuedDuringAnimation() async {
         let coalescer = ScrollGeometryCoalescer()
         coalescer.observe(ScrollBottomState(isAtBottom: false))

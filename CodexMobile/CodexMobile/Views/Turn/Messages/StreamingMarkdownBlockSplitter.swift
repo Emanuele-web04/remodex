@@ -18,26 +18,26 @@ enum StreamingMarkdownBlockSplitter {
         guard !text.isEmpty else { return ("", "") }
 
         let lines = text.components(separatedBy: "\n")
-        var insideFence = false
+        var fence = StreamingMarkdownFence()
         var pendingBoundary = false
         var sawContent = false
         var lastBlockStartLine = 0
 
         for (index, line) in lines.enumerated() {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
-            let isFenceMarker = trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~")
-
-            if isFenceMarker {
+            if fence.consume(line) {
                 if pendingBoundary { lastBlockStartLine = index; pendingBoundary = false }
                 sawContent = true
-                insideFence.toggle()
                 continue
             }
 
-            if insideFence {
-                if pendingBoundary { lastBlockStartLine = index; pendingBoundary = false }
-                sawContent = true
-                continue
+            // Lists, quotes, indented code and reference links can span blank
+            // lines or depend on later blocks. Keep their remaining document
+            // together so parsing two halves cannot change nesting or links.
+            // Plain prose and fenced code retain the incremental fast path.
+            if requiresDocumentContext(line, trimmed: trimmed) {
+                if pendingBoundary { lastBlockStartLine = index }
+                break
             }
 
             if trimmed.isEmpty {
@@ -53,6 +53,16 @@ enum StreamingMarkdownBlockSplitter {
         let settled = lines[0..<lastBlockStartLine].joined(separator: "\n")
         let active = lines[lastBlockStartLine...].joined(separator: "\n")
         return (settled, active)
+    }
+
+    private static func requiresDocumentContext(_ line: String, trimmed: String) -> Bool {
+        guard !trimmed.isEmpty else { return false }
+        return isListMarker(trimmed)
+            || trimmed.hasPrefix(">")
+            || trimmed.hasPrefix("<")
+            || trimmed.contains("[")
+            || line.hasPrefix("    ")
+            || line.hasPrefix("\t")
     }
 
     // Seam edge facing down from the settled half: driven by the first line of the active block.

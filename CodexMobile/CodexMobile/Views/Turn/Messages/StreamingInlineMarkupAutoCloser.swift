@@ -16,7 +16,7 @@ enum StreamingInlineMarkupAutoCloser {
     static func autoClosed(_ text: String) -> String {
         guard !text.isEmpty else { return text }
 
-        var insideFence = false
+        var fence = StreamingMarkdownFence()
         var insideCode = false
         var codeOpenerIndex = text.startIndex
         var codeHasContent = false
@@ -28,10 +28,14 @@ enum StreamingInlineMarkupAutoCloser {
         while lineStart < text.endIndex {
             let lineEnd = text[lineStart...].firstIndex(of: "\n") ?? text.endIndex
             let line = text[lineStart..<lineEnd]
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
-                insideFence.toggle()
-            } else if !insideFence {
+            if fence.consume(String(line)) || line.trimmingCharacters(in: .whitespaces).isEmpty {
+                // Inline spans cannot cross a paragraph or fenced-code boundary.
+                // A list may now remain in one active document across blank lines.
+                insideCode = false
+                insideBold = false
+                codeHasContent = false
+                boldHasContent = false
+            } else {
                 scanInlineMarkers(
                     in: line,
                     isLastLine: lineEnd == text.endIndex,
@@ -48,7 +52,7 @@ enum StreamingInlineMarkupAutoCloser {
 
         // Inside an open fence every marker is literal; the parser already renders an
         // unterminated fence as a code block, so there is nothing to stabilize.
-        guard !insideFence, insideCode || insideBold else {
+        guard !fence.isOpen, insideCode || insideBold else {
             return text
         }
 
