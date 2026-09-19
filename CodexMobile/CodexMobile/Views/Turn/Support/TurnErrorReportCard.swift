@@ -10,6 +10,8 @@ struct TurnErrorReportCard: View {
     let message: String
     let onReport: () -> Void
     let onDismiss: () -> Void
+    var onContinue: (() -> Void)? = nil
+    var isContinuing = false
 
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
@@ -21,10 +23,17 @@ struct TurnErrorReportCard: View {
             Text(message)
                 .font(AppFont.footnote(weight: .medium))
                 .foregroundStyle(.primary)
-                .lineLimit(2)
+                .lineLimit(onContinue == nil ? 2 : 3)
                 .multilineTextAlignment(.leading)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
+            if let onContinue {
+                Button(isContinuing ? "Checking…" : "Continue", action: onContinue)
+                    .font(AppFont.caption(weight: .semibold))
+                    .buttonStyle(.plain)
+                    .disabled(isContinuing)
+                    .accessibilityLabel("Continue the interrupted task")
+            }
             reportButton
             dismissButton
         }

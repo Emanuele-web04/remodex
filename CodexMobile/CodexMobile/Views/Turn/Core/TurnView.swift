@@ -596,7 +596,7 @@ struct TurnView: View {
         }
     }
 
-    // Reuses the shared recovery-card slot for both transport reconnects and voice-specific guidance.
+    // Recovery takes precedence over the generic error footer.
     private var composerRecoveryAccessory: AnyView? {
         if let voiceRecoveryPresentation {
             return AnyView(
@@ -612,14 +612,32 @@ struct TurnView: View {
             )
         }
 
-        guard let snapshot = connectionRecoverySnapshot else {
-            return nil
+        if let snapshot = connectionRecoverySnapshot {
+            return AnyView(
+                ConnectionRecoveryCard(snapshot: snapshot) {
+                    handleConnectionRecoveryAction()
+                }
+            )
         }
 
+        guard let failure = codex.recoverableStreamFailure(for: thread.id) else { return nil }
         return AnyView(
-            ConnectionRecoveryCard(snapshot: snapshot) {
-                handleConnectionRecoveryAction()
-            }
+            TurnErrorReportCard(
+                message: CodexStreamFailure.explanation,
+                onReport: {
+                    openURL(AppEnvironment.feedbackMailtoURL(
+                        errorMessage: failure.message, threadId: thread.id,
+                        isConnected: codex.isConnected, cliVersion: codex.bridgeInstalledVersion
+                    ))
+                },
+                onDismiss: { codex.dismissStreamFailure(threadId: thread.id, failureID: failure.id) },
+                onContinue: {
+                    viewModel.continueAfterStreamFailure(
+                        failure, codex: codex, subscriptions: subscriptions, threadID: thread.id
+                    )
+                },
+                isContinuing: viewModel.isSending
+            )
         )
     }
 

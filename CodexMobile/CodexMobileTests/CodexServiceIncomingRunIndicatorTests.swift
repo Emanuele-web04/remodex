@@ -1226,6 +1226,82 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
 
         XCTAssertEqual(service.threadRunBadgeState(for: threadID), .running)
         XCTAssertTrue(service.failedThreadIDs.isEmpty)
+        XCTAssertTrue(service.recoverableStreamFailuresByThread.isEmpty)
+    }
+
+    func testTransientTerminalErrorOffersOneContinuationAndPreservesDismissal() {
+        let service = makeService()
+        service.isConnected = true
+        service.isInitialized = true
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let message = "stream disconnected before completion: Service temporarily unavailable (request id: test)"
+        sendTurnStarted(service: service, threadID: threadID, turnID: turnID)
+        service.handleNotification(method: "error", params: .object([
+            "threadId": .string(threadID), "turnId": .string(turnID),
+            "error": .object(["message": .string(message)]), "willRetry": .bool(false),
+        ]))
+        let failure = service.recoverableStreamFailure(for: threadID)
+        XCTAssertEqual(failure?.turnID, turnID)
+        XCTAssertEqual(failure?.message, message)
+        sendTurnCompletedFailure(service: service, threadID: threadID, turnID: turnID, message: message)
+        XCTAssertEqual(service.messages(for: threadID).filter { $0.text.contains(message) }.count, 1)
+        XCTAssertEqual(service.turnTerminalState(for: turnID, threadId: threadID), .failed)
+        service.dismissStreamFailure(threadId: threadID)
+        sendTurnCompletedFailure(service: service, threadID: threadID, turnID: turnID, message: message)
+        XCTAssertEqual(service.recoverableStreamFailuresByThread[threadID]?.id, failure?.id)
+        XCTAssertNil(service.recoverableStreamFailure(for: threadID))
+        XCTAssertNil(service.lastErrorMessage, "Duplicate completion must not reopen a dismissed error")
+
+        service.recoverableStreamFailuresByThread[threadID]?.hasAttemptedContinuation = true
+        service.markThreadAsRunning(threadID)
+        service.setProtectedRunningFallback(true, for: threadID)
+        sendTurnCompletedFailure(service: service, threadID: threadID, turnID: turnID, message: message)
+        XCTAssertEqual(service.threadRunBadgeState(for: threadID), .running)
+        XCTAssertEqual(service.messages(for: threadID).filter { $0.text.contains(message) }.count, 1)
+    }
+
+    func testLateStreamErrorDoesNotFailNewerRunningTurn() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        sendTurnStarted(service: service, threadID: threadID, turnID: "older")
+        sendTurnStarted(service: service, threadID: threadID, turnID: "newer")
+        service.handleNotification(method: "error", params: .object([
+            "threadId": .string(threadID), "turnId": .string("older"),
+            "message": .string("stream disconnected before completion: Service temporarily unavailable"),
+            "willRetry": .bool(false),
+        ]))
+        XCTAssertEqual(service.activeTurnID(for: threadID), "newer")
+        XCTAssertEqual(service.threadRunBadgeState(for: threadID), .running)
+        XCTAssertNil(service.latestTurnTerminalState(for: threadID))
+        XCTAssertNil(service.lastErrorMessage)
+        XCTAssertNil(service.recoverableStreamFailuresByThread[threadID])
+        XCTAssertEqual(service.turnTerminalState(for: "older", threadId: threadID), .failed)
+
+        sendTurnCompletedSuccess(service: service, threadID: threadID, turnID: "newer")
+        service.handleNotification(method: "error", params: .object([
+            "threadId": .string(threadID), "turnId": .string("older"),
+            "message": .string("stream disconnected before completion: Service temporarily unavailable"),
+            "willRetry": .bool(false),
+        ]))
+        XCTAssertEqual(service.latestTurnTerminalState(for: threadID), .completed)
+        XCTAssertNil(service.lastErrorMessage)
+    }
+
+    func testNewTurnClearsStreamRecoveryAndRetryingErrorsDoNotRestoreIt() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let message = "stream disconnected before completion: Service temporarily unavailable"
+        sendTurnStarted(service: service, threadID: threadID, turnID: "failed")
+        sendTurnCompletedFailure(service: service, threadID: threadID, turnID: "failed", message: message)
+        XCTAssertNotNil(service.recoverableStreamFailuresByThread[threadID])
+        sendTurnStarted(service: service, threadID: threadID, turnID: "next")
+        service.handleNotification(method: "error", params: .object([
+            "threadId": .string(threadID), "turnId": .string("next"),
+            "message": .string(message), "will_retry": .bool(true),
+        ]))
+        XCTAssertNil(service.recoverableStreamFailuresByThread[threadID])
+        XCTAssertEqual(service.activeTurnID(for: threadID), "next")
     }
 
     func testCompletionFailureMarksThreadAsFailed() {

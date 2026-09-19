@@ -262,6 +262,7 @@ extension CodexService {
         supersededTurnIDsByIDLessRunByThread.removeValue(forKey: threadId)
         provisionalIDLessTurnIDByThread.removeValue(forKey: threadId)
         runStartGenerationByThread.removeValue(forKey: threadId)
+        recoverableStreamFailuresByThread.removeValue(forKey: threadId)
         lastRunStartTurnIDByThread.removeValue(forKey: threadId)
         provisionalPaginatedHistoryThreadIDs.remove(threadId)
         threadsWithSatisfiedDeferredHistoryHydration.remove(threadId)
@@ -304,6 +305,7 @@ extension CodexService {
             supersededTurnIDsByIDLessRunByThread.removeAll()
             provisionalIDLessTurnIDByThread.removeAll()
             runStartGenerationByThread.removeAll()
+            recoverableStreamFailuresByThread.removeAll()
             lastRunStartTurnIDByThread.removeAll()
         }
         provisionalPaginatedHistoryThreadIDs.removeAll()

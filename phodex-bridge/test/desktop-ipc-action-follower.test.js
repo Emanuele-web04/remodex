@@ -6323,6 +6323,89 @@ test("desktop IPC follower bootstraps normalized active content produced during 
   );
 });
 
+test("desktop IPC metadata resume preserves canonical paging and routes subsequent settings to Desktop after reconnect", async (t) => {
+  const { socketPath, state } = await startInitializedIpcTestServer(t, "remodex-ipc-settings-resume-");
+  const outbound = [];
+  const localRequests = [];
+  let disconnected = false;
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse(message) { outbound.push(JSON.parse(message)); },
+    forwardToLocalCodex(message) { localRequests.push(JSON.parse(message)); },
+    onActivityObservation(event) {
+      if (event.type === "disconnected") disconnected = true;
+    },
+    isLocallyOwnedThread: (threadId) => threadId === "local-thread",
+    requestTimeoutMs: 500,
+  });
+  t.after(() => follower.stopAll());
+  const threadId = "desktop-settings-thread";
+
+  for (const phase of ["initial", "reconnected"]) {
+    follower.observeInbound(JSON.stringify({ id: `list-${phase}`, method: "thread/list", params: {} }));
+    await waitFor(() => state.socket && state.connectionCount === (phase === "initial" ? 1 : 2));
+    const snapshot = backgroundConversationSnapshot(threadId, "inProgress", {
+      turnId: "active-turn",
+      items: [{ id: "active-output", type: "agentMessage", text: "Still working" }],
+    });
+    snapshot.params.change.conversationState.turnHistory = {
+      history: {
+        entitiesByKey: {
+          "turn:older-turn": {
+            turnId: "older-turn", status: "completed",
+            items: [{ id: "old-output", type: "agentMessage", text: "Historical output" }],
+          },
+        },
+        isComplete: true,
+      },
+    };
+    writeFrame(state.socket, snapshot);
+    await waitFor(() => follower.hasLiveThreadState(threadId));
+
+    assert.equal(follower.observeInbound(JSON.stringify({
+      id: `resume-${phase}`, method: "thread/resume",
+      params: { threadId, excludeTurns: true, model: "phone-model" },
+    })), true, "resume must not attempt to acquire Desktop's writer in local app-server");
+    const resume = outbound.find((message) => message.id === `resume-${phase}`);
+    assert.equal(resume.result.remodexDesktopIpcMirror, true);
+    assert.equal(resume.result.thread.id, threadId);
+    assert.deepEqual(resume.result.thread.turns, [], "embedded active turns must not disable phone pagination");
+    for (const method of ["thread/read", "thread/turns/list"]) {
+      assert.equal(follower.observeInbound(JSON.stringify({
+        id: `${method}-${phase}`, method, params: { threadId, limit: 20 },
+      })), false, "historical reads must still use canonical paging");
+    }
+
+    const requestId = `settings-${phase}`;
+    assert.equal(follower.observeInbound(JSON.stringify({
+      id: requestId, method: "thread/settings/update",
+      params: { threadId, model: "phone-model", effort: "high" },
+    })), true);
+    await waitFor(() => state.frames.some((frame) => frame.method === "thread-follower-update-thread-settings"));
+    const settings = state.frames.find((frame) => frame.method === "thread-follower-update-thread-settings");
+    assert.deepEqual(settings.params, {
+      conversationId: threadId, threadSettings: { model: "phone-model", effort: "high" },
+    });
+    writeFrame(state.socket, {
+      type: "response", requestId: settings.requestId, method: settings.method,
+      resultType: "success", handledByClientId: "desktop", result: {},
+    });
+    await waitFor(() => outbound.some((message) => message.id === requestId));
+    assert.equal(outbound.find((message) => message.id === requestId).error, undefined);
+    assert.deepEqual(localRequests, [], "settings must reach only the Desktop owner");
+
+    if (phase === "initial") {
+      state.socket.destroy();
+      await waitFor(() => disconnected);
+      state.frames.length = 0;
+    }
+  }
+  assert.equal(follower.observeInbound(JSON.stringify({
+    id: "local-resume", method: "thread/resume",
+    params: { threadId: "local-thread", excludeTurns: true },
+  })), false, "bridge-owned threads still resume in their local runtime");
+});
+
 test("desktop IPC follower bootstraps a normalized active turn when the phone opens it", async (t) => {
   const { socketPath, state } = await startInitializedIpcTestServer(
     t,
@@ -6439,7 +6522,10 @@ test("desktop IPC follower bootstraps a normalized active turn when the phone op
     method: "thread/resume",
     params: { threadId, excludeTurns: true },
   }));
-  assert.equal(handled, false);
+  assert.equal(handled, true);
+  const resume = outbound.find((message) => message.id === "metadata-only-resume");
+  assert.equal(resume.result.remodexDesktopIpcMirror, true);
+  assert.deepEqual(resume.result.thread.turns, []);
   await waitFor(() => outbound.some((message) => (
     message.method === "item/started"
       && message.params?.itemId === "assistant-background-second"
@@ -6610,7 +6696,7 @@ test("desktop IPC follower preserves promoted synthetic-turn identity from promp
     method: "thread/resume",
     params: { threadId, excludeTurns: true },
   }));
-  assert.equal(handled, false);
+  assert.equal(handled, true);
   await waitFor(() => outbound.some((message) => (
     message.method === "turn/started"
       && message.params?.turnId === "turn-promoted-canonical"

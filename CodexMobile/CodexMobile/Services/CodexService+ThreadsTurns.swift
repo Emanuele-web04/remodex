@@ -610,6 +610,9 @@ extension CodexService {
 
     // Requests interruption for the active turn.
     func interruptTurn(turnId: String?, threadId: String? = nil) async throws {
+        if let threadId = threadId ?? activeThreadId {
+            dismissStreamFailure(threadId: threadId)
+        }
         let normalizedThreadID = normalizedInterruptIdentifier(threadId)
             ?? normalizedInterruptIdentifier(activeThreadId)
 
@@ -3258,7 +3261,8 @@ extension CodexService {
     func readThreadTurnStateSnapshot(threadId: String) async throws -> (
         interruptibleTurnID: String?,
         hasInterruptibleTurnWithoutID: Bool,
-        latestTurnID: String?
+        latestTurnID: String?,
+        latestTurnStatus: String?
     ) {
         if supportsTurnPagination {
             do {
@@ -3273,7 +3277,7 @@ extension CodexService {
                 )
 
                 guard let resultObject = response.result?.objectValue else {
-                    return (nil, false, nil)
+                    return (nil, false, nil, nil)
                 }
 
                 let turnObjects = (
@@ -3298,7 +3302,7 @@ extension CodexService {
                    ),
                    !Self.isSyntheticPlaceholderTurnID(mirrorActiveTurnID),
                    turnTerminalState(for: mirrorActiveTurnID, threadId: threadId) == nil {
-                    return (mirrorActiveTurnID, false, snapshot.latestTurnID)
+                    return (mirrorActiveTurnID, false, snapshot.latestTurnID, snapshot.latestTurnStatus)
                 }
                 return snapshot
             } catch {
@@ -3365,10 +3369,11 @@ extension CodexService {
     ) -> (
         interruptibleTurnID: String?,
         hasInterruptibleTurnWithoutID: Bool,
-        latestTurnID: String?
+        latestTurnID: String?,
+        latestTurnStatus: String?
     ) {
         guard !turnObjects.isEmpty else {
-            return (nil, false, nil)
+            return (nil, false, nil, nil)
         }
 
         let newestTurnObjects = newestFirst ? turnObjects : Array(turnObjects.reversed())
@@ -3382,6 +3387,10 @@ extension CodexService {
             }
             return turnID
         }.first
+        let latestTurnStatus = newestTurnObjects.first { turn in
+            normalizedInterruptIdentifier(turn["id"]?.stringValue
+                ?? turn["turnId"]?.stringValue ?? turn["turn_id"]?.stringValue) == latestTurnID
+        }.flatMap { normalizedInterruptTurnStatus(from: $0) }
 
         // Parallel turns can finish out of order. A newer terminal turn does not
         // prove that an older in-progress sibling is no longer interruptible.
@@ -3414,7 +3423,7 @@ extension CodexService {
                    !knownParallelTurnIDs.contains(interruptibleTurnID) {
                     continue
                 }
-                return (interruptibleTurnID, false, latestTurnID)
+                return (interruptibleTurnID, false, latestTurnID, latestTurnStatus)
             }
 
             if encounteredTerminalBoundary {
@@ -3424,7 +3433,7 @@ extension CodexService {
             break
         }
 
-        return (nil, hasInterruptibleTurnWithoutID, latestTurnID)
+        return (nil, hasInterruptibleTurnWithoutID, latestTurnID, latestTurnStatus)
     }
 
     private func knownParallelTurnIDs(for threadId: String) -> Set<String> {

@@ -1330,6 +1330,24 @@ function createDesktopIpcActionFollower({
     )) {
       canonicalHistoryThreadIds.add(threadId);
     }
+    // Resume acquires a writer in app-server. A metadata-only resume must stay
+    // with the Desktop owner even when historical turns require canonical paging.
+    // Returning no embedded turns also preserves the phone's pagination support.
+    if (canonicalHistoryThreadIds.has(threadId)
+      && method === "thread/resume"
+      && message.params?.excludeTurns === true) {
+      const thread = projectDesktopConversationStateToThread(
+        threadId, boundedDesktopLiveStateForThread(threadId, rawState), { now }
+      );
+      sendApplicationResponse(JSON.stringify({
+        id: message.id,
+        result: {
+          thread: { ...thread, turns: [] },
+          remodexDesktopIpcMirror: true,
+        },
+      }));
+      return true;
+    }
     if (canonicalHistoryThreadIds.has(threadId)) {
       if (isThreadTurnStateProbeRequest(message)) {
         const liveState = boundedDesktopLiveStateForThread(threadId, rawState);
@@ -1339,9 +1357,8 @@ function createDesktopIpcActionFollower({
         }));
         return true;
       }
-      // Falling through only starts a canonical request. It may be a metadata-
-      // only resume or may fail before history arrives, so keep the repair
-      // signal armed until a live update can force a verified reload.
+      // Keep the repair signal armed until canonical history actually arrives;
+      // starting a request alone does not prove that recovery succeeded.
       return ownsDesktopCursor ? rejectDesktopTurnsCursor(message) : false;
     }
     const thread = projectDesktopConversationStateToThread(threadId, rawState, { now });

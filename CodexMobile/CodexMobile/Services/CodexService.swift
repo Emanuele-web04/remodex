@@ -473,6 +473,9 @@ final class CodexService {
     @ObservationIgnored var autoApprovalRetryTokensByReviewKey: [String: CodexAutoApprovalRetryToken] = [:]
     var lastRawMessage: String?
     var lastErrorMessage: String?
+    var recoverableStreamFailuresByThread: [String: CodexStreamFailure] = [:]
+    @ObservationIgnored var streamFailureContinuationsInFlight: Set<UUID> = []
+    @ObservationIgnored var streamRecoveryConnectionGeneration = 0
     var keepMacAwakeWhileBridgeRuns = false
     var runtimeDebugLogEntries: [String] = []
     @ObservationIgnored var compactRuntimeItemCompletedCount = 0
