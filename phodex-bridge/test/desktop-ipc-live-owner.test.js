@@ -3404,7 +3404,7 @@ test("live owner applies Desktop thread settings and broadcasts phone read state
     type: "request",
     requestId: "update-settings-1",
     sourceClientId: "desktop",
-    version: 1,
+    version: 2,
     method: "thread-follower-update-thread-settings",
     params: {
       conversationId: "thread-settings",

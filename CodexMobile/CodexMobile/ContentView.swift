@@ -112,7 +112,7 @@ struct ContentView: View {
     }
 
     // Splits lifecycle wiring from presentation modifiers so SwiftUI does not have to type-check one giant body chain.
-    private var rootContentWithLifecycleObservers: some View {
+    private var rootContentWithNavigationObservers: some View {
         rootContent
             .task {
                 RemodexQuickActionCenter.updateShortcutItems(for: codex.threads)
@@ -186,6 +186,10 @@ struct ContentView: View {
                 scheduleSidebarPrewarmIfNeeded()
                 syncDisplayIsland()
             }
+    }
+
+    private var rootContentWithConnectionObservers: some View {
+        rootContentWithNavigationObservers
             .onChange(of: scenePhase) { _, phase in
                 debugSidebarLog("scenePhase changed phase=\(String(describing: phase))")
                 codex.setForegroundState(phase != .background)
@@ -235,6 +239,10 @@ struct ContentView: View {
             .onChange(of: codex.normalizedRelaySessionId) { _, _ in
                 resetSavedMacWakeRecoveryState()
             }
+    }
+
+    private var rootContentWithLifecycleObservers: some View {
+        rootContentWithConnectionObservers
             .onChange(of: codex.threadCompletionBanner) { _, banner in
                 displayIslandCoordinator.rememberCompletion(from: banner, codex: codex)
                 scheduleThreadCompletionBannerDismiss(for: banner)

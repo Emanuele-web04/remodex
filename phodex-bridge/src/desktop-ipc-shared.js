@@ -31,7 +31,7 @@ const DESKTOP_IPC_METHOD_VERSIONS = new Map([
   ["thread-queued-followups-changed", 1],
   ["thread-follower-start-turn", 2],
   ["thread-follower-load-complete-history", 1],
-  ["thread-follower-update-thread-settings", 1],
+  ["thread-follower-update-thread-settings", 2],
   ["thread-follower-compact-thread", 1],
   ["thread-follower-steer-turn", 1],
   ["thread-follower-interrupt-turn", 4],

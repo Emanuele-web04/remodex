@@ -2163,6 +2163,10 @@ test("desktop IPC follower routes phone turns to Desktop-owned threads", async (
           result: { clientId: "remodex-test" },
         });
       } else if (frame.method?.startsWith("thread-follower-")) {
+        // Current Desktop drops the old settings protocol before start-turn can run.
+        if (frame.method === "thread-follower-update-thread-settings" && frame.version !== 2) {
+          return;
+        }
         writeFrame(socket, {
           type: "response",
           requestId: frame.requestId,
@@ -2173,7 +2177,9 @@ test("desktop IPC follower routes phone turns to Desktop-owned threads", async (
             ? { result: { turn: { id: "turn-from-phone" } } }
             : frame.method === "thread-follower-steer-turn"
               ? { result: { turnId: "turn-from-phone" } }
-              : { turn: { id: "turn-from-phone" } },
+              : frame.method === "thread-follower-update-thread-settings"
+                ? { applied: true }
+                : { turn: { id: "turn-from-phone" } },
         });
       }
     });
@@ -2247,6 +2253,7 @@ test("desktop IPC follower routes phone turns to Desktop-owned threads", async (
   await waitFor(() => serverFrames.find((frame) => frame.method === "thread-follower-start-turn"));
   const settingsFrame = serverFrames.find((frame) => frame.method === "thread-follower-update-thread-settings");
   const turnStartFrame = serverFrames.find((frame) => frame.method === "thread-follower-start-turn");
+  assert.equal(settingsFrame.version, 2);
   assert.deepEqual(settingsFrame.params, {
     conversationId: "thread-desktop-owned",
     threadSettings: {
@@ -3654,6 +3661,78 @@ test("desktop IPC background recovery stays lifecycle-only until open", async (t
   assert.equal(handledResume, true);
   const resume = outbound.find((message) => message.id === "resume-background-recovery");
   assert.equal(resume.result.remodexDesktopIpcMirror, true);
+});
+
+test("desktop IPC follower completes phone sandbox policies before Desktop handles settings or turns", async (t) => {
+  const { socketPath, state } = await startInitializedIpcTestServer(t, "remodex-ipc-sandbox-");
+  const outbound = [];
+  const localForwards = [];
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse(message) { outbound.push(JSON.parse(message)); },
+    forwardToLocalCodex(message) { localForwards.push(JSON.parse(message)); },
+    requestTimeoutMs: 500,
+  });
+  t.after(() => follower.stopAll());
+  const threadId = "desktop-permissions-thread";
+  follower.observeInbound(JSON.stringify({ method: "thread/resume", params: { threadId } }));
+  await waitFor(() => state.socket);
+  writeFrame(state.socket, backgroundConversationSnapshot(threadId, "completed"));
+  await waitFor(() => follower.hasLiveThreadState(threadId));
+
+  const cases = [
+    {
+      name: "sparse-phone-workspace",
+      policy: { type: "workspaceWrite", networkAccess: true },
+      expected: {
+        type: "workspaceWrite", networkAccess: true, writableRoots: [],
+        excludeSlashTmp: false, excludeTmpdirEnvVar: false,
+      },
+    },
+    {
+      name: "explicit-workspace",
+      policy: {
+        type: "workspaceWrite", networkAccess: false, writableRoots: ["/allowed"],
+        excludeSlashTmp: true, excludeTmpdirEnvVar: true,
+      },
+    },
+    { name: "full-access", policy: { type: "dangerFullAccess" } },
+    { name: "inherit" },
+  ];
+  for (const { name, policy, expected = policy } of cases) {
+    for (const method of ["thread/settings/update", "turn/start"]) {
+      const id = `${method}-${name}`;
+      const params = {
+        threadId,
+        ...(method === "turn/start" ? { input: [{ type: "text", text: "continue" }] } : {}),
+        ...(policy ? { sandboxPolicy: policy } : {}),
+      };
+      const originalParams = structuredClone(params);
+      assert.equal(follower.observeInbound(JSON.stringify({ id, method, params })), true);
+      const ipcMethod = method === "turn/start"
+        ? "thread-follower-start-turn" : "thread-follower-update-thread-settings";
+      await waitFor(() => state.frames.some((frame) => frame.method === ipcMethod));
+      const frame = state.frames.find((frame) => frame.method === ipcMethod);
+      const desktopParams = method === "turn/start" ? frame.params.turnStart.request : frame.params.threadSettings;
+      if (desktopParams.sandboxPolicy?.type === "workspaceWrite") {
+        // Desktop merges these roots before app-server can apply its schema defaults.
+        const mergedRoots = [...desktopParams.sandboxPolicy.writableRoots, "/repo"];
+        assert.ok(mergedRoots.includes("/repo"));
+      }
+      assert.deepEqual(desktopParams.sandboxPolicy, expected);
+      assert.equal(Object.hasOwn(desktopParams, "sandboxPolicy"), policy !== undefined);
+      assert.deepEqual(params, originalParams);
+      writeFrame(state.socket, {
+        type: "response", requestId: frame.requestId, method: ipcMethod,
+        resultType: "success", handledByClientId: "desktop",
+        result: method === "turn/start" ? { result: { turn: { id: `turn-${name}` } } } : { applied: true },
+      });
+      await waitFor(() => outbound.some((message) => message.id === id));
+      assert.equal(outbound.find((message) => message.id === id).error, undefined);
+      state.frames.length = 0;
+    }
+  }
+  assert.deepEqual(localForwards, [], "Desktop keeps its writer; no duplicate local dispatch");
 });
 
 test("desktop IPC follower normalizes phone turn starts before Desktop follower requests", async (t) => {

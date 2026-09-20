@@ -8,6 +8,7 @@ const { createHash } = require("crypto");
 const net = require("net");
 const { createThreadMutationQueue, runtimeSettingsPatch, hasOwn, normalizeThreadSettingsUpdate } = require("./codex-runtime-settings");
 const { projectSemanticItem } = require("./thread-activity-projector");
+const { normalizeSandboxPolicyCompatibility } = require("./desktop-ipc-conversation-adapter");
 
 const {
   createDesktopConversationProjector,
@@ -1990,7 +1991,7 @@ function createDesktopIpcActionFollower({
     }
 
     if (method === "thread/settings/update") {
-      const threadSettings = normalizeThreadSettingsUpdate(params);
+      const threadSettings = normalizeDesktopRequestPermissions(normalizeThreadSettingsUpdate(params));
       return {
         threadId,
         method: "thread-follower-update-thread-settings",
@@ -2043,6 +2044,8 @@ function createDesktopIpcActionFollower({
   }
 
   function submitDesktopFollowerRequest(route, originalMessage) {
+    let requestPhase = route.method;
+    const startedAt = now();
     enqueueMutation(route.threadId, async () => {
       const revisionBefore = runtimeSettingsStore?.get?.(route.threadId)?.revision;
       const resolvedRequest = await resolveFollowerRequest(route);
@@ -2050,6 +2053,7 @@ function createDesktopIpcActionFollower({
         // A rejected settings update does not relinquish the Desktop writer.
         // Propagate it without turning a timeout into local delivery failure.
         try {
+          requestPhase = "thread-follower-update-thread-settings";
           await syncDesktopOwnerRuntimeSettings(route.threadId, resolvedRequest.turnStartParams);
         } catch (error) {
           // Failure to deliver settings does not prove that a turn sent locally
@@ -2057,6 +2061,7 @@ function createDesktopIpcActionFollower({
           throw new Error(error.message, { cause: error });
         }
       }
+      requestPhase = route.method;
       return {
         resolvedRequest,
         revisionBefore,
@@ -2085,7 +2090,7 @@ function createDesktopIpcActionFollower({
         }));
       })
       .catch((error) => {
-        console.warn(`${logPrefix} desktop follower request failed: ${error.message}`);
+        console.warn(`${logPrefix} desktop follower request failed method=${requestPhase} elapsedMs=${now() - startedAt}: ${error.message}`);
         // Only rerun the request locally when we know Desktop never received it.
         // Timeouts and explicit remote errors stay errors: the turn may already be
         // running on Desktop, and executing it again locally would duplicate it.
@@ -2174,7 +2179,7 @@ function createDesktopIpcActionFollower({
     const turnStartParams = normalized && typeof normalized === "object" && !Array.isArray(normalized)
       ? normalized
       : route.turnStartParams;
-    const request = cloneJSON(turnStartParams);
+    const request = normalizeDesktopRequestPermissions(cloneJSON(turnStartParams));
     if (!readString(request.clientUserMessageId)) {
       request.clientUserMessageId = route.senderRequestId;
     }
@@ -2190,6 +2195,13 @@ function createDesktopIpcActionFollower({
       },
       turnStartParams,
     };
+  }
+
+  // App-server fills omitted sandbox defaults; Desktop reads these fields before
+  // the request reaches app-server, so its in-memory policy must be complete.
+  function normalizeDesktopRequestPermissions(params) {
+    const sandboxPolicy = normalizeSandboxPolicyCompatibility(params.sandboxPolicy);
+    return sandboxPolicy ? { ...params, sandboxPolicy } : params;
   }
 
   function queueThreadChange(threadId, change) {
