@@ -119,6 +119,21 @@ test("buildLaunchAgentPlist wraps run-service in the /bin/sh guard with restart-
   assert.match(plist, /<key>REMODEX_DEVICE_STATE_DIR<\/key>/);
 });
 
+test("buildLaunchAgentPlist includes common Codex.app launcher paths", () => {
+  const plist = buildLaunchAgentPlist({
+    homeDir: "/Users/tester",
+    pathEnv: "/usr/local/bin:/usr/bin",
+    stateDir: "/Users/tester/.remodex",
+    stdoutLogPath: "/Users/tester/.remodex/logs/bridge.stdout.log",
+    stderrLogPath: "/Users/tester/.remodex/logs/bridge.stderr.log",
+    nodePath: "/usr/local/bin/node",
+    cliPath: "/tmp/remodex/bin/remodex.js",
+  });
+
+  assert.match(plist, /<key>PATH<\/key>\s*<string>[^<]*\/Applications\/Codex\.app\/Contents\/Resources/);
+  assert.match(plist, /<key>PATH<\/key>\s*<string>[^<]*\/Users\/tester\/Applications\/Codex\.app\/Contents\/Resources/);
+});
+
 test("resolveLaunchAgentPlistPath writes into the user's LaunchAgents folder", () => {
   assert.equal(
     resolveLaunchAgentPlistPath({
