@@ -493,9 +493,16 @@ function isPathAllowed(candidatePath, options = {}) {
 }
 
 function allowedProjectRoots(options = {}) {
+  const envRoots = (process.env.REMODEX_ALLOWED_ROOTS || "")
+    .split(":")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+
   const roots = Array.isArray(options.allowedRoots) && options.allowedRoots.length
     ? options.allowedRoots
-    : [resolveHomeDir(options)];
+    : envRoots.length
+      ? envRoots
+      : [resolveHomeDir(options)];
 
   return [...new Set(roots.flatMap((rootPath) => {
     const resolvedRoot = path.resolve(rootPath);
