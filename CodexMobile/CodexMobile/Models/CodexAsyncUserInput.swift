@@ -65,15 +65,7 @@ nonisolated struct CodexAsyncUserInput: Codable, Hashable, Sendable {
         if incoming.status == .answered { return incoming }
         var value = incoming
         value.answers = local.answers
-        // A submission task does not survive an app relaunch. Do not leave an
-        // old local projection showing Sending indefinitely while history catches up.
-        if local.status == .submitting,
-           let recordedAt = local.responseRecordedAt,
-           Date().timeIntervalSince(recordedAt) >= 30 {
-            value.status = .uncertain
-        } else {
-            value.status = local.status
-        }
+        value.status = local.status
         value.responseMessageID = local.responseMessageID
         value.responseRecordedAt = local.responseRecordedAt
         value.canonicalAbsenceCount = local.canonicalAbsenceCount

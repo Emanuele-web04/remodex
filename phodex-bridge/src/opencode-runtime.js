@@ -292,6 +292,7 @@ function createOpenCodeRuntime({
   completedTurnStateGraceMs = 60_000,
   variantCatchupMs = 5_000,
   turnPollIntervalMs = 750,
+  idleCompletionGraceMs = 5_000,
 } = {}) {
   if (typeof fetchImpl !== "function") throw new Error("OpenCode runtime requires fetch");
   let baseUrl = configuredBaseUrl || "";
@@ -579,7 +580,10 @@ function createOpenCodeRuntime({
   // the item identity maps with SSE so either source can win without duplicates.
   function watchTurn(session, turnId) {
     stopTurnPoll(session.id);
-    const state = { turnId, seenBusy: false, timer: null };
+    const state = {
+      turnId, seenBusy: false, seenUserMessage: false, idleSnapshots: 0,
+      startedAt: Date.now(), timer: null,
+    };
     polledTurns.set(session.id, state);
     const poll = async () => {
       if (stopped || polledTurns.get(session.id) !== state || running.get(session.id)?.turnId !== turnId) return;
@@ -591,24 +595,51 @@ function createOpenCodeRuntime({
           }),
         ]);
         if (polledTurns.get(session.id) !== state || running.get(session.id)?.turnId !== turnId) return;
+        if (!statuses || typeof statuses !== "object" || Array.isArray(statuses)) {
+          throw new Error("OpenCode returned invalid session status");
+        }
         let assistantCompleted = false;
+        let assistantFailure = null;
+        let assistantInterrupted = false;
         for (const message of Array.isArray(messages) ? messages : []) {
           const info = message?.info;
           const belongsToTurn = info?.role === "user" && turnId === `opencode-turn:${info.id}`
             || info?.role === "assistant" && turnId === `opencode-turn:${info.parentID}`;
           if (!belongsToTurn) continue;
+          if (info.role === "user") state.seenUserMessage = true;
           rememberMessageInfo(session.id, info, { allowStart: false });
           for (const part of message.parts || []) {
             emitItem({ ...part, sessionID: part.sessionID || session.id, messageID: part.messageID || info.id });
           }
-          if (info.role === "assistant" && info.time?.completed) assistantCompleted = true;
+          if (info.role === "assistant") {
+            if (info.time?.completed) assistantCompleted = true;
+            if (info.error) {
+              assistantFailure = info.error?.data?.message || info.error?.message
+                || info.error?.name || "OpenCode turn failed";
+              assistantInterrupted = /abort|interrupt/i.test(info.error?.name || "");
+            }
+          }
         }
-        const status = statuses?.[session.id]?.type;
-        if (status === "busy" || status === "retry") state.seenBusy = true;
+        const statusEntry = statuses[session.id];
+        const status = statusEntry?.type;
+        if (status === "busy" || status === "retry") {
+          state.seenBusy = true;
+          state.idleSnapshots = 0;
+        } else {
+          state.idleSnapshots += 1;
+        }
+        if (status === "error") {
+          assistantFailure = assistantFailure || statusEntry?.error?.message || "OpenCode turn failed";
+        }
         // An assistant message can complete before later tool or assistant steps.
         // Only the session becoming idle establishes that the turn has ended.
-        if (status !== "busy" && status !== "retry" && (state.seenBusy || assistantCompleted)) {
-          finishTurn(session.id, "completed");
+        if (status !== "busy" && status !== "retry"
+          && (state.seenBusy || assistantCompleted || status === "error"
+            || (state.seenUserMessage && state.idleSnapshots >= 2
+              && Date.now() - state.startedAt >= idleCompletionGraceMs))) {
+          finishTurn(session.id,
+            assistantInterrupted ? "interrupted" : assistantFailure ? "failed" : "completed",
+            assistantFailure);
           return;
         }
       } catch { /* A failed poll cannot prove a turn ended; SSE and the next poll can recover. */ }

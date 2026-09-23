@@ -78,7 +78,8 @@ struct TurnComposerHostView: View {
                     isPlanModeArmed: viewModel.isPlanModeArmed
                 )
                     && !availableForkDestinations.isEmpty,
-                allowsGoalCommand: isCodexRuntime && allowsGoalCommand && codex.supportsThreadGoals
+                allowsGoalCommand: isCodexRuntime && allowsGoalCommand && codex.supportsThreadGoals,
+                allowsCompactCommand: isCodexRuntime
             ),
             fileAutocompleteItems: viewModel.fileAutocompleteItems,
             isFileAutocompleteVisible: viewModel.isFileAutocompleteVisible,

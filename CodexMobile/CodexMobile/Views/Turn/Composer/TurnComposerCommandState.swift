@@ -124,7 +124,8 @@ enum TurnComposerSlashCommand: String, Identifiable, Codable, Equatable, Sendabl
     static func availableCommands(
         supportsThreadFork: Bool,
         allowsForkCommand: Bool,
-        allowsGoalCommand: Bool = true
+        allowsGoalCommand: Bool = true,
+        allowsCompactCommand: Bool = true
     ) -> [TurnComposerSlashCommand] {
         allCommands.filter { command in
             switch command {
@@ -133,7 +134,9 @@ enum TurnComposerSlashCommand: String, Identifiable, Codable, Equatable, Sendabl
             case .goal:
                 // Goals need a materialized thread, so new-chat drafts hide the command.
                 return allowsGoalCommand
-            case .codeReview, .compact, .feedback, .status, .subagents:
+            case .compact:
+                return allowsCompactCommand
+            case .codeReview, .feedback, .status, .subagents:
                 return true
             }
         }

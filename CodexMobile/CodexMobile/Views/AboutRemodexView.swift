@@ -169,7 +169,7 @@ struct AboutRemodexView: View {
             calloutCard(
                 icon: "point.topleft.down.to.point.bottomright.curvepath",
                 color: .orange,
-                text: "You can point the bridge at an existing Codex or OpenCode server instead of starting one."
+                text: "You can point the bridge at an existing Codex server. OpenCode starts from the local executable."
             )
         }
     }

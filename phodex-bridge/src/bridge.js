@@ -1581,6 +1581,17 @@ function startBridge({
           }));
         }
       }
+      // A Mac-side archive can happen while SSE or the phone is disconnected.
+      // Reconcile removed active rows explicitly because iOS preserves local
+      // rows missing from a paginated thread/list response.
+      for (const threadId of previousIds) {
+        if (!openCodeThreadCatalog.has(threadId) && archivedOpenCodeThreadCatalog.has(threadId)) {
+          sendApplicationResponse(JSON.stringify({
+            method: "thread/archived",
+            params: { threadId },
+          }));
+        }
+      }
     }).catch(() => {
       // An unavailable optional runtime must not stall Codex's thread catalog.
     }).finally(() => {

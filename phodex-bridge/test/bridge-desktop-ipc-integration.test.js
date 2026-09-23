@@ -1083,6 +1083,7 @@ test("bridge pages mixed active and archived catalogs without forwarding its cur
   let relaySocket = null;
   let bridge = null;
   let fakeCodex = null;
+  let movedToArchive = false;
   await new Promise((resolve) => relayServer.once("listening", resolve));
   relayServer.on("connection", (socket) => {
     relaySocket = socket;
@@ -1099,10 +1100,13 @@ test("bridge pages mixed active and archived catalogs without forwarding its cur
         shutdown() {},
         async listThreadCatalog() {
           return {
-            active: [3, 2, 1].map((number) => ({
+            active: (movedToArchive ? [2, 1] : [3, 2, 1]).map((number) => ({
               id: `opencode:ses_${number}`, runtimeProvider: "opencode", updatedAt: number,
             })),
-            archived: [{
+            archived: [...(movedToArchive ? [{
+              id: "opencode:ses_3", runtimeProvider: "opencode",
+              syncState: "archivedLocal", updatedAt: 3,
+            }] : []), {
               id: "opencode:ses_archived", runtimeProvider: "opencode",
               syncState: "archivedLocal", updatedAt: 1,
             }],
@@ -1157,6 +1161,14 @@ test("bridge pages mixed active and archived catalogs without forwarding its cur
   assert.equal(archived.result.data[0].id, "opencode:ses_archived");
   assert.equal(archived.result.data[0].runtimeProvider, "opencode");
   assert.equal(archived.result.data[0].syncState, "archivedLocal");
+
+  movedToArchive = true;
+  relaySocket.send(JSON.stringify({ id: "after-mac-archive", method: "thread/list", params: { limit: 2 } }));
+  await waitFor(() => fakeCodex.sent.some((message) => message.id === "after-mac-archive"));
+  fakeCodex.emitMessage({ id: "after-mac-archive", result: { data: [], nextCursor: null } });
+  await waitForMessage(relayMessages, (message) => message.id === "after-mac-archive");
+  await waitForMessage(relayMessages, (message) => message.method === "thread/archived"
+    && message.params?.threadId === "opencode:ses_3");
 });
 
 test("bridge Activity is opt-in and canonical-only endpoints need no Desktop IPC", async (t) => {

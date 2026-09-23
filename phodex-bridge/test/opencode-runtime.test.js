@@ -261,7 +261,8 @@ test("phone turn polling streams a Mac-created session when serve emits no turn 
   });
   const runtime = createOpenCodeRuntime({
     baseUrl: "http://127.0.0.1:7777", fetchImpl: server.fetch,
-    onNotification: (message) => outbound.push(message), turnPollIntervalMs: 5, reconnectDelayMs: 60_000,
+    onNotification: (message) => outbound.push(message), turnPollIntervalMs: 5,
+    idleCompletionGraceMs: 10, reconnectDelayMs: 60_000,
   });
   t.after(() => runtime.shutdown());
   await runtime.handleRequest({ method: "turn/start", params: {
@@ -316,6 +317,69 @@ test("phone turn polling follows older message pages when a tool-heavy turn exce
   assert.equal(outbound.filter((message) => message.method === "item/started"
     && message.params.item.id === "prt_reply_1").length, 1);
   assert.ok(server.calls.some((call) => call.key.endsWith("before=older")));
+});
+
+test("polled OpenCode assistant errors finish the phone turn as failed", async (t) => {
+  let userMessageID;
+  const outbound = [];
+  const session = { ...createMockServer().session };
+  const server = createMockServer({
+    "GET /session/ses_test": () => response(session),
+    "POST /session/ses_test/prompt_async?directory=%2Frepo%2Fapp": ({ options }) => {
+      userMessageID = JSON.parse(options.body).messageID;
+      return response(null, { status: 204 });
+    },
+    "GET /session/ses_test/message?directory=%2Frepo%2Fapp&limit=20": () => response([
+      { info: { id: userMessageID, role: "user" }, parts: [] },
+      { info: { id: "msg_failed", role: "assistant", parentID: userMessageID,
+        error: { name: "ProviderError", data: { message: "Model unavailable" } },
+        time: { completed: 123 } }, parts: [] },
+    ]),
+    "GET /session/status?directory=%2Frepo%2Fapp": () => response({}),
+  });
+  const runtime = createOpenCodeRuntime({
+    baseUrl: "http://127.0.0.1:7777", fetchImpl: server.fetch,
+    onNotification: (message) => outbound.push(message), turnPollIntervalMs: 5, reconnectDelayMs: 60_000,
+  });
+  t.after(() => runtime.shutdown());
+  await runtime.handleRequest({ method: "turn/start", params: {
+    threadId: "opencode:ses_test", input: [{ text: "Continue" }],
+  } });
+  await waitUntil(() => outbound.some((message) => message.method === "turn/completed"));
+  const terminal = outbound.find((message) => message.method === "turn/completed");
+  assert.equal(terminal.params.turn.status, "failed");
+  assert.equal(terminal.params.turn.error.message, "Model unavailable");
+});
+
+test("polled turns settle after repeated idle snapshots without a busy or completed marker", async (t) => {
+  let userMessageID;
+  let reads = 0;
+  const outbound = [];
+  const session = { ...createMockServer().session };
+  const server = createMockServer({
+    "GET /session/ses_test": () => response(session),
+    "POST /session/ses_test/prompt_async?directory=%2Frepo%2Fapp": ({ options }) => {
+      userMessageID = JSON.parse(options.body).messageID;
+      return response(null, { status: 204 });
+    },
+    "GET /session/ses_test/message?directory=%2Frepo%2Fapp&limit=20": () => {
+      reads += 1;
+      return response([{ info: { id: userMessageID, role: "user" }, parts: [] }]);
+    },
+    "GET /session/status?directory=%2Frepo%2Fapp": () => response({}),
+  });
+  const runtime = createOpenCodeRuntime({
+    baseUrl: "http://127.0.0.1:7777", fetchImpl: server.fetch,
+    onNotification: (message) => outbound.push(message), turnPollIntervalMs: 5,
+    idleCompletionGraceMs: 10, reconnectDelayMs: 60_000,
+  });
+  t.after(() => runtime.shutdown());
+  await runtime.handleRequest({ method: "turn/start", params: {
+    threadId: "opencode:ses_test", input: [{ text: "Continue" }],
+  } });
+  await waitUntil(() => outbound.some((message) => message.method === "turn/completed"));
+  assert.ok(reads >= 2);
+  assert.equal(outbound.find((message) => message.method === "turn/completed").params.turn.status, "completed");
 });
 
 test("turn paging follows requested order and stays anchored when Mac adds a turn", async (t) => {
