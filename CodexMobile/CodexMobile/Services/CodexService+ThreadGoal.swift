@@ -118,7 +118,7 @@ extension CodexService {
         guard supportsThreadGoals, isConnected else { return }
 
         let candidateThreadIDs = threads.lazy
-            .filter { $0.syncState == .live }
+            .filter { $0.syncState == .live && $0.runtimeProvider == .codex }
             .prefix(limit)
             .map(\.id)
 
@@ -161,6 +161,10 @@ extension CodexService {
         params: JSONValue,
         timeoutNanoseconds: UInt64? = nil
     ) async throws -> RPCMessage {
+        if let threadId = params.objectValue?["threadId"]?.stringValue,
+           thread(for: threadId)?.runtimeProvider == .opencode || threadId.hasPrefix("opencode:") {
+            throw CodexServiceError.invalidInput("Goals are available only for Codex chats.")
+        }
         do {
             return try await sendRequest(
                 method: method,

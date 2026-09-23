@@ -45,14 +45,14 @@ struct AboutRemodexView: View {
                 .font(AppFont.headline(weight: .bold))
                 .foregroundStyle(.primary)
 
-            Text("Control **Codex** from your iPhone.")
+            Text("Continue Codex and OpenCode chats from your iPhone.")
                 .font(AppFont.subheadline())
                 .foregroundStyle(.secondary)
 
             calloutCard(
                 icon: "desktopcomputer",
                 color: .cyan,
-                text: "The Codex runtime stays on your device. Your phone is a secure remote control connected through a relay."
+                text: "Your AI runtimes stay on your device. Your phone connects to the local bridge through a relay."
             )
         }
         .padding(.top, 8)
@@ -69,7 +69,7 @@ struct AboutRemodexView: View {
             bulletList([
                 "You send a prompt from your phone",
                 "It travels through the relay to the bridge on your device",
-                "The bridge forwards it to `codex app-server` via JSON-RPC",
+                "The bridge forwards it to the selected local runtime",
                 "Responses stream back the same path in real time",
             ])
 
@@ -89,8 +89,8 @@ struct AboutRemodexView: View {
 
             VStack(spacing: 0) {
                 diagramStep(from: "Remodex iOS", to: "Bridge (Device)", via: "WebSocket")
-                diagramStep(from: "Bridge (Device)", to: "codex app-server", via: "JSON-RPC")
-                diagramStep(from: "codex app-server", to: "~/.codex/sessions", via: "JSONL rollout", isLast: true)
+                diagramStep(from: "Bridge (Device)", to: "Codex or OpenCode", via: "Local API")
+                diagramStep(from: "Codex or OpenCode", to: "Local sessions", via: "On device", isLast: true)
             }
             .padding(16)
             .background(
@@ -148,7 +148,7 @@ struct AboutRemodexView: View {
 
             Spacer().frame(height: 4)
 
-            bodyText("You can **self-host** the relay on your own VPS, or use the default hosted endpoint from the npm package.")
+            bodyText("Pair your phone with your own local bridge and relay.")
         }
     }
 
@@ -156,20 +156,20 @@ struct AboutRemodexView: View {
 
     @ViewBuilder private var appServerSection: some View {
         VStack(alignment: .leading, spacing: 14) {
-            sectionTitle("Codex App-Server")
+            sectionTitle("Local Runtimes")
 
-            bodyText("The bridge spawns a **`codex app-server`** process — the same JSON-RPC interface behind the Codex desktop app and IDE extensions.")
+            bodyText("The bridge connects to **Codex** through `codex app-server` and to **OpenCode** through its local server API. Choose a provider and model when starting a chat.")
 
             bulletList([
-                "Phone conversations are first-class Codex sessions",
-                "Produces JSONL rollout files under `~/.codex/sessions/`",
-                "Threads started from your phone show up in Codex.app",
+                "Chats and files stay with the selected runtime on your Mac",
+                "Codex chats appear in Codex.app",
+                "OpenCode chats can continue from OpenCode on the Mac",
             ])
 
             calloutCard(
                 icon: "point.topleft.down.to.point.bottomright.curvepath",
                 color: .orange,
-                text: "Already have a running Codex instance? Point the bridge at it with REMODEX_CODEX_ENDPOINT instead of spawning a new one."
+                text: "You can point the bridge at an existing Codex or OpenCode server instead of starting one."
             )
         }
     }
@@ -258,7 +258,7 @@ struct AboutRemodexView: View {
 
             iconRow("arrow.clockwise", "Auto-reconnect with exponential backoff (1s → 5s)")
             iconRow("envelope.badge.fill", "Bounded outbound buffer re-sends missed encrypted messages")
-            iconRow("cpu.fill", "Codex process stays alive across transient drops")
+            iconRow("cpu.fill", "Local runtime sessions survive transient connection drops")
             iconRow("power", "SIGINT / SIGTERM trigger clean shutdown")
         }
     }
@@ -267,14 +267,14 @@ struct AboutRemodexView: View {
 
     @ViewBuilder private var desktopSection: some View {
         VStack(alignment: .leading, spacing: 14) {
-            sectionTitle("Desktop App Integration")
+            sectionTitle("Desktop Chats")
 
-            bodyText("Threads from your phone are persisted as JSONL rollout files, so they appear in **Codex.app** on your device.")
+            bodyText("Codex chats from your phone are persisted locally and appear in **Codex.app**. OpenCode chats can be continued in OpenCode on the Mac.")
 
             calloutCard(
                 icon: "macbook.and.iphone",
                 color: .blue,
-                text: "The desktop app doesn't live-reload external writes. Use the desktop app handoff button in Remodex to continue the current thread on your device."
+                text: "For Codex chats, use the Desktop handoff action when you want to continue in Codex.app."
             )
         }
     }

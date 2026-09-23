@@ -947,6 +947,7 @@ function startBridge({
       } else if (message.method === "thread/unarchived") {
         refreshOpenCodeThreadCatalog();
       }
+      pushNotificationTracker.handleOutbound(JSON.stringify(message), message);
       sendApplicationResponse(JSON.stringify(message));
     },
   });

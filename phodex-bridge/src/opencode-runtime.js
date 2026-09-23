@@ -287,21 +287,25 @@ function createOpenCodeRuntime({
   reconnectDelayMs = 1_000,
   completedTurnStateGraceMs = 60_000,
   variantCatchupMs = 5_000,
+  turnPollIntervalMs = 750,
 } = {}) {
   if (typeof fetchImpl !== "function") throw new Error("OpenCode runtime requires fetch");
   let baseUrl = configuredBaseUrl || "";
   let password = configuredBaseUrl ? "" : passwordFactory();
   let child = null;
   let startPromise = null;
+  let ownedServerExit = null;
   let stopped = false;
   let eventAbort = null;
   let eventTask = null;
+  let restartEventsAfterCurrentTask = false;
   let requestSequence = 0;
   const sessionCache = new Map();
   // prompt_async acknowledges before OpenCode's session model is updated.
   // Keep the accepted choice until a subsequent server snapshot confirms it.
   const pendingAcceptedVariants = new Map();
   const running = new Map();
+  const polledTurns = new Map();
   const completedTurnIds = new Set();
   const pendingRequests = new Map();
   const streamedParts = new Map();
@@ -412,6 +416,7 @@ function createOpenCodeRuntime({
     const deadline = Date.now() + startupTimeoutMs;
     let lastError;
     while (Date.now() < deadline) {
+      if (ownedServerExit) throw ownedServerExit;
       if (child?.exitCode != null) throw new Error(`OpenCode server exited with code ${child.exitCode}`);
       try { await probe(); return; } catch (error) { lastError = error; }
       await new Promise((resolve) => setTimeout(resolve, 75));
@@ -422,25 +427,52 @@ function createOpenCodeRuntime({
   async function ensureStarted() {
     if (startPromise) return startPromise;
     stopped = false;
-    startPromise = (async () => {
+    let launchedChild = null;
+    const attempt = (async () => {
       if (!baseUrl) {
         const port = await findPort();
         baseUrl = `http://127.0.0.1:${port}`;
-        child = spawnImpl(resolveOpenCodeBin(), ["serve", "--hostname", "127.0.0.1", "--port", String(port)], {
+        ownedServerExit = null;
+        launchedChild = spawnImpl(resolveOpenCodeBin(), ["serve", "--hostname", "127.0.0.1", "--port", String(port)], {
           env: { ...process.env, OPENCODE_SERVER_PASSWORD: password },
           stdio: "ignore",
+        });
+        child = launchedChild;
+        launchedChild.once?.("exit", (code, signal) => {
+          if (child !== launchedChild || stopped) return;
+          ownedServerExit = new Error(`OpenCode server exited (${signal ?? code ?? "unknown"})`);
+          child = null;
+          baseUrl = "";
+          startPromise = null;
+          eventConnectionRevision += 1;
+          eventAbort?.abort();
+          for (const sessionID of [...running.keys()]) {
+            finishTurn(sessionID, "failed", "OpenCode server stopped. Send again to reconnect.");
+          }
+          sessionStatuses.clear();
+          for (const [id, pending] of pendingRequests) {
+            emit("serverRequest/resolved", { requestId: id, threadId: encodeThreadId(pending.properties.sessionID) });
+          }
+          pendingRequests.clear();
+        });
+        launchedChild.once?.("error", (error) => {
+          ownedServerExit = error;
         });
       }
       await waitForProbe();
       startEvents();
       return { baseUrl };
-    })().catch((error) => {
-      startPromise = null;
-      if (child?.exitCode == null) child?.kill?.();
-      child = null;
-      if (!configuredBaseUrl) baseUrl = "";
+    })();
+    const guarded = attempt.catch((error) => {
+      if (startPromise === guarded) startPromise = null;
+      if (child === launchedChild) {
+        if (child?.exitCode == null) child?.kill?.();
+        child = null;
+        if (!configuredBaseUrl) baseUrl = "";
+      }
       throw error;
     });
+    startPromise = guarded;
     return startPromise;
   }
 
@@ -492,6 +524,7 @@ function createOpenCodeRuntime({
   function finishTurn(sessionID, status, errorMessage) {
     const active = running.get(sessionID);
     running.delete(sessionID);
+    stopTurnPoll(sessionID);
     if (!active?.turnId || completedTurnIds.has(active.turnId)) return;
     completedTurnIds.add(active.turnId);
     if (completedTurnIds.size > 512) completedTurnIds.delete(completedTurnIds.values().next().value);
@@ -506,6 +539,58 @@ function createOpenCodeRuntime({
         items: [],
       },
     });
+  }
+
+  function stopTurnPoll(sessionID) {
+    const state = polledTurns.get(sessionID);
+    if (!state) return;
+    if (state.timer) clearTimeout(state.timer);
+    polledTurns.delete(sessionID);
+  }
+
+  // The released server does not broadcast every CLI-created session's events
+  // through this serve process. Reconcile only phone-started turns, and share
+  // the item identity maps with SSE so either source can win without duplicates.
+  function watchTurn(session, turnId) {
+    stopTurnPoll(session.id);
+    const state = { turnId, seenBusy: false, timer: null };
+    polledTurns.set(session.id, state);
+    const poll = async () => {
+      if (stopped || polledTurns.get(session.id) !== state || running.get(session.id)?.turnId !== turnId) return;
+      try {
+        const [messages, statuses] = await Promise.all([
+          request(messagePath(session, { limit: 20 }), { signal: AbortSignal.timeout(3_000) }),
+          request(`/session/status?directory=${encodeURIComponent(session.directory)}`, {
+            signal: AbortSignal.timeout(3_000),
+          }),
+        ]);
+        if (polledTurns.get(session.id) !== state || running.get(session.id)?.turnId !== turnId) return;
+        let assistantCompleted = false;
+        for (const message of Array.isArray(messages) ? messages : []) {
+          const info = message?.info;
+          const belongsToTurn = info?.role === "user" && turnId === `opencode-turn:${info.id}`
+            || info?.role === "assistant" && turnId === `opencode-turn:${info.parentID}`;
+          if (!belongsToTurn) continue;
+          rememberMessageInfo(session.id, info, { allowStart: false });
+          for (const part of message.parts || []) {
+            emitItem({ ...part, sessionID: part.sessionID || session.id, messageID: part.messageID || info.id });
+          }
+          if (info.role === "assistant" && info.time?.completed) assistantCompleted = true;
+        }
+        const status = statuses?.[session.id]?.type;
+        if (status === "busy" || status === "retry") state.seenBusy = true;
+        // An assistant message can complete before later tool or assistant steps.
+        // Only the session becoming idle establishes that the turn has ended.
+        if (status !== "busy" && status !== "retry" && (state.seenBusy || assistantCompleted)) {
+          finishTurn(session.id, "completed");
+          return;
+        }
+      } catch { /* A failed poll cannot prove a turn ended; SSE and the next poll can recover. */ }
+      if (polledTurns.get(session.id) !== state) return;
+      state.timer = setTimeout(poll, turnPollIntervalMs);
+      state.timer.unref?.();
+    };
+    void poll();
   }
 
   function emitItem(part) {
@@ -626,7 +711,7 @@ function createOpenCodeRuntime({
     const active = status === "busy" || status === "retry";
     sessionStatuses.set(sessionID, active ? "busy" : "idle");
     if (active && !running.has(sessionID)) running.set(sessionID, { turnId: null });
-    else if (!active && running.has(sessionID)) finishTurn(sessionID, "completed");
+    else if (!active && running.has(sessionID) && !polledTurns.has(sessionID)) finishTurn(sessionID, "completed");
   }
 
   async function refreshSessionStatuses(sessionIDs, connectionRevision = eventConnectionRevision) {
@@ -683,7 +768,9 @@ function createOpenCodeRuntime({
   }
 
   function requestClient(method, properties) {
-    const id = `${REQUEST_PREFIX}${++requestSequence}-${properties.id}`;
+    const existing = [...pendingRequests].find(([, pending]) =>
+      pending.method === method && pending.properties.id === properties.id);
+    const id = existing?.[0] || `${REQUEST_PREFIX}${++requestSequence}-${properties.id}`;
     pendingRequests.set(id, { method, properties });
     if (method === "permission") {
       emit("item/commandExecution/requestApproval", {
@@ -705,6 +792,14 @@ function createOpenCodeRuntime({
         itemId: properties.tool?.callID || properties.id,
         questions,
       }, id);
+    }
+  }
+
+  function resolveRemoteRequest(method, properties) {
+    for (const [id, pending] of pendingRequests) {
+      if (pending.method !== method || pending.properties.id !== properties.id) continue;
+      pendingRequests.delete(id);
+      emit("serverRequest/resolved", { requestId: id, threadId: encodeThreadId(pending.properties.sessionID) });
     }
   }
 
@@ -758,6 +853,8 @@ function createOpenCodeRuntime({
         break;
       case "permission.asked": case "permission.updated": requestClient("permission", properties); break;
       case "question.asked": case "question.updated": requestClient("question", properties); break;
+      case "permission.replied": resolveRemoteRequest("permission", properties); break;
+      case "question.replied": case "question.rejected": resolveRemoteRequest("question", properties); break;
       default: break;
     }
   }
@@ -785,21 +882,35 @@ function createOpenCodeRuntime({
   }
 
   function startEvents() {
-    if (eventTask || stopped) return;
-    eventAbort = new AbortController();
-    eventTask = (async () => {
-      while (!stopped && !eventAbort.signal.aborted) {
-        try { await consumeEvents(eventAbort.signal); } catch (error) {
-          if (eventAbort.signal.aborted || stopped) break;
+    if (stopped) return;
+    if (eventTask) {
+      restartEventsAfterCurrentTask = true;
+      return;
+    }
+    const abort = new AbortController();
+    eventAbort = abort;
+    const task = (async () => {
+      while (!stopped && !abort.signal.aborted) {
+        try { await consumeEvents(abort.signal); } catch (error) {
+          if (abort.signal.aborted || stopped) break;
         }
         if (!stopped) await new Promise((resolve) => {
           const finish = () => { clearTimeout(timer); resolve(); };
           const timer = setTimeout(finish, reconnectDelayMs);
           timer.unref?.();
-          eventAbort.signal.addEventListener("abort", finish, { once: true });
+          abort.signal.addEventListener("abort", finish, { once: true });
         });
       }
-    })().finally(() => { eventTask = null; });
+    })();
+    eventTask = task;
+    void task.finally(() => {
+      if (eventTask === task) eventTask = null;
+      if (eventAbort === abort) eventAbort = null;
+      if (restartEventsAfterCurrentTask && !stopped && baseUrl) {
+        restartEventsAfterCurrentTask = false;
+        startEvents();
+      }
+    });
   }
 
   async function listModels() {
@@ -1057,6 +1168,12 @@ function createOpenCodeRuntime({
     }
     const threadId = params.threadId || params.id;
     if (method === "thread/read" || method === "thread/resume") {
+      if (method === "thread/resume" && params.cwd) {
+        const session = await sessionFor(threadId);
+        if (path.resolve(params.cwd) !== path.resolve(session.directory || "")) {
+          throw new Error("OpenCode cannot move an existing chat to another folder. Start a new chat in the target folder instead.");
+        }
+      }
       return { thread: await readThread(threadId, params.excludeTurns !== true && params.includeTurns !== false) };
     }
     if (method === "thread/turns/list") {
@@ -1117,6 +1234,7 @@ function createOpenCodeRuntime({
         running.set(session.id, { turnId });
         emit("turn/started", { threadId, turnId, turn: { id: turnId, status: "inProgress", items: [] } });
       }
+      watchTurn(session, turnId);
       return { turn: { id: turnId, status: "inProgress" } };
     }
     if (method === "turn/interrupt") {
@@ -1155,7 +1273,6 @@ function createOpenCodeRuntime({
   async function handleClientResponse(parsed) {
     if (!ownsClientResponse(parsed)) return false;
     const pending = pendingRequests.get(parsed.id);
-    pendingRequests.delete(parsed.id);
     const properties = pending.properties;
     const directory = sessionCache.get(properties.sessionID)?.directory;
     const suffix = directory ? `?directory=${encodeURIComponent(directory)}` : "";
@@ -1180,6 +1297,7 @@ function createOpenCodeRuntime({
         await request(`/question/${encodeURIComponent(properties.id)}/reply${suffix}`, { method: "POST", body: { answers } });
       }
     }
+    pendingRequests.delete(parsed.id);
     emit("serverRequest/resolved", { requestId: parsed.id, threadId: encodeThreadId(properties.sessionID) });
     return true;
   }
@@ -1192,6 +1310,7 @@ function createOpenCodeRuntime({
     startPromise = null;
     pendingRequests.clear();
     running.clear();
+    for (const sessionID of polledTurns.keys()) stopTurnPoll(sessionID);
     for (const timer of completedTurnCleanupTimers.values()) clearTimeout(timer);
     completedTurnCleanupTimers.clear();
     streamedParts.clear();

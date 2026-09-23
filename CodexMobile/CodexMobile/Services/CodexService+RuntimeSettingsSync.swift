@@ -53,9 +53,9 @@ extension CodexService {
         // per-turn variant must survive reconnect and app relaunch.
         let variant = override.overridesReasoning ? override.reasoningEffort : nil
         applyThreadRuntimeOverride(
-            variant.map {
-                CodexThreadRuntimeOverride(reasoningEffort: $0, overridesReasoning: true, overridesServiceTier: false)
-            },
+            override.overridesReasoning
+                ? CodexThreadRuntimeOverride(reasoningEffort: variant, overridesReasoning: true, overridesServiceTier: false)
+                : nil,
             to: threadId
         )
     }

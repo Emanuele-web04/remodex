@@ -8,6 +8,7 @@ import SwiftUI
 
 struct SettingsConnectionCard: View {
     @Environment(CodexService.self) private var codex
+    @State private var isShowingDisconnectConfirmation = false
     let onEditComputerName: () -> Void
 
     var body: some View {
@@ -52,7 +53,7 @@ struct SettingsConnectionCard: View {
             if codex.isConnected {
                 SettingsButton("Disconnect", role: .destructive) {
                     HapticFeedback.shared.triggerImpactFeedback()
-                    disconnectRelay()
+                    isShowingDisconnectConfirmation = true
                 }
             } else if codex.hasTrustedMacReconnectCandidate {
                 SettingsButton("Forget Pair", role: .destructive) {
@@ -60,6 +61,13 @@ struct SettingsConnectionCard: View {
                     codex.forgetTrustedMac()
                 }
             }
+        }
+        .confirmationDialog("Disconnect from this Mac?", isPresented: $isShowingDisconnectConfirmation) {
+            Button("Disconnect", role: .destructive) {
+                disconnectRelay()
+            }
+        } message: {
+            Text("Your pairing stays saved so you can reconnect later.")
         }
     }
 

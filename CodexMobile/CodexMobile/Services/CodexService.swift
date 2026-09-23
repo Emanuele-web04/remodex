@@ -432,7 +432,13 @@ final class CodexService {
     // Tracks the non-blocking bootstrap that hydrates chats/models after the socket is ready.
     var isBootstrappingConnectionSync = false
     var currentOutput = ""
-    var activeThreadId: String?
+    var activeThreadId: String? {
+        didSet {
+            // Footer errors belong to the chat where they occurred. Do not
+            // carry a previous runtime's error into another conversation.
+            if oldValue != activeThreadId { lastErrorMessage = nil }
+        }
+    }
     var activeTurnId: String?
     var activeTurnIdByThread: [String: String] = [:]
     // Monotonic live turn-start token. Unlike running/id snapshots, this cannot

@@ -107,7 +107,7 @@ struct TurnView: View {
             isThreadRunning: isThreadRunning,
             gitWorkingDirectory: gitWorkingDirectory
         )
-        let canHandOffToWorktree = canHandOffToWorktree(
+        let canHandOffToWorktree = resolvedThread.runtimeProvider != .opencode && canHandOffToWorktree(
             isThreadRunning: isThreadRunning,
             gitWorkingDirectory: gitWorkingDirectory
         )
@@ -119,10 +119,11 @@ struct TurnView: View {
             requiresIdleThread: false
         )
         let disabledGitActions: Set<TurnGitActionKind> = viewModel.disabledGitActions
-        let onTapMacHandoff: (() -> Void)? = codex.isConnected && codex.supportsDesktopAppHandoff ? {
+        let onTapMacHandoff: (() -> Void)? = codex.isConnected && codex.supportsDesktopAppHandoff
+            && resolvedThread.runtimeProvider != .opencode ? {
             isShowingMacHandoffConfirm = true
         } : nil
-        let onTapWorktreeHandoff: (() -> Void)? = showsGitControls ? {
+        let onTapWorktreeHandoff: (() -> Void)? = showsGitControls && resolvedThread.runtimeProvider != .opencode ? {
             handleWorktreeHandoffTap(currentThread: resolvedThread)
         } : nil
         let onTapNewChat: (() -> Void)? = codex.isConnected && !isWorktreeProject ? {
@@ -752,6 +753,7 @@ struct TurnView: View {
 
     // Opens the thread goal sheet, optionally prefilled with leftover composer draft text.
     private func presentGoalSheet(objectivePrefill: String?) {
+        guard thread.runtimeProvider == .codex else { return }
         goalSheetObjectivePrefill = objectivePrefill
         // Remember the composer text backing the prefill so submission can consume it.
         // Cancelling the sheet leaves the draft untouched.
@@ -785,6 +787,7 @@ struct TurnView: View {
     // Keeps the goal chip accurate on open/resume even when the live
     // `thread/goal/updated` snapshot was missed (reconnect, mirrored threads).
     private func refreshThreadGoalSnapshot() async {
+        guard thread.runtimeProvider == .codex else { return }
         await codex.refreshThreadGoalMirror(threadId: thread.id)
     }
 
@@ -1035,6 +1038,7 @@ struct TurnView: View {
     }
 
     private func handleWorktreeHandoffTap(currentThread: CodexThread) {
+        guard currentThread.runtimeProvider != .opencode else { return }
         if currentThread.isManagedWorktreeProject {
             Task { @MainActor in
                 do {
@@ -1550,8 +1554,8 @@ struct TurnView: View {
                 isEmptyThread: isEmptyThread,
                 isWorktreeProject: isWorktreeProject,
                 activeFileChangeStatus: activeFileChangeStatus,
-                threadGoal: codex.goalByThreadID[thread.id],
-                canForkLocally: showsGitControls && gitWorkingDirectory != nil && WorktreeFlowCoordinator.localForkProjectPath(
+                threadGoal: currentThread.runtimeProvider == .codex ? codex.goalByThreadID[thread.id] : nil,
+                canForkLocally: currentThread.runtimeProvider == .codex && showsGitControls && gitWorkingDirectory != nil && WorktreeFlowCoordinator.localForkProjectPath(
                     for: currentThread,
                     localCheckoutPath: viewModel.gitLocalCheckoutPath
                 ) != nil,
@@ -1624,9 +1628,11 @@ struct TurnView: View {
                 onStartCodeReviewThread: startCodeReviewThread,
                 onStartForkThreadLocally: startLocalFork,
                 onOpenForkWorktree: {
+                    guard currentThread.runtimeProvider == .codex else { return }
                     worktreeOverlayRoute = .fork
                 },
                 onOpenWorktreeHandoff: {
+                    guard currentThread.runtimeProvider == .codex else { return }
                     handleWorktreeHandoffTap(currentThread: currentThread)
                 },
                 onOpenFeedbackMail: {

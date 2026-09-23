@@ -2684,6 +2684,8 @@ extension CodexService {
                     throw CodexServiceError.invalidInput("The selected OpenCode variant is unavailable for this model.")
                 }
                 params["effort"] = .string(variant)
+            } else if threadRuntimeOverride(for: threadId)?.overridesReasoning == true {
+                params["effort"] = .null
             }
         } else if let effort = selectedReasoningEffortForSelectedModel(threadId: threadId) {
             params["effort"] = .string(effort)

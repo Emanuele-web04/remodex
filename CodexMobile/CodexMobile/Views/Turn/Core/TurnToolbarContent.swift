@@ -153,15 +153,16 @@ struct TurnToolbarContent: ToolbarContent {
         canTapNewChat: Bool,
         canTapTerminal: Bool
     ) -> [TurnThreadActionMenuItem] {
-        var actions: [TurnThreadActionMenuItem] = [
-            TurnThreadActionMenuItem(
+        var actions: [TurnThreadActionMenuItem] = []
+        if onTapMacHandoff != nil {
+            actions.append(TurnThreadActionMenuItem(
                 title: "Hand off to Desktop",
                 icon: .system("arrow.left.arrow.right"),
                 isEnabled: canTapMacHandoff
             ) {
                 onTapMacHandoff?()
-            },
-        ]
+            })
+        }
 
         if onTapWorktreeHandoff != nil {
             actions.append(

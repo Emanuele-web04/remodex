@@ -133,6 +133,15 @@ extension CodexService {
         }
     }
 
+    func clearOpenCodeVariant(for threadId: String?) {
+        guard let threadId = normalizedInterruptIdentifier(threadId) else { return }
+        mutateThreadRuntimeOverride(for: threadId) { override in
+            override.reasoningEffort = nil
+            // Explicit null tells OpenCode to release a previously pinned variant.
+            override.overridesReasoning = true
+        }
+    }
+
     func runtimeAccessConfiguration() -> RuntimeAccessConfiguration {
         RuntimeAccessConfiguration(mode: selectedAccessMode)
     }

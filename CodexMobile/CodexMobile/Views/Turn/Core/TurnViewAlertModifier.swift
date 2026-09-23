@@ -33,6 +33,10 @@ private struct TurnViewAlertModifier: ViewModifier {
                 Button("Approve") {
                     onApproveApproval(request)
                 }
+                Button("Cancel", role: .cancel) {
+                    // A dismissed permission request still blocks the agent.
+                    onDeclineApproval(request)
+                }
             } message: { request in
                 Text(approvalAlertMessage(for: request))
             }

@@ -5,6 +5,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const { EventEmitter } = require("node:events");
 const {
   createOpenCodeRuntime,
   decodeThreadId,
@@ -156,6 +157,18 @@ test("metadata-only resume and read skip transcript loading and project scans", 
   assert.equal(server.calls.some((call) => call.key.includes("scope=project")), false);
 });
 
+test("resume refuses a folder change that the released OpenCode session API cannot apply", async (t) => {
+  const server = createMockServer({
+    "GET /session/ses_test": () => response(createMockServer().session),
+  });
+  const runtime = createOpenCodeRuntime({ baseUrl: "http://127.0.0.1:7777", fetchImpl: server.fetch, reconnectDelayMs: 60_000 });
+  t.after(() => runtime.shutdown());
+  await assert.rejects(runtime.handleRequest({ method: "thread/resume", params: {
+    threadId: "opencode:ses_test", cwd: "/repo/other-worktree", excludeTurns: true,
+  } }), /cannot move an existing chat/);
+  assert.equal(server.calls.some((call) => call.key.includes("other-worktree")), false);
+});
+
 test("session model variant outranks an older message variant", async (t) => {
   const session = { ...createMockServer().session,
     model: { providerID: "opencode", id: "big-pickle-free", variant: "low" } };
@@ -221,6 +234,45 @@ test("turn/start infers a Mac session model from one message, without fetching h
   assert.deepEqual(server.calls.find((call) => call.key.includes("prompt_async")).body.model, {
     providerID: "opencode-go", modelID: "mac-fast",
   });
+});
+
+test("phone turn polling streams a Mac-created session when serve emits no turn events", async (t) => {
+  let reads = 0;
+  let userMessageID;
+  const outbound = [];
+  const session = { ...createMockServer().session };
+  const server = createMockServer({
+    "GET /session/ses_test": () => response(session),
+    "POST /session/ses_test/prompt_async?directory=%2Frepo%2Fapp": ({ options }) => {
+      userMessageID = JSON.parse(options.body).messageID;
+      return response(null, { status: 204 });
+    },
+    "GET /session/ses_test/message?directory=%2Frepo%2Fapp&limit=20": () => {
+      reads += 1;
+      return response([
+        { info: { id: userMessageID, role: "user" }, parts: [] },
+        { info: { id: "msg_reply", role: "assistant", parentID: userMessageID,
+          time: reads > 1 ? { completed: 123 } : {} },
+          parts: [{ id: "prt_reply", type: "text", text: reads > 1 ? "Hello" : "Hel",
+            ...(reads > 1 ? { time: { end: 123 } } : {}) }] },
+      ]);
+    },
+    "GET /session/status?directory=%2Frepo%2Fapp": () => response({ ses_test: { type: reads > 1 ? "idle" : "busy" } }),
+  });
+  const runtime = createOpenCodeRuntime({
+    baseUrl: "http://127.0.0.1:7777", fetchImpl: server.fetch,
+    onNotification: (message) => outbound.push(message), turnPollIntervalMs: 5, reconnectDelayMs: 60_000,
+  });
+  t.after(() => runtime.shutdown());
+  await runtime.handleRequest({ method: "turn/start", params: {
+    threadId: "opencode:ses_test", input: [{ text: "Continue" }],
+  } });
+  await waitUntil(() => outbound.some((message) => message.method === "turn/completed"));
+  assert.deepEqual(outbound.filter((message) => message.method === "item/agentMessage/delta")
+    .map((message) => message.params.delta), ["lo"]);
+  assert.equal(outbound.filter((message) => message.method === "item/started"
+    && message.params.item.id === "prt_reply").length, 1);
+  assert.equal(outbound.at(-1).params.turn.status, "completed");
 });
 
 test("turn paging follows requested order and stays anchored when Mac adds a turn", async (t) => {
@@ -604,6 +656,45 @@ test("routes permission and structured-question replies by exact OpenCode reques
   assert.deepEqual(server.calls.find((call) => call.key.includes("/question/")).body.answers, [["A"], ["B"]]);
 });
 
+test("updated OpenCode prompts keep one request id and remote replies dismiss the card", async (t) => {
+  const outbound = [];
+  const runtime = createOpenCodeRuntime({
+    baseUrl: "http://127.0.0.1:7777", fetchImpl: createMockServer().fetch,
+    onNotification: (message) => outbound.push(message), reconnectDelayMs: 60_000,
+  });
+  t.after(() => runtime.shutdown());
+  const properties = { id: "que_1", sessionID: "ses_test", questions: [
+    { id: "q1", header: "Name", question: "What name?", options: [] },
+  ] };
+  runtime.processEvent({ payload: { type: "question.asked", properties } });
+  runtime.processEvent({ payload: { type: "question.updated", properties } });
+  const prompts = outbound.filter((message) => message.method === "item/tool/requestUserInput");
+  assert.equal(prompts.length, 2);
+  assert.equal(prompts[0].id, prompts[1].id);
+  runtime.processEvent({ payload: { type: "question.replied", properties } });
+  assert.equal(outbound.at(-1).method, "serverRequest/resolved");
+  assert.equal(outbound.at(-1).params.requestId, prompts[0].id);
+  assert.equal(runtime.ownsClientResponse({ id: prompts[0].id }), false);
+});
+
+test("failed OpenCode approval reply keeps its request retryable", async (t) => {
+  const server = createMockServer({
+    "POST /permission/per_1/reply": () => response({ error: "temporary" }, { status: 503 }),
+  });
+  const outbound = [];
+  const runtime = createOpenCodeRuntime({
+    baseUrl: "http://127.0.0.1:7777", fetchImpl: server.fetch,
+    onNotification: (message) => outbound.push(message), reconnectDelayMs: 60_000,
+  });
+  t.after(() => runtime.shutdown());
+  runtime.processEvent({ payload: { type: "permission.asked", properties: {
+    id: "per_1", sessionID: "ses_test", permission: "bash", patterns: ["git status"],
+  } } });
+  const approval = outbound.find((message) => message.method === "item/commandExecution/requestApproval");
+  await assert.rejects(runtime.handleClientResponse({ id: approval.id, result: { decision: "decline" } }), /503/);
+  assert.equal(runtime.ownsClientResponse({ id: approval.id }), true);
+});
+
 test("archives and restores a session with OpenCode's numeric archived field", async (t) => {
   const server = createMockServer({
     "PATCH /session/ses_test?directory=%2Frepo%2Fapp": ({ options }) => response({
@@ -834,6 +925,35 @@ test("a failed owned server startup retries with a new process and port", async 
   assert.deepEqual(await runtime.ensureStarted(), { baseUrl: "http://127.0.0.1:7778" });
   assert.equal(children.length, 2);
   assert.equal(children[1].killed, false);
+});
+
+test("an owned OpenCode server exit fails its turn and the next request respawns it", async (t) => {
+  const children = [];
+  const outbound = [];
+  const server = createMockServer();
+  const runtime = createOpenCodeRuntime({
+    opencodeBin: process.execPath, findPort: async () => 7777 + children.length,
+    fetchImpl: server.fetch, reconnectDelayMs: 60_000,
+    onNotification: (message) => outbound.push(message),
+    spawnImpl: () => {
+      const child = new EventEmitter();
+      child.exitCode = null;
+      child.kill = () => {};
+      children.push(child);
+      return child;
+    },
+  });
+  t.after(() => runtime.shutdown());
+  await runtime.ensureStarted();
+  runtime.processEvent({ type: "message.updated", properties: {
+    sessionID: "ses_test", info: { id: "msg_user", role: "user" },
+  } });
+  children[0].exitCode = 1;
+  children[0].emit("exit", 1, null);
+  assert.equal(outbound.at(-1).method, "turn/completed");
+  assert.equal(outbound.at(-1).params.turn.status, "failed");
+  assert.deepEqual(await runtime.ensureStarted(), { baseUrl: "http://127.0.0.1:7778" });
+  assert.equal(children.length, 2);
 });
 
 test("retrying a configured OpenCode endpoint never starts an owned server", async (t) => {

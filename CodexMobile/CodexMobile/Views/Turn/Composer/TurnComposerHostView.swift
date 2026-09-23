@@ -23,7 +23,7 @@ struct TurnComposerHostView: View {
     let orderedModelOptions: [CodexModelOption]
     let selectedModelTitle: String
     var openCodeVariantID: String? = nil
-    var onSelectOpenCodeVariant: ((String) -> Void)? = nil
+    var onSelectOpenCodeVariant: ((String?) -> Void)? = nil
     var isSendDisabledOverride: Bool = false
     let reasoningDisplayOptions: [TurnComposerReasoningDisplayOption]
     let showsGitControls: Bool
@@ -63,7 +63,7 @@ struct TurnComposerHostView: View {
         let isCodexRuntime = thread.runtimeProvider == .codex
         let availableForkDestinations = TurnComposerForkDestination.availableDestinations(
             canForkLocally: canForkLocally,
-            canCreateWorktree: showsGitControls && !isWorktreeProject && isGitBranchSelectorEnabled
+            canCreateWorktree: isCodexRuntime && showsGitControls && !isWorktreeProject && isGitBranchSelectorEnabled
         )
         let autocompleteState = TurnComposerAutocompleteState(
             availableSlashCommands: TurnComposerSlashCommand.availableCommands(
@@ -78,7 +78,7 @@ struct TurnComposerHostView: View {
                     isPlanModeArmed: viewModel.isPlanModeArmed
                 )
                     && !availableForkDestinations.isEmpty,
-                allowsGoalCommand: allowsGoalCommand && codex.supportsThreadGoals
+                allowsGoalCommand: isCodexRuntime && allowsGoalCommand && codex.supportsThreadGoals
             ),
             fileAutocompleteItems: viewModel.fileAutocompleteItems,
             isFileAutocompleteVisible: viewModel.isFileAutocompleteVisible,
@@ -96,7 +96,7 @@ struct TurnComposerHostView: View {
             slashCommandPanelState: viewModel.slashCommandPanelState,
             hasComposerContentConflictingWithReview: viewModel.hasComposerContentConflictingWithReview,
             isThreadRunning: isThreadRunning,
-            showsGitBranchSelector: showsGitControls,
+            showsGitBranchSelector: isCodexRuntime && showsGitControls,
             isLoadingGitBranchTargets: viewModel.isLoadingGitBranchTargets,
             availableGitBranchTargets: viewModel.availableGitBranchTargets,
             selectedGitBaseBranch: viewModel.selectedGitBaseBranch,
@@ -146,7 +146,13 @@ struct TurnComposerHostView: View {
             ? TurnComposerRuntimeActions.resolve(codex: codex, threadId: runtimeThreadId)
             : TurnComposerRuntimeActions(
                 selectModel: { _ in },
-                selectAutomaticReasoning: {},
+                selectAutomaticReasoning: {
+                    if let onSelectOpenCodeVariant {
+                        onSelectOpenCodeVariant(nil)
+                    } else {
+                        codex.clearOpenCodeVariant(for: thread.id)
+                    }
+                },
                 selectReasoning: { variant in
                     if let onSelectOpenCodeVariant {
                         onSelectOpenCodeVariant(variant)
@@ -161,7 +167,7 @@ struct TurnComposerHostView: View {
         let hasComposerWorkingDirectory = thread.gitWorkingDirectory != nil
             && !SidebarThreadGrouping.isRootlessChatThread(thread)
         let gitState = TurnComposerGitState(
-            showsGitBranchSelector: showsGitControls,
+            showsGitBranchSelector: isCodexRuntime && showsGitControls,
             isGitBranchSelectorEnabled: isGitBranchSelectorEnabled,
             availableGitBranchTargets: viewModel.availableGitBranchTargets,
             gitBranchesCheckedOutElsewhere: viewModel.gitBranchesCheckedOutElsewhere,
@@ -172,7 +178,7 @@ struct TurnComposerHostView: View {
             isLoadingGitBranchTargets: viewModel.isLoadingGitBranchTargets,
             isSwitchingGitBranch: viewModel.isSwitchingGitBranch,
             isCreatingGitWorktree: viewModel.isCreatingGitWorktree,
-            canHandOffToWorktree: isGitBranchSelectorEnabled
+            canHandOffToWorktree: isCodexRuntime && isGitBranchSelectorEnabled
                 && !isWorktreeProject
                 && !viewModel.isCreatingGitWorktree
         )
