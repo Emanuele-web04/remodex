@@ -2158,6 +2158,7 @@ final class TurnViewModel {
     func approve(
         _ request: CodexApprovalRequest,
         codex: CodexService,
+        forSession: Bool = false,
         completion: @escaping @MainActor (Bool) -> Void
     ) {
         Task { @MainActor in
@@ -2165,7 +2166,7 @@ final class TurnViewModel {
             defer { isHandlingApproval = false }
 
             do {
-                try await codex.approvePendingRequest(request)
+                try await codex.approvePendingRequest(request, forSession: forSession)
                 completion(true)
             } catch {
                 // Error message already stored in CodexService.

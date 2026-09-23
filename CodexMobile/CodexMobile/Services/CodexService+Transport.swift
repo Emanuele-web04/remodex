@@ -184,9 +184,11 @@ extension CodexService {
         method: String,
         params: JSONValue?,
         timeoutNanoseconds: UInt64? = nil,
-        timeoutMessage: String? = nil
+        timeoutMessage: String? = nil,
+        onDispatch: (@MainActor () -> Void)? = nil
     ) async throws -> RPCMessage {
         if let requestTransportOverride {
+            onDispatch?()
             return try await requestTransportOverride(method, params)
         }
 
@@ -225,7 +227,11 @@ extension CodexService {
 
                 Task {
                     do {
-                        try await sendMessage(request)
+                        try await sendMessage(
+                            request,
+                            onSendAttempt: onDispatch,
+                            shouldSend: { self.pendingRequests[requestKey] != nil }
+                        )
                     } catch {
                         if shouldTreatSendFailureAsDisconnect(error) {
                             handleReceiveError(error)
@@ -302,29 +308,41 @@ extension CodexService {
         try await sendMessage(response)
     }
 
-    func sendMessage(_ message: RPCMessage) async throws {
+    func sendMessage(
+        _ message: RPCMessage,
+        onSendAttempt: (@MainActor () -> Void)? = nil,
+        shouldSend: (@MainActor () -> Bool)? = nil
+    ) async throws {
         let payload = try encoder.encode(message)
         guard let plaintext = String(data: payload, encoding: .utf8) else {
             throw CodexServiceError.invalidResponse("Unable to encode outgoing JSON-RPC payload")
         }
 
         let secureText = try secureWireText(for: plaintext)
-        try await sendRawText(secureText)
+        try await sendRawText(secureText, onSendAttempt: onSendAttempt, shouldSend: shouldSend)
     }
 
     // Sends raw secure control messages before the JSON-RPC channel is initialized.
-    func sendRawText(_ text: String) async throws {
+    func sendRawText(
+        _ text: String,
+        onSendAttempt: (@MainActor () -> Void)? = nil,
+        shouldSend: (@MainActor () -> Bool)? = nil
+    ) async throws {
         try validateOutgoingWebSocketMessageSize(text)
 
         if usesManualWebSocketTransport {
             guard let connection = webSocketConnection else {
                 throw CodexServiceError.disconnected
             }
+            guard shouldSend?() != false else { throw CancellationError() }
+            onSendAttempt?()
             try await sendManualWebSocketFrame(opcode: 0x1, payload: Data(text.utf8), on: connection)
             return
         }
 
         if let task = webSocketTask {
+            guard shouldSend?() != false else { throw CancellationError() }
+            onSendAttempt?()
             try await task.send(.string(text))
             return
         }
@@ -337,6 +355,8 @@ extension CodexService {
         let metadata = NWProtocolWebSocket.Metadata(opcode: .text)
         let context = NWConnection.ContentContext(identifier: "codex-jsonrpc", metadata: [metadata])
 
+        guard shouldSend?() != false else { throw CancellationError() }
+        onSendAttempt?()
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             connection.send(
                 content: payload,

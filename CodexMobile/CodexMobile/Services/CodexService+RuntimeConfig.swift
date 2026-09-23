@@ -159,7 +159,8 @@ extension CodexService {
         method: String,
         baseParams: RPCObject,
         context: String,
-        accessConfiguration: RuntimeAccessConfiguration? = nil
+        accessConfiguration: RuntimeAccessConfiguration? = nil,
+        onDispatch: (@MainActor () -> Void)? = nil
     ) async throws -> RPCMessage {
         let accessConfiguration = accessConfiguration ?? RuntimeAccessConfiguration(mode: selectedAccessMode)
         let policies = accessConfiguration.approvalPolicyCandidates
@@ -178,7 +179,7 @@ extension CodexService {
                 }
 
                 do {
-                    return try await sendRequest(method: method, params: .object(params))
+                    return try await sendRequest(method: method, params: .object(params), onDispatch: onDispatch)
                 } catch {
                     lastError = error
                     let hasMorePolicies = policyIndex < (policies.count - 1)
@@ -609,7 +610,8 @@ extension CodexService {
     func sendRequestWithSandboxFallback(
         method: String,
         baseParams: RPCObject,
-        accessConfiguration: RuntimeAccessConfiguration? = nil
+        accessConfiguration: RuntimeAccessConfiguration? = nil,
+        onDispatch: (@MainActor () -> Void)? = nil
     ) async throws -> RPCMessage {
         guard let sandboxParameters = RuntimeRequestContract.sandboxParameters(for: method) else {
             throw CodexServiceError.invalidInput(
@@ -630,7 +632,8 @@ extension CodexService {
                     method: method,
                     baseParams: params,
                     context: sandboxParameter.name,
-                    accessConfiguration: accessConfiguration
+                    accessConfiguration: accessConfiguration,
+                    onDispatch: onDispatch
                 )
             } catch {
                 lastError = error

@@ -14,6 +14,19 @@ struct NewChatDraftRoute: Hashable {
     let id: String
     let preferredProjectPath: String?
     let source: NewChatDraftSource
+    let preferredRuntimeProvider: CodexRuntimeProvider?
+
+    init(
+        id: String,
+        preferredProjectPath: String?,
+        source: NewChatDraftSource,
+        preferredRuntimeProvider: CodexRuntimeProvider? = nil
+    ) {
+        self.id = id
+        self.preferredProjectPath = preferredProjectPath
+        self.source = source
+        self.preferredRuntimeProvider = preferredRuntimeProvider
+    }
 
     var isFromGeneralChat: Bool {
         source == .generalChat
@@ -71,7 +84,7 @@ struct NewChatDraftView: View {
     @State private var macHandoffErrorMessage: String?
     @State private var isDeferringSendForFocusDismissal = false
     @State private var draftRuntimeMode: NewChatDraftRuntimeMode = .local
-    @State private var selectedRuntimeProvider: CodexRuntimeProvider = .codex
+    @State private var selectedRuntimeProvider: CodexRuntimeProvider
     @State private var selectedOpenCodeModelID: String?
     @State private var selectedOpenCodeVariantID: String?
     @State private var openCodeModelsError: String?
@@ -80,6 +93,19 @@ struct NewChatDraftView: View {
     @State private var newDraftBranchName = ""
     @State private var isShowingAllBranchesPicker = false
     @StateObject private var voiceInput = VoiceInputCoordinator()
+
+    init(
+        route: NewChatDraftRoute,
+        leadingControl: NewChatDraftLeadingControl = .back,
+        onOpenTerminal: ((String?) -> Void)? = nil,
+        onOpenThread: @escaping @MainActor @Sendable (CodexThread) -> Void
+    ) {
+        self.route = route
+        self.leadingControl = leadingControl
+        self.onOpenTerminal = onOpenTerminal
+        self.onOpenThread = onOpenThread
+        _selectedRuntimeProvider = State(initialValue: route.preferredRuntimeProvider ?? .codex)
+    }
 
     // UI-only check for layout experiments: true when opened from the general
     // sidebar Chat affordance, false when opened from a folder section button.
@@ -149,6 +175,19 @@ struct NewChatDraftView: View {
         }
         .task {
             initializeProjectSelectionIfNeeded()
+            if selectedRuntimeProvider == .opencode {
+                if selectedOpenCodeModelID == nil,
+                   route.source == .folderChat,
+                   let projectPath = CodexThreadStartProjectBinding.normalizedProjectPath(route.preferredProjectPath) {
+                    selectedOpenCodeModelID = codex.threads
+                        .filter { $0.syncState == .live && $0.runtimeProvider == .opencode && $0.projectGroupPath == projectPath }
+                        .max(by: { lhs, rhs in
+                            (lhs.updatedAt ?? lhs.createdAt ?? .distantPast)
+                                < (rhs.updatedAt ?? rhs.createdAt ?? .distantPast)
+                        })?.model
+                }
+                loadOpenCodeModels()
+            }
             refreshDraftGitStateIfNeeded()
             // Opening a fresh chat should land the cursor in the composer so the
             // keyboard is up and the user can type right away.

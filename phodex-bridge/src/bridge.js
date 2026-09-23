@@ -100,6 +100,8 @@ const execFileAsync = promisify(execFile);
 const RELAY_WATCHDOG_PING_INTERVAL_MS = 10_000;
 const RELAY_HISTORY_IMAGE_REFERENCE_URL = "remodex://history-image-elided";
 const RELAY_THREAD_PAYLOAD_SOFT_LIMIT_BYTES = 4 * 1024 * 1024;
+const OPEN_CODE_THREAD_LIST_CURSOR_PREFIX = "remodex-opencode-list-v1:";
+const THREAD_LIST_DEFAULT_LIMIT = 100;
 const RELAY_HISTORY_TEXT_TAIL_LIMIT_CHARS = 24_000;
 // Recent-turn window used only when a thread/read payload already exceeds the
 // relay soft budget: heavy threads first paint with this many newest turns and
@@ -789,6 +791,7 @@ function startBridge({
   const relaySanitizedResponseMethodsById = new Map();
   const pendingOpenCodeThreadListRequests = new Map();
   const openCodeThreadCatalog = new Map();
+  const archivedOpenCodeThreadCatalog = new Map();
   let openCodeCatalogRefresh = null;
   const desktopIpcLiveOwnerObservedInboundKeys = new Set();
   const jsonlTurnsListRolloutCacheByThread = new Map();
@@ -943,7 +946,9 @@ function startBridge({
       if (message.method === "thread/started" && message.params?.thread?.id) {
         openCodeThreadCatalog.set(message.params.thread.id, message.params.thread);
       } else if (message.method === "thread/archived" && message.params?.threadId) {
+        const thread = openCodeThreadCatalog.get(message.params.threadId);
         openCodeThreadCatalog.delete(message.params.threadId);
+        if (thread) archivedOpenCodeThreadCatalog.set(thread.id, { ...thread, syncState: "archivedLocal" });
       } else if (message.method === "thread/unarchived") {
         refreshOpenCodeThreadCatalog();
       }
@@ -1034,6 +1039,7 @@ function startBridge({
     desktopIpcActionFollower?.stopAll();
     desktopIpcLiveOwner?.stopAll();
     pendingOpenCodeThreadListRequests.clear();
+    archivedOpenCodeThreadCatalog.clear();
     pendingLocalThreadCreationRequestsById.clear();
     openCodeThreadCatalog.clear();
     Promise.resolve().then(() => openCodeRuntime.shutdown()).catch((error) => {
@@ -1296,6 +1302,31 @@ function startBridge({
     const parsedMessage = parseBridgeMessage(rawMessage);
     // Register history/list response shaping before either runtime can reply.
     rememberForwardedRequestMethod(rawMessage);
+    if (parsedMessage?.method === "thread/list"
+      && typeof parsedMessage.params?.cursor === "string"
+      && parsedMessage.params.cursor.startsWith(OPEN_CODE_THREAD_LIST_CURSOR_PREFIX)) {
+      const mixedCursor = decodeOpenCodeThreadListCursor(parsedMessage.params.cursor);
+      if (!mixedCursor || mixedCursor.archived !== (parsedMessage.params?.archived === true)) {
+        sendApplicationResponse(createJsonRpcErrorResponse(
+          parsedMessage.id, new Error("Invalid mixed thread list cursor"), "invalid_thread_list_cursor"
+        ));
+        return;
+      }
+      if (mixedCursor.codexCursor == null) {
+        sendApplicationResponse(JSON.stringify({
+          id: parsedMessage.id,
+          result: { data: [], nextCursor: null },
+        }));
+        return;
+      }
+      // The app-server only understands its own opaque cursor. Our cursor also
+      // carries the OpenCode offset, which stays private to the bridge.
+      codex.send(JSON.stringify({
+        ...parsedMessage,
+        params: { ...parsedMessage.params, cursor: mixedCursor.codexCursor },
+      }));
+      return;
+    }
     if (parsedMessage?.id != null && !parsedMessage.method
       && openCodeRuntime.ownsClientResponse(parsedMessage)) {
       Promise.resolve().then(() => openCodeRuntime.handleClientResponse(parsedMessage)).catch((error) => {
@@ -1354,6 +1385,7 @@ function startBridge({
     if (handleGitRequest(rawMessage, sendApplicationResponse, {
       codexAppPath: config.codexAppPath,
       sendCodexRequest,
+      listOpenCodeSessions: () => openCodeRuntime.listAllSessions(),
     })) {
       return;
     }
@@ -1509,24 +1541,38 @@ function startBridge({
     }
 
     pendingOpenCodeThreadListRequests.delete(requestKey);
-    if (listRequest.cursor || listRequest.archived === true || safeParseJSON(sanitizedMessage)?.error) {
+    if (safeParseJSON(sanitizedMessage)?.error) {
       secureTransport.queueOutboundApplicationMessage(sanitizedMessage, sendRelayWireMessage);
       return;
     }
-
-    secureTransport.queueOutboundApplicationMessage(
-      mergeOpenCodeThreadsIntoListResponse(sanitizedMessage, [...openCodeThreadCatalog.values()]),
+    const sendMerged = () => secureTransport.queueOutboundApplicationMessage(
+      mergeOpenCodeThreadsIntoListResponse(
+        sanitizedMessage,
+        [...(listRequest.archived ? archivedOpenCodeThreadCatalog : openCodeThreadCatalog).values()],
+        listRequest
+      ),
       sendRelayWireMessage
     );
-    refreshOpenCodeThreadCatalog();
+    if (listRequest.cursor) {
+      sendMerged();
+      return;
+    }
+    const refresh = refreshOpenCodeThreadCatalog();
+    const timeoutMs = listRequest.archived ? 2_500 : 750;
+    Promise.race([
+      refresh,
+      new Promise((resolve) => setTimeout(resolve, timeoutMs)),
+    ]).then(sendMerged);
   }
 
   function refreshOpenCodeThreadCatalog() {
-    if (openCodeCatalogRefresh) return;
-    openCodeCatalogRefresh = Promise.resolve().then(() => openCodeRuntime.listThreads()).then((threads) => {
+    if (openCodeCatalogRefresh) return openCodeCatalogRefresh;
+    openCodeCatalogRefresh = Promise.resolve().then(() => openCodeRuntime.listThreadCatalog()).then(({ active, archived }) => {
       const previousIds = new Set(openCodeThreadCatalog.keys());
       openCodeThreadCatalog.clear();
-      for (const thread of threads) {
+      archivedOpenCodeThreadCatalog.clear();
+      for (const thread of archived) archivedOpenCodeThreadCatalog.set(thread.id, thread);
+      for (const thread of active) {
         openCodeThreadCatalog.set(thread.id, thread);
         if (!previousIds.has(thread.id)) {
           sendApplicationResponse(JSON.stringify({
@@ -1540,6 +1586,7 @@ function startBridge({
     }).finally(() => {
       openCodeCatalogRefresh = null;
     });
+    return openCodeCatalogRefresh;
   }
 
   function handleBridgeManagedThreadTurnsListRequest(rawMessage, sendResponse = sendApplicationResponse) {
@@ -1877,9 +1924,13 @@ function startBridge({
       relaySanitizedResponseMethodsById.set(String(requestId), trackedRequest);
     }
     if (method === "thread/list") {
+      const mixedCursor = decodeOpenCodeThreadListCursor(parsed.params?.cursor);
       pendingOpenCodeThreadListRequests.set(String(requestId), {
         cursor: Boolean(parsed.params?.cursor),
         archived: parsed.params?.archived === true,
+        limit: parsed.params?.limit,
+        openCodeOffset: mixedCursor?.openCodeOffset
+          ?? (parsed.params?.cursor ? Number.MAX_SAFE_INTEGER : 0),
       });
       evictOldestEntries(pendingOpenCodeThreadListRequests, FORWARDED_REQUEST_METHODS_MAX_SIZE);
     }
@@ -5344,11 +5395,12 @@ function routeLocalRuntimeSettingsRequest(message, {
   return true;
 }
 
-// Codex remains the source of its own paginated catalog; append OpenCode roots
-// to the first active page so the phone keeps one provider-neutral sidebar.
-function mergeOpenCodeThreadsIntoListResponse(rawMessage, openCodeThreads) {
+// Keep Codex's page intact. Fill only its free slots with OpenCode rows, then
+// carry the OpenCode offset alongside Codex's opaque cursor. This bounds each
+// relay frame without losing either provider's older pages.
+function mergeOpenCodeThreadsIntoListResponse(rawMessage, openCodeThreads, options = {}) {
   const response = safeParseBridgeResponse(rawMessage);
-  if (!response?.result || !Array.isArray(openCodeThreads) || openCodeThreads.length === 0) {
+  if (!response?.result || !Array.isArray(openCodeThreads)) {
     return rawMessage;
   }
   const result = response.result;
@@ -5359,20 +5411,82 @@ function mergeOpenCodeThreadsIntoListResponse(rawMessage, openCodeThreads) {
   if (!key) {
     return rawMessage;
   }
-  const rowsById = new Map();
-  for (const row of [...result[key], ...openCodeThreads]) {
-    if (row && typeof row.id === "string") {
-      rowsById.set(row.id, row);
+  const limit = Number.isSafeInteger(options.limit) && options.limit > 0
+    ? options.limit : THREAD_LIST_DEFAULT_LIMIT;
+  const codexRows = result[key];
+  if (codexRows.length > limit) {
+    return oversizedThreadListError(response.id, "Codex returned more thread rows than the requested limit");
+  }
+  const openCodeRows = openCodeThreads
+    .filter((row) => row && typeof row.id === "string")
+    .sort((a, b) => threadListTimestamp(b.updatedAt ?? b.createdAt)
+      - threadListTimestamp(a.updatedAt ?? a.createdAt) || a.id.localeCompare(b.id));
+  const seen = new Set(codexRows.map((row) => row?.id));
+  const rows = codexRows.slice();
+  let offset = Math.min(Math.max(0, options.openCodeOffset || 0), openCodeRows.length);
+  const codexCursor = result.nextCursor ?? result.next_cursor ?? null;
+  const setPage = () => {
+    const merged = rows.slice().sort((a, b) =>
+      threadListTimestamp(b.updatedAt ?? b.createdAt) - threadListTimestamp(a.updatedAt ?? a.createdAt)
+    );
+    result[key] = merged;
+    if (result.payload && Array.isArray(result.payload[key])) result.payload[key] = merged;
+    result.nextCursor = offset < openCodeRows.length
+      ? encodeOpenCodeThreadListCursor({ codexCursor, openCodeOffset: offset, archived: options.archived === true })
+      : codexCursor;
+    if (Object.hasOwn(result, "next_cursor")) result.next_cursor = result.nextCursor;
+    return JSON.stringify(response);
+  };
+  let encoded = setPage();
+  if (Buffer.byteLength(encoded, "utf8") > RELAY_THREAD_PAYLOAD_SOFT_LIMIT_BYTES) {
+    return oversizedThreadListError(response.id, "Codex thread list exceeds the relay payload budget");
+  }
+  while (rows.length < limit && offset < openCodeRows.length) {
+    const row = openCodeRows[offset];
+    offset += 1;
+    if (seen.has(row.id)) continue;
+    rows.push(row);
+    seen.add(row.id);
+    const candidate = setPage();
+    if (Buffer.byteLength(candidate, "utf8") > RELAY_THREAD_PAYLOAD_SOFT_LIMIT_BYTES) {
+      rows.pop();
+      seen.delete(row.id);
+      offset -= 1;
+      break;
+    }
+    encoded = candidate;
+  }
+  if (offset < openCodeRows.length) {
+    encoded = setPage();
+    if (rows.length === 0 && codexCursor == null) {
+      return oversizedThreadListError(response.id, "OpenCode thread row exceeds the relay payload budget");
     }
   }
-  const merged = [...rowsById.values()].sort((a, b) =>
-    threadListTimestamp(b.updatedAt ?? b.createdAt) - threadListTimestamp(a.updatedAt ?? a.createdAt)
-  );
-  result[key] = merged;
-  if (result.payload && Array.isArray(result.payload[key])) {
-    result.payload[key] = merged;
+  return encoded;
+}
+
+function encodeOpenCodeThreadListCursor({ codexCursor, openCodeOffset, archived }) {
+  return OPEN_CODE_THREAD_LIST_CURSOR_PREFIX + Buffer.from(JSON.stringify({
+    c: codexCursor,
+    o: openCodeOffset,
+    a: archived,
+  })).toString("base64url");
+}
+
+function decodeOpenCodeThreadListCursor(value) {
+  if (typeof value !== "string" || !value.startsWith(OPEN_CODE_THREAD_LIST_CURSOR_PREFIX)) return null;
+  try {
+    const cursor = JSON.parse(Buffer.from(value.slice(OPEN_CODE_THREAD_LIST_CURSOR_PREFIX.length), "base64url").toString("utf8"));
+    if (!cursor || !Number.isSafeInteger(cursor.o) || cursor.o < 0 || typeof cursor.a !== "boolean") return null;
+    if (cursor.c != null && typeof cursor.c !== "string") return null;
+    return { codexCursor: cursor.c, openCodeOffset: cursor.o, archived: cursor.a };
+  } catch {
+    return null;
   }
-  return JSON.stringify(response);
+}
+
+function oversizedThreadListError(id, message) {
+  return JSON.stringify({ id, error: { code: -32000, message } });
 }
 
 function safeParseBridgeResponse(rawMessage) {
@@ -5404,6 +5518,7 @@ module.exports = {
   canonicalThreadTurnsListRequest,
   createMacOSBridgeWakeAssertion,
   createThreadTurnsListFastPageCoordinator,
+  decodeOpenCodeThreadListCursor,
   disableUnsupportedReasoningSummaryForTurnStart,
   fetchAdaptiveThreadTurnsListForRelay,
   hasRelayConnectionGoneStale,

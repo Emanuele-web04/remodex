@@ -37,7 +37,7 @@ function createMockServer(overrides = {}) {
     "GET /global/health": () => response({ healthy: true, version: "1.18.32" }),
     "GET /provider": () => response({ all: [], default: {}, connected: [] }),
     "GET /project": () => response([{ id: "prj_test", worktree: "/repo" }]),
-    "GET /session?scope=project&directory=%2Frepo": () => response([session]),
+    "GET /session?scope=project&directory=%2Frepo&limit=1000000": () => response([session]),
     "GET /session/ses_test?directory=%2Frepo%2Fapp": () => response(session),
     "GET /session/ses_test/message?directory=%2Frepo%2Fapp": () => response([]),
     "GET /global/event": () => new Response(new ReadableStream({ start(controller) { controller.close(); } }), {
@@ -275,6 +275,49 @@ test("phone turn polling streams a Mac-created session when serve emits no turn 
   assert.equal(outbound.at(-1).params.turn.status, "completed");
 });
 
+test("phone turn polling follows older message pages when a tool-heavy turn exceeds 20 messages", async (t) => {
+  let userMessageID;
+  let reads = 0;
+  const outbound = [];
+  const session = { ...createMockServer().session };
+  const assistantMessage = (index) => ({
+    info: { id: `msg_reply_${index}`, role: "assistant", parentID: userMessageID, time: { completed: 123 } },
+    parts: [{ id: `prt_reply_${index}`, type: "text", text: `step ${index}`, time: { end: 123 } }],
+  });
+  const server = createMockServer({
+    "GET /session/ses_test": () => response(session),
+    "POST /session/ses_test/prompt_async?directory=%2Frepo%2Fapp": ({ options }) => {
+      userMessageID = JSON.parse(options.body).messageID;
+      return response(null, { status: 204 });
+    },
+    "GET /session/ses_test/message?directory=%2Frepo%2Fapp&limit=20": () => {
+      reads += 1;
+      return response(Array.from({ length: 20 }, (_, index) => assistantMessage(index + 6)), {
+        headers: { "x-next-cursor": "older" },
+      });
+    },
+    "GET /session/ses_test/message?directory=%2Frepo%2Fapp&limit=20&before=older": () => response([
+      { info: { id: userMessageID, role: "user" }, parts: [] },
+      ...Array.from({ length: 5 }, (_, index) => assistantMessage(index + 1)),
+    ]),
+    "GET /session/status?directory=%2Frepo%2Fapp": () => response({
+      ses_test: { type: reads > 1 ? "idle" : "busy" },
+    }),
+  });
+  const runtime = createOpenCodeRuntime({
+    baseUrl: "http://127.0.0.1:7777", fetchImpl: server.fetch,
+    onNotification: (message) => outbound.push(message), turnPollIntervalMs: 5, reconnectDelayMs: 60_000,
+  });
+  t.after(() => runtime.shutdown());
+  await runtime.handleRequest({ method: "turn/start", params: {
+    threadId: "opencode:ses_test", input: [{ text: "Continue" }],
+  } });
+  await waitUntil(() => outbound.some((message) => message.method === "turn/completed"));
+  assert.equal(outbound.filter((message) => message.method === "item/started"
+    && message.params.item.id === "prt_reply_1").length, 1);
+  assert.ok(server.calls.some((call) => call.key.endsWith("before=older")));
+});
+
 test("turn paging follows requested order and stays anchored when Mac adds a turn", async (t) => {
   const message = (number, role) => ({
     info: { id: `msg_${number}_${role}`, role },
@@ -385,14 +428,14 @@ test("a rejected native message cursor falls back to the durable turn anchor", a
   assert.equal(page.nextCursor, null);
 });
 
-test("lists all project-scoped root sessions and excludes children and archived sessions", async (t) => {
+test("lists project-scoped active and archived roots separately, while full safety listing includes children", async (t) => {
   const server = createMockServer({
     "GET /project": () => response([{ worktree: "/a" }, { worktree: "/b" }]),
-    "GET /session?scope=project&directory=%2Fa": () => response([
+    "GET /session?scope=project&directory=%2Fa&limit=1000000": () => response([
       { ...createMockServer().session, id: "ses_old", directory: "/a/sub", time: { created: 1, updated: 2 } },
       { ...createMockServer().session, id: "ses_child", parentID: "ses_old", directory: "/a", time: { created: 1, updated: 5 } },
     ]),
-    "GET /session?scope=project&directory=%2Fb": () => response([
+    "GET /session?scope=project&directory=%2Fb&limit=1000000": () => response([
       { ...createMockServer().session, id: "ses_new", directory: "/b", time: { created: 2, updated: 9 } },
       { ...createMockServer().session, id: "ses_archived", directory: "/b", time: { created: 1, updated: 8, archived: 8 } },
     ]),
@@ -401,7 +444,15 @@ test("lists all project-scoped root sessions and excludes children and archived 
   t.after(() => runtime.shutdown());
   const threads = await runtime.listThreads();
   assert.deepEqual(threads.map((thread) => thread.id), ["opencode:ses_new", "opencode:ses_old"]);
+  const archived = await runtime.listThreads({ archived: true });
+  assert.deepEqual(archived.map((thread) => thread.id), ["opencode:ses_archived"]);
+  assert.equal(archived[0].runtimeProvider, "opencode");
+  assert.equal(archived[0].syncState, "archivedLocal");
+  const allSessions = await runtime.listAllSessions();
+  assert.deepEqual(allSessions.map((session) => session.id), ["ses_new", "ses_archived", "ses_child", "ses_old"]);
+  assert.equal(allSessions.find((session) => session.id === "ses_child").directory, "/a");
   assert.ok(server.calls.some((call) => call.key.includes("scope=project")));
+  assert.ok(server.calls.every((call) => !call.key.startsWith("GET /session?") || call.key.includes("limit=1000000")));
 });
 
 test("creates a model-pinned session and prompts with the pinned session model", async (t) => {
@@ -715,7 +766,7 @@ test("derives and reuses the latest model for a session created on the Mac", asy
   const macSession = { ...createMockServer().session };
   delete macSession.model;
   const server = createMockServer({
-    "GET /session?scope=project&directory=%2Frepo": () => response([macSession]),
+    "GET /session?scope=project&directory=%2Frepo&limit=1000000": () => response([macSession]),
     "GET /session/ses_test?directory=%2Frepo%2Fapp": () => response(macSession),
     "GET /session/ses_test/message?directory=%2Frepo%2Fapp": () => response([
       { info: { id: "msg_user", role: "user", model: { providerID: "opencode-go", modelID: "mac-fast" } }, parts: [] },

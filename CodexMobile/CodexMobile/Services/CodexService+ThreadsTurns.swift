@@ -367,7 +367,8 @@ extension CodexService {
         preAppendedUserMessageID: String? = nil,
         automaticTitleSeedOverride: String? = nil,
         collaborationMode: CodexCollaborationModeKind? = nil,
-        preservePlanSessionState: Bool = false
+        preservePlanSessionState: Bool = false,
+        onTurnStartDispatch: (@MainActor () -> Void)? = nil
     ) async throws {
         let trimmedInput = userInput.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedInput.isEmpty
@@ -453,7 +454,8 @@ extension CodexService {
                     fileMentions: fileMentions,
                     to: continuationThread.id,
                     shouldAppendUserMessage: shouldAppendOnContinuation,
-                    collaborationMode: effectiveCollaborationMode
+                    collaborationMode: effectiveCollaborationMode,
+                    onDispatch: onTurnStartDispatch
                 )
                 activeThreadId = continuationThread.id
                 lastErrorMessage = nil
@@ -472,7 +474,8 @@ extension CodexService {
                 shouldAppendUserMessage: false,
                 collaborationMode: effectiveCollaborationMode,
                 preAppendedUserMessageID: preResumePendingMessageId,
-                automaticTitleSeedOverride: preResumeTitleSeed
+                automaticTitleSeedOverride: preResumeTitleSeed,
+                onDispatch: onTurnStartDispatch
             )
         } catch {
             if shouldTreatAsThreadNotFound(error) {
@@ -498,7 +501,8 @@ extension CodexService {
                     fileMentions: fileMentions,
                     to: continuationThread.id,
                     shouldAppendUserMessage: shouldAppendOnContinuation,
-                    collaborationMode: effectiveCollaborationMode
+                    collaborationMode: effectiveCollaborationMode,
+                    onDispatch: onTurnStartDispatch
                 )
                 activeThreadId = continuationThread.id
                 lastErrorMessage = nil
@@ -1226,6 +1230,7 @@ extension CodexService {
 
     func fetchServerThreads(
         limit: Int? = nil,
+        archived: Bool = false,
         onPage: ((_ page: [CodexThread], _ accumulatedThreads: [CodexThread]) -> Void)? = nil
     ) async throws -> [CodexThread] {
         var allThreads: [CodexThread] = []
@@ -1248,6 +1253,9 @@ extension CodexService {
             ]
             if let limit {
                 params["limit"] = .integer(limit)
+            }
+            if archived {
+                params["archived"] = .bool(true)
             }
 
             let response = try await sendRequest(
@@ -1713,7 +1721,8 @@ extension CodexService {
         shouldAppendUserMessage: Bool = true,
         collaborationMode: CodexCollaborationModeKind? = nil,
         preAppendedUserMessageID: String? = nil,
-        automaticTitleSeedOverride: String? = nil
+        automaticTitleSeedOverride: String? = nil,
+        onDispatch: (@MainActor () -> Void)? = nil
     ) async throws {
         let outgoingDisplayText = displayTextForOutgoingTurn(
             userInput: userInput,
@@ -1798,11 +1807,12 @@ extension CodexService {
                     await messageStartCheckpointTask.value
                 }
                 let response = isOpenCodeThread
-                    ? try await sendRequest(method: "turn/start", params: .object(requestParams))
+                    ? try await sendRequest(method: "turn/start", params: .object(requestParams), onDispatch: onDispatch)
                     : try await sendRequestWithSandboxFallback(
                         method: "turn/start",
                         baseParams: requestParams,
-                        accessConfiguration: accessConfiguration
+                        accessConfiguration: accessConfiguration,
+                        onDispatch: onDispatch
                     )
                 let resolvedTurnID = handleSuccessfulTurnStartResponse(
                     response,

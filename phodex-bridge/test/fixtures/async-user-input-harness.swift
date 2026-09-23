@@ -31,6 +31,7 @@ nonisolated struct CodexMessage: Equatable {
     var starts = 0
     var resolve: () async throws -> String? = { "turn_1" }
     var onSend: () async throws -> Void = {}
+    var beforeDispatch: () throws -> Void = {}
 
     func thread(for _: String) -> Thread? { Thread() }
     static func stableAssistantMessageID(threadId: String, turnId: String?, itemId: String) -> String? { itemId }
@@ -48,17 +49,21 @@ nonisolated struct CodexMessage: Equatable {
     func updateCurrentOutput(for _: String) {}
     func threadHasActiveOrRunningTurn(_: String) -> Bool { active }
     func resolveInFlightTurnID(threadId: String) async throws -> String? { try await resolve() }
-    func sendRequest(method: String, params: JSONValue?, timeoutNanoseconds: UInt64?, timeoutMessage: String?) async throws -> RPCMessage {
+    func sendRequest(method: String, params: JSONValue?, timeoutNanoseconds: UInt64?, timeoutMessage: String?, onDispatch: (@MainActor () -> Void)? = nil) async throws -> RPCMessage {
         precondition(method == "turn/steer")
         precondition(params?.objectValue?["clientUserMessageId"]?.stringValue != nil)
+        try beforeDispatch()
+        onDispatch?()
         sends += 1
         try await onSend()
         return RPCMessage(id: nil, result: .object([:]))
     }
     func markMessageDeliveryState(threadId: String, messageId: String, state: CodexMessage.Delivery, turnId: String) {}
-    func startTurn(userInput: String, threadId: String, shouldAppendUserMessage: Bool, preAppendedUserMessageID: String) async throws {
+    func startTurn(userInput: String, threadId: String, shouldAppendUserMessage: Bool, preAppendedUserMessageID: String, onTurnStartDispatch: (@MainActor () -> Void)? = nil) async throws {
         precondition(!shouldAppendUserMessage)
         precondition(findMessageIndex(threadId: threadId, messageId: preAppendedUserMessageID) != nil)
+        try beforeDispatch()
+        onTurnStartDispatch?()
         starts += 1
         try await onSend()
     }
@@ -119,6 +124,12 @@ nonisolated struct CodexMessage: Equatable {
         await submit(disconnectedWhileResolving)
         precondition(input(disconnectedWhileResolving).status == .unanswered)
         precondition(disconnectedWhileResolving.sends == 0)
+
+        let failedBeforeDispatch = makeService()
+        failedBeforeDispatch.beforeDispatch = { throw CodexServiceError.encodingFailed }
+        await submit(failedBeforeDispatch)
+        precondition(input(failedBeforeDispatch).status == .unanswered)
+        precondition(failedBeforeDispatch.sends == 0)
 
         let ambiguous = makeService()
         ambiguous.onSend = { throw CodexServiceError.disconnected }

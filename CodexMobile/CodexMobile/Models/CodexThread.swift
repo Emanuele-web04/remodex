@@ -381,7 +381,17 @@ extension CodexThread {
         let cleanedName = name?.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanedAgentLabel = agentDisplayLabel?.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanedPreview = preview?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let effectiveTitle = Self.isGenericPlaceholderTitle(cleanedTitle) ? nil : cleanedTitle
+        // OpenCode names empty sessions with a timestamp. Treat only that exact
+        // generated shape as a placeholder; keep user-supplied titles intact.
+        let isOpenCodeTimestampPlaceholder: Bool = {
+            guard runtimeProvider == .opencode,
+                  let cleanedTitle,
+                  cleanedTitle.hasPrefix("New session - ") else { return false }
+            let timestamp = String(cleanedTitle.dropFirst("New session - ".count))
+            return CodexTimestampParser.parseString(timestamp) != nil
+        }()
+        let effectiveTitle = Self.isGenericPlaceholderTitle(cleanedTitle) || isOpenCodeTimestampPlaceholder
+            ? nil : cleanedTitle
 
         // Prefer explicit thread name (AI/user rename) over server title fallback.
         if let cleanedName, !cleanedName.isEmpty {
@@ -389,7 +399,7 @@ extension CodexThread {
         }
 
         if let cleanedAgentLabel, !cleanedAgentLabel.isEmpty {
-            if cleanedTitle == nil || Self.isGenericPlaceholderTitle(cleanedTitle) {
+            if effectiveTitle == nil {
                 return cleanedAgentLabel
             }
         }

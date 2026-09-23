@@ -718,15 +718,24 @@ struct MessageRow: View, Equatable {
             }
 
             if let asyncInput = message.asyncUserInput {
-                AsyncUserInputCardView(input: asyncInput) { answers in
-                    Task { @MainActor in
-                        await codex.submitAsyncUserInput(
+                AsyncUserInputCardView(
+                    input: asyncInput,
+                    onSubmit: { answers in
+                        Task { @MainActor in
+                            await codex.submitAsyncUserInput(
+                                threadId: message.threadId,
+                                messageID: message.id,
+                                answers: answers
+                            )
+                        }
+                    },
+                    onRetry: {
+                        codex.reopenUncertainAsyncUserInputForRetry(
                             threadId: message.threadId,
-                            messageID: message.id,
-                            answers: answers
+                            messageID: message.id
                         )
                     }
-                }
+                )
                 .padding(.top, 8)
             }
 

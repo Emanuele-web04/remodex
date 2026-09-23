@@ -14,6 +14,9 @@ const THREAD_PREFIX = "opencode:";
 const REQUEST_PREFIX = "opencode-";
 const TURN_CURSOR_PREFIX = "opencode-turn-cursor:";
 const MESSAGE_PAGE_SIZE = 50;
+// OpenCode defaults /session to 100 rows. Worktree safety checks must inspect
+// every binding, including archived sessions and child sessions.
+const COMPLETE_SESSION_LIST_LIMIT = 1_000_000;
 
 function encodeThreadId(sessionID) {
   if (typeof sessionID !== "string" || !sessionID.startsWith("ses")) {
@@ -82,6 +85,7 @@ function normalizeThread(session, turns) {
     title: session.title || "OpenCode session",
     createdAt: asMillis(session.time?.created),
     updatedAt: asMillis(session.time?.updated),
+    ...(session.time?.archived ? { syncState: "archivedLocal" } : {}),
     ...(Array.isArray(turns) ? { turns } : {}),
   };
 }
@@ -548,6 +552,28 @@ function createOpenCodeRuntime({
     polledTurns.delete(sessionID);
   }
 
+  async function pollTurnMessages(session, turnId) {
+    const anchor = turnId.startsWith("opencode-turn:") ? turnId.slice("opencode-turn:".length) : null;
+    const pages = [];
+    const seenCursors = new Set();
+    let before;
+    while (true) {
+      if (stopped || running.get(session.id)?.turnId !== turnId) return [];
+      const page = await request(messagePath(session, { limit: 20, before }), {
+        includeHeaders: true,
+        signal: AbortSignal.timeout(3_000),
+      });
+      if (!Array.isArray(page.data)) throw new Error("OpenCode returned invalid turn messages");
+      pages.unshift(page.data);
+      if (!anchor || page.data.some((message) => message?.info?.id === anchor)) break;
+      const next = page.headers?.get?.("x-next-cursor");
+      if (!next || seenCursors.has(next)) break;
+      seenCursors.add(next);
+      before = next;
+    }
+    return pages.flat();
+  }
+
   // The released server does not broadcast every CLI-created session's events
   // through this serve process. Reconcile only phone-started turns, and share
   // the item identity maps with SSE so either source can win without duplicates.
@@ -559,7 +585,7 @@ function createOpenCodeRuntime({
       if (stopped || polledTurns.get(session.id) !== state || running.get(session.id)?.turnId !== turnId) return;
       try {
         const [messages, statuses] = await Promise.all([
-          request(messagePath(session, { limit: 20 }), { signal: AbortSignal.timeout(3_000) }),
+          pollTurnMessages(session, turnId),
           request(`/session/status?directory=${encodeURIComponent(session.directory)}`, {
             signal: AbortSignal.timeout(3_000),
           }),
@@ -930,7 +956,7 @@ function createOpenCodeRuntime({
     return variant;
   }
 
-  async function listSessions() {
+  async function listAllSessions() {
     await ensureStarted();
     const projects = await request("/project");
     const roots = new Set();
@@ -939,17 +965,40 @@ function createOpenCodeRuntime({
       for (const root of project?.roots || []) roots.add(root);
       for (const root of project?.directories || []) roots.add(root);
     }
-    const batches = await Promise.all([...roots].map((root) => request(`/session?scope=project&directory=${encodeURIComponent(root)}`)));
+    const batches = await Promise.all([...roots].map((root) => request(
+      `/session?scope=project&directory=${encodeURIComponent(root)}&limit=${COMPLETE_SESSION_LIST_LIMIT}`
+    )));
     const unique = new Map();
-    for (const session of batches.flat()) {
-      if (!session?.id || session.parentID || session.time?.archived) continue;
-      unique.set(session.id, cacheSession(session));
+    for (const batch of batches) {
+      if (!Array.isArray(batch) || batch.length >= COMPLETE_SESSION_LIST_LIMIT) {
+        throw new Error("OpenCode session catalog is incomplete; worktree bindings cannot be verified");
+      }
+      for (const session of batch) {
+        if (!session?.id) continue;
+        unique.set(session.id, cacheSession(session));
+      }
     }
     return [...unique.values()].sort((a, b) => asMillis(b.time?.updated) - asMillis(a.time?.updated));
   }
 
-  async function listThreads() {
-    return (await listSessions()).map((session) => normalizeThread(session));
+  async function listSessions({ archived = false } = {}) {
+    return (await listAllSessions()).filter((session) =>
+      !session.parentID && Boolean(session.time?.archived) === archived
+    );
+  }
+
+  async function listThreads({ archived = false } = {}) {
+    return (await listSessions({ archived })).map((session) => normalizeThread(session));
+  }
+
+  async function listThreadCatalog() {
+    const active = [];
+    const archived = [];
+    for (const session of await listAllSessions()) {
+      if (session.parentID) continue;
+      (session.time?.archived ? archived : active).push(normalizeThread(session));
+    }
+    return { active, archived };
   }
 
   async function sessionFor(threadId) {
@@ -965,7 +1014,7 @@ function createOpenCodeRuntime({
     } catch (error) {
       if (error.status !== 404) throw error;
       if (!cached) {
-        await listSessions();
+        await listAllSessions();
         cached = sessionCache.get(sessionID);
       }
       if (!cached?.directory) throw error;
@@ -1331,6 +1380,8 @@ function createOpenCodeRuntime({
     shutdown,
     listModels,
     listThreads,
+    listThreadCatalog,
+    listAllSessions,
     handlesThreadId: (threadId) => Boolean(decodeThreadId(threadId)),
     shouldHandleRequest,
     ownsClientResponse,

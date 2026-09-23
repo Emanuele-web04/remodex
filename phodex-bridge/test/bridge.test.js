@@ -17,6 +17,7 @@ const {
   canonicalThreadTurnsListRequest,
   createMacOSBridgeWakeAssertion,
   createThreadTurnsListFastPageCoordinator,
+  decodeOpenCodeThreadListCursor,
   disableUnsupportedReasoningSummaryForTurnStart,
   fetchAdaptiveThreadTurnsListForRelay,
   hasRelayConnectionGoneStale,
@@ -95,6 +96,49 @@ test("mixed thread list keeps Codex pagination and stable OpenCode identity", ()
   assert.deepEqual(merged.result.data.map((thread) => thread.id), ["opencode:ses_1", "codex-1"]);
   assert.equal(merged.result.nextCursor, "codex-next");
   assert.equal(merged.result.data[0].runtimeProvider, "opencode");
+});
+
+test("mixed thread list keeps each page bounded and pages OpenCode after Codex", () => {
+  const openCode = [4, 3, 2, 1].map((number) => ({
+    id: `opencode:ses_${number}`, runtimeProvider: "opencode", updatedAt: number,
+  }));
+  const first = JSON.parse(mergeOpenCodeThreadsIntoListResponse(JSON.stringify({
+    id: "first", result: { data: [
+      { id: "codex-5", updatedAt: 5 }, { id: "codex-4", updatedAt: 4 },
+    ], nextCursor: "codex-page-2" },
+  }), openCode, { limit: 3 }));
+  assert.equal(first.result.data.length, 3);
+  assert.deepEqual(first.result.data.map((row) => row.id), ["codex-5", "codex-4", "opencode:ses_4"]);
+  const firstCursor = decodeOpenCodeThreadListCursor(first.result.nextCursor);
+  assert.deepEqual(firstCursor, { codexCursor: "codex-page-2", openCodeOffset: 1, archived: false });
+
+  const second = JSON.parse(mergeOpenCodeThreadsIntoListResponse(JSON.stringify({
+    id: "second", result: { data: [{ id: "codex-3", updatedAt: 3 }], nextCursor: null },
+  }), openCode, { limit: 3, openCodeOffset: firstCursor.openCodeOffset }));
+  assert.equal(second.result.data.length, 3);
+  assert.deepEqual(second.result.data.map((row) => row.id), ["codex-3", "opencode:ses_3", "opencode:ses_2"]);
+  const secondCursor = decodeOpenCodeThreadListCursor(second.result.nextCursor);
+  assert.deepEqual(secondCursor, { codexCursor: null, openCodeOffset: 3, archived: false });
+
+  const third = JSON.parse(mergeOpenCodeThreadsIntoListResponse(JSON.stringify({
+    id: "third", result: { data: [], nextCursor: null },
+  }), openCode, { limit: 3, openCodeOffset: secondCursor.openCodeOffset }));
+  assert.deepEqual(third.result.data.map((row) => row.id), ["opencode:ses_1"]);
+  assert.equal(third.result.nextCursor, null);
+});
+
+test("mixed thread list enforces the relay budget after adding provider rows", () => {
+  const hugeTitle = "x".repeat(4 * 1024 * 1024);
+  const result = mergeOpenCodeThreadsIntoListResponse(JSON.stringify({
+    id: "large", result: { data: [{ id: "codex-1" }], nextCursor: null },
+  }), [{ id: "opencode:ses_huge", runtimeProvider: "opencode", title: hugeTitle }], { limit: 2 });
+  assert.ok(Buffer.byteLength(result, "utf8") <= 4 * 1024 * 1024);
+  assert.deepEqual(JSON.parse(result).result.data.map((row) => row.id), ["codex-1"]);
+  const tooLargeCodex = mergeOpenCodeThreadsIntoListResponse(JSON.stringify({
+    id: "oversized", result: { data: [{ id: "codex-huge", title: hugeTitle }] },
+  }), [], { limit: 1 });
+  assert.equal(JSON.parse(tooLargeCodex).error.code, -32000);
+  assert.ok(Buffer.byteLength(tooLargeCodex, "utf8") < 1_000);
 });
 
 function expectedGeneratedImagePath(threadId, fileName) {

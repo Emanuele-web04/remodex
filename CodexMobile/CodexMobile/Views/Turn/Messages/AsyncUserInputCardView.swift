@@ -3,8 +3,10 @@ import SwiftUI
 struct AsyncUserInputCardView: View {
     let input: CodexAsyncUserInput
     let onSubmit: ([String]) -> Void
+    let onRetry: () -> Void
 
     @State private var answers: [Int: String] = [:]
+    @State private var isRetryConfirmationPresented = false
 
     private var canSubmit: Bool {
         input.status == .unanswered
@@ -92,8 +94,14 @@ struct AsyncUserInputCardView: View {
                 Label("Answered", systemImage: "checkmark.circle.fill")
                     .foregroundStyle(.green)
             case .uncertain:
-                Label("Check on your Mac whether the answers arrived", systemImage: "exclamationmark.circle")
-                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 8) {
+                    Label("Could not confirm whether these answers arrived", systemImage: "exclamationmark.circle")
+                        .foregroundStyle(.secondary)
+                    Button("Review and retry") {
+                        isRetryConfirmationPresented = true
+                    }
+                    .font(AppFont.subheadline(weight: .semibold))
+                }
             }
         }
         .padding(16)
@@ -102,6 +110,12 @@ struct AsyncUserInputCardView: View {
         .onAppear(perform: restoreDraftAnswers)
         .onChange(of: input.status) { _, status in
             if status == .unanswered { restoreDraftAnswers() }
+        }
+        .alert("Retry these answers?", isPresented: $isRetryConfirmationPresented) {
+            Button("Review answers") { onRetry() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Remodex cannot tell if Codex received them. Check the chat on your Mac first: sending them again could create a duplicate.")
         }
     }
 

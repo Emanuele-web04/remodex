@@ -1034,6 +1034,13 @@ test("bridge preserves catalog request limits and excludes archived or cursor pa
       fakeCodex = createFakeCodexTransport();
       return fakeCodex;
     },
+    createOpenCodeRuntimeImpl() {
+      return {
+        handlesThreadId() { return false; },
+        shutdown() {},
+        async listThreadCatalog() { return { active: [], archived: [] }; },
+      };
+    },
     desktopIpcActionFollowerModule: {
       createDesktopIpcActionFollower() {
         return {
@@ -1068,6 +1075,88 @@ test("bridge preserves catalog request limits and excludes archived or cursor pa
     { id: "catalog", limit: 70 },
     { id: "probe", limit: 1 },
   ]);
+});
+
+test("bridge pages mixed active and archived catalogs without forwarding its cursor to Codex", async (t) => {
+  const relayServer = new WebSocket.Server({ port: 0 });
+  const relayMessages = [];
+  let relaySocket = null;
+  let bridge = null;
+  let fakeCodex = null;
+  await new Promise((resolve) => relayServer.once("listening", resolve));
+  relayServer.on("connection", (socket) => {
+    relaySocket = socket;
+    socket.on("message", (data) => relayMessages.push(JSON.parse(data.toString("utf8"))));
+  });
+  const { startBridge } = loadBridgeWithTestDoubles({
+    createCodexTransportImpl() {
+      fakeCodex = createFakeCodexTransport();
+      return fakeCodex;
+    },
+    createOpenCodeRuntimeImpl() {
+      return {
+        handlesThreadId() { return false; },
+        shutdown() {},
+        async listThreadCatalog() {
+          return {
+            active: [3, 2, 1].map((number) => ({
+              id: `opencode:ses_${number}`, runtimeProvider: "opencode", updatedAt: number,
+            })),
+            archived: [{
+              id: "opencode:ses_archived", runtimeProvider: "opencode",
+              syncState: "archivedLocal", updatedAt: 1,
+            }],
+          };
+        },
+      };
+    },
+  });
+  t.after(() => {
+    bridge?.stop();
+    relaySocket?.close();
+    relayServer.close();
+  });
+  bridge = startBridge({ printPairingQr: false, config: bridgeTestConfig(relayServer) });
+  await waitFor(() => relaySocket?.readyState === WebSocket.OPEN);
+
+  relaySocket.send(JSON.stringify({ id: "mixed-1", method: "thread/list", params: { limit: 2 } }));
+  await waitFor(() => fakeCodex.sent.some((message) => message.id === "mixed-1"));
+  fakeCodex.emitMessage({ id: "mixed-1", result: { data: [
+    { id: "codex-5", updatedAt: 5 }, { id: "codex-4", updatedAt: 4 },
+  ], nextCursor: "codex-page-2" } });
+  const first = await waitForMessage(relayMessages, (message) => message.id === "mixed-1");
+  assert.equal(first.result.data.length, 2);
+  assert.ok(first.result.nextCursor.startsWith("remodex-opencode-list-v1:"));
+
+  relaySocket.send(JSON.stringify({ id: "mixed-2", method: "thread/list", params: {
+    limit: 2, cursor: first.result.nextCursor,
+  } }));
+  await waitFor(() => fakeCodex.sent.some((message) => message.id === "mixed-2"));
+  assert.equal(fakeCodex.sent.find((message) => message.id === "mixed-2").params.cursor, "codex-page-2");
+  fakeCodex.emitMessage({ id: "mixed-2", result: {
+    data: [{ id: "codex-3", updatedAt: 3 }], nextCursor: null,
+  } });
+  const second = await waitForMessage(relayMessages, (message) => message.id === "mixed-2");
+  assert.deepEqual(second.result.data.map((row) => row.id), ["codex-3", "opencode:ses_3"]);
+
+  const codexRequestsBeforeOpenCodeOnlyPage = fakeCodex.sent.length;
+  relaySocket.send(JSON.stringify({ id: "mixed-3", method: "thread/list", params: {
+    limit: 2, cursor: second.result.nextCursor,
+  } }));
+  const third = await waitForMessage(relayMessages, (message) => message.id === "mixed-3");
+  assert.deepEqual(third.result.data.map((row) => row.id), ["opencode:ses_2", "opencode:ses_1"]);
+  assert.equal(third.result.nextCursor, null);
+  assert.equal(fakeCodex.sent.length, codexRequestsBeforeOpenCodeOnlyPage);
+
+  relaySocket.send(JSON.stringify({ id: "archived-mixed", method: "thread/list", params: {
+    archived: true, limit: 2,
+  } }));
+  await waitFor(() => fakeCodex.sent.some((message) => message.id === "archived-mixed"));
+  fakeCodex.emitMessage({ id: "archived-mixed", result: { data: [], nextCursor: null } });
+  const archived = await waitForMessage(relayMessages, (message) => message.id === "archived-mixed");
+  assert.equal(archived.result.data[0].id, "opencode:ses_archived");
+  assert.equal(archived.result.data[0].runtimeProvider, "opencode");
+  assert.equal(archived.result.data[0].syncState, "archivedLocal");
 });
 
 test("bridge Activity is opt-in and canonical-only endpoints need no Desktop IPC", async (t) => {
@@ -1283,7 +1372,9 @@ test("Activity subscribe performs no reads and snapshots an unopened Desktop thr
   relaySocket.send(JSON.stringify({ id: "archived-sidebar", method: "thread/list", params: { archived: true } }));
   await waitFor(() => fakeCodex.sent.some((message) => message.id === "archived-sidebar"));
   fakeCodex.emitMessage({ id: "archived-sidebar", result: { data: [{ id: "archived-thread" }] } });
-  await waitForMessage(relayMessages, (message) => message.id === "archived-sidebar");
+  // The bridge briefly waits for OpenCode's archived catalog so a fresh phone
+  // can see server-archived sessions on the first request.
+  await waitForMessage(relayMessages, (message) => message.id === "archived-sidebar", 3_000);
   assert.equal(ipcFrames.length, 2, "archived lists must not change active subscriptions");
   fakeCodex.emitMessage({
     method: "thread/name/updated",
@@ -1463,6 +1554,7 @@ test("bridge recovers a growing rollout behind a connected stale Desktop stream"
 // Loads bridge.js with plaintext test transports while leaving the production module untouched.
 function loadBridgeWithTestDoubles({
   createCodexTransportImpl,
+  createOpenCodeRuntimeImpl = null,
   desktopIpcActionFollowerModule = null,
   desktopIpcLiveOwnerModule = null,
   rolloutLiveMirrorModule = null,
@@ -1473,6 +1565,9 @@ function loadBridgeWithTestDoubles({
   Module._load = function loadWithBridgeDoubles(request, parent, isMain) {
     if (parent?.filename === bridgePath && request === "./codex-transport") {
       return { createCodexTransport: createCodexTransportImpl };
+    }
+    if (parent?.filename === bridgePath && request === "./opencode-runtime" && createOpenCodeRuntimeImpl) {
+      return { createOpenCodeRuntime: createOpenCodeRuntimeImpl };
     }
     if (parent?.filename === bridgePath && request === "./rollout-live-mirror" && rolloutLiveMirrorModule) {
       return rolloutLiveMirrorModule;

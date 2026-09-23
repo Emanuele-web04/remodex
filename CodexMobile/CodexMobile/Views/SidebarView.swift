@@ -39,7 +39,7 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
     let onOpenSettings: () -> Void
     let onOpenDevicesSettings: () -> Void
     let onOpenTerminal: () -> Void
-    let onOpenNewChatDraft: (NewChatDraftSource, String?) -> Void
+    let onOpenNewChatDraft: (NewChatDraftSource, String?, CodexRuntimeProvider?) -> Void
     let onNewChatCreationStateChange: (Bool) -> Void
     let onOpenThread: (CodexThread) -> Void
     // Centered connect/reconnect card shown when the relay is offline and the
@@ -58,6 +58,7 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
     @State private var activityRefreshGeneration = 0
     @AppStorage("sidebar.taskViewMode") private var taskViewMode: SidebarTaskViewMode = .projects
     @State private var activeSidebarSheet: SidebarPresentedSheet?
+    @State private var managedWorktreeCleanupRequest: ManagedWorktreeCleanupRequest?
     @State private var projectGroupPendingArchive: SidebarThreadGroup? = nil
     @State private var projectGroupPendingDeletion: SidebarThreadGroup? = nil
     @State private var threadPendingDeletion: CodexThread? = nil
@@ -152,6 +153,9 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
             }
             .sheet(item: $activeSidebarSheet) { sheet in
                 sidebarSheetContent(sheet)
+            }
+            .sheet(item: $managedWorktreeCleanupRequest) { request in
+                ManagedWorktreeCleanupSheet(localCheckoutPath: request.path)
             }
             .modifier(sidebarPromptsModifier)
     }
@@ -262,14 +266,14 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
     // this path to preserve "What should we work on?" + folder picker.
     private func handleNewChatButtonTap() {
         prepareSidebarForChatNavigation()
-        onOpenNewChatDraft(.generalChat, defaultNewChatProjectPath)
+        onOpenNewChatDraft(.generalChat, defaultNewChatProjectPath, nil)
     }
 
     // Opens the global Chats scope as a plain rootless draft: no folder picker,
     // no preselected project, just the prompt and composer.
     private func handleRootlessChatDraftTap() {
         prepareSidebarForChatNavigation()
-        onOpenNewChatDraft(.generalChat, nil)
+        onOpenNewChatDraft(.generalChat, nil, nil)
     }
 
     // Routes the shared bottom Chat button by the active sidebar scope without
@@ -692,13 +696,23 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
             onCreateThreadInProjectGroup: { group in
                 prepareSidebarForChatNavigation()
                 let source: NewChatDraftSource = group.kind == .chat ? .generalChat : .folderChat
-                onOpenNewChatDraft(source, group.projectPath)
+                let preferredProvider = group.kind == .project
+                    ? group.threads.max(by: { lhs, rhs in
+                        (lhs.updatedAt ?? lhs.createdAt ?? .distantPast)
+                            < (rhs.updatedAt ?? rhs.createdAt ?? .distantPast)
+                    })?.runtimeProvider
+                    : nil
+                onOpenNewChatDraft(source, group.projectPath, preferredProvider)
             },
             onArchiveProjectGroup: { group in
                 projectGroupPendingArchive = group
             },
             onDeleteProjectGroup: { group in
                 projectGroupPendingDeletion = group
+            },
+            onManageProjectWorktrees: { group in
+                guard let path = group.projectPath else { return }
+                managedWorktreeCleanupRequest = ManagedWorktreeCleanupRequest(path: path)
             },
             onRenameThread: { thread, newName in
                 codex.renameThread(thread.id, name: newName)
@@ -808,6 +822,11 @@ private enum SidebarPresentedSheet: String, Identifiable {
     case localFolderBrowser
 
     var id: String { rawValue }
+}
+
+private struct ManagedWorktreeCleanupRequest: Identifiable {
+    let path: String
+    var id: String { path }
 }
 
 private extension SidebarView {

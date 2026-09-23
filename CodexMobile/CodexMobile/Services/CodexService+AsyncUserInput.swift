@@ -102,12 +102,12 @@ extension CodexService {
                     ])]),
                 ]
                 guard isConnected, isInitialized else { throw CodexServiceError.disconnected }
-                deliveryMayHaveStarted = true
                 _ = try await sendRequest(
                     method: "turn/steer",
                     params: .object(payload),
                     timeoutNanoseconds: 30_000_000_000,
-                    timeoutMessage: "The answer may have reached Codex, but confirmation timed out. Check on your Mac."
+                    timeoutMessage: "The answer may have reached Codex, but confirmation timed out. Check on your Mac.",
+                    onDispatch: { deliveryMayHaveStarted = true }
                 )
                 markMessageDeliveryState(
                     threadId: threadId,
@@ -116,12 +116,12 @@ extension CodexService {
                     turnId: turnID
                 )
             } else {
-                deliveryMayHaveStarted = true
                 try await startTurn(
                     userInput: responseText,
                     threadId: threadId,
                     shouldAppendUserMessage: false,
-                    preAppendedUserMessageID: responseMessageID
+                    preAppendedUserMessageID: responseMessageID,
+                    onTurnStartDispatch: { deliveryMayHaveStarted = true }
                 )
             }
             setAsyncUserInputStatus(.answered, threadId: threadId, messageID: messageID)
@@ -130,12 +130,12 @@ extension CodexService {
             if messagesByThread[threadId]?.first(where: { $0.id == messageID })?.asyncUserInput?.status == .answered {
                 return
             }
-            if !deliveryMayHaveStarted {
-                resetAsyncUserInputForRetry(threadId: threadId, messageID: messageID)
-                lastErrorMessage = error.localizedDescription
-            } else if isActiveTurnNotSteerable(error) {
+            if isActiveTurnNotSteerable(error) {
                 setAsyncUserInputStatus(.queued, threadId: threadId, messageID: messageID)
                 await refreshAndFlushQueuedAsyncInput(threadId: threadId)
+            } else if !deliveryMayHaveStarted || isDefinitiveAsyncAnswerRejection(error) {
+                resetAsyncUserInputForRetry(threadId: threadId, messageID: messageID)
+                lastErrorMessage = error.localizedDescription
             } else {
                 // Transport errors can mean the Mac accepted the reply before the socket fell.
                 // Preserve the answer and wait for history instead of sending it twice.
@@ -160,7 +160,18 @@ extension CodexService {
             || normalized.contains("turnisnotsteerable")
     }
 
+    private func isDefinitiveAsyncAnswerRejection(_ error: Error) -> Bool {
+        guard let serviceError = error as? CodexServiceError,
+              case .rpcError = serviceError else { return false }
+        // An RPC error is a server response to the request, unlike a timeout or
+        // dropped socket. The answer was rejected, so the draft is safe to retry.
+        return true
+    }
+
     func flushQueuedAsyncUserInput(threadId: String) async {
+        if messagesByThread[threadId]?.contains(where: { $0.asyncUserInput?.status == .uncertain }) == true {
+            scheduleAsyncAnswerVerification(threadId: threadId, delay: 3)
+        }
         guard isConnected, isInitialized, !threadHasActiveOrRunningTurn(threadId) else { return }
         let ids = messagesByThread[threadId]?.compactMap { message in
             message.asyncUserInput?.status == .queued ? message.id : nil
@@ -172,11 +183,17 @@ extension CodexService {
         }
     }
 
-    func scheduleAsyncAnswerVerification(threadId: String, delay: TimeInterval) {
+    func scheduleAsyncAnswerVerification(threadId: String, delay: TimeInterval, retryCount: Int = 0) {
         guard asyncAnswerVerificationThreadIDs.insert(threadId).inserted else { return }
         Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(delay))
             guard let self else { return }
+            guard self.messagesByThread[threadId]?.contains(where: {
+                $0.asyncUserInput?.status == .uncertain || $0.asyncUserInput?.status == .answered
+            }) == true else {
+                self.asyncAnswerVerificationThreadIDs.remove(threadId)
+                return
+            }
             guard self.isConnected, self.isInitialized else {
                 self.asyncAnswerVerificationThreadIDs.remove(threadId)
                 return
@@ -199,15 +216,54 @@ extension CodexService {
                     }
                     self.asyncAnswerVerificationThreadIDs.remove(threadId)
                     if let nextDelay {
-                        self.scheduleAsyncAnswerVerification(threadId: threadId, delay: nextDelay)
+                        self.scheduleAsyncAnswerVerification(
+                            threadId: threadId,
+                            delay: nextDelay,
+                            retryCount: retryCount + 1
+                        )
+                    } else {
+                        self.retryUncertainAsyncAnswerVerification(
+                            threadId: threadId,
+                            delay: delay,
+                            retryCount: retryCount
+                        )
                     }
                 } else {
                     self.asyncAnswerVerificationThreadIDs.remove(threadId)
+                    // A running turn or a read without canonical turns cannot
+                    // prove absence. Retry a few times without sending twice.
+                    self.retryUncertainAsyncAnswerVerification(
+                        threadId: threadId,
+                        delay: delay,
+                        retryCount: retryCount
+                    )
                 }
             } catch {
                 self.asyncAnswerVerificationThreadIDs.remove(threadId)
+                self.retryUncertainAsyncAnswerVerification(
+                    threadId: threadId,
+                    delay: delay,
+                    retryCount: retryCount
+                )
             }
         }
+    }
+
+    private func retryUncertainAsyncAnswerVerification(
+        threadId: String,
+        delay: TimeInterval,
+        retryCount: Int
+    ) {
+        guard retryCount < 5,
+              isConnected, isInitialized,
+              messagesByThread[threadId]?.contains(where: { $0.asyncUserInput?.status == .uncertain }) == true else {
+            return
+        }
+        scheduleAsyncAnswerVerification(
+            threadId: threadId,
+            delay: min(max(delay * 2, 5), 30),
+            retryCount: retryCount + 1
+        )
     }
 
     func canVerifyAsyncAnswerAbsence(threadId: String, threadObject: RPCObject) -> Bool {
@@ -226,6 +282,13 @@ extension CodexService {
         messagesByThread[threadId]?.removeAll { $0.id == responseID && $0.kind == .asyncUserInputAnswer }
         persistMessages()
         updateCurrentOutput(for: threadId)
+    }
+
+    func reopenUncertainAsyncUserInputForRetry(threadId: String, messageID: String) {
+        guard messagesByThread[threadId]?.first(where: { $0.id == messageID })?.asyncUserInput?.status == .uncertain else {
+            return
+        }
+        resetAsyncUserInputForRetry(threadId: threadId, messageID: messageID)
     }
 
     private func setAsyncUserInputStatus(

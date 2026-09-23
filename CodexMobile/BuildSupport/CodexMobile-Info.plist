@@ -42,7 +42,7 @@
 	<key>NSSupportsLiveActivities</key>
 	<true/>
 	<key>NSCameraUsageDescription</key>
-	<string>Remodex needs camera access to let you take photos and attach them to your messages.</string>
+	<string>Remodex uses the camera to scan a pairing QR code and attach photos to your chats.</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoads</key>

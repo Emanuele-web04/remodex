@@ -45,6 +45,8 @@ struct TurnView: View {
     @State private var worktreeOverlayRoute: TurnWorktreeOverlayRoute?
     @State private var macHandoffErrorMessage: String?
     @State private var isHandingOffToMac = false
+    @State private var retiredWorktreeCleanupPath: String?
+    @State private var isRetiredWorktreeCleanupPresented = false
     @State private var isStartingSiblingChat = false
     @State private var isForkingThread = false
     @State private var checkedOutElsewhereAlert: CheckedOutElsewhereAlert?
@@ -561,6 +563,15 @@ struct TurnView: View {
                     }
                 }
             },
+            onApproveForSession: thread.runtimeProvider == .opencode ? { request in
+                viewModel.approve(request, codex: codex, forSession: true) { didSucceed in
+                    if didSucceed {
+                        syncApprovalAlertPresentation()
+                    } else {
+                        restoreApprovalAlert(afterFailureOf: request)
+                    }
+                }
+            } : nil,
             onConfirmGitSyncAction: { alertAction in
                 viewModel.confirmGitSyncAlertAction(
                     alertAction,
@@ -594,6 +605,36 @@ struct TurnView: View {
             }
         } message: { alert in
             Text(alert.message)
+        }
+        .confirmationDialog(
+            "Remove the old worktree?",
+            isPresented: $isRetiredWorktreeCleanupPresented,
+            titleVisibility: .visible
+        ) {
+            Button("Remove Worktree", role: .destructive) {
+                guard let path = retiredWorktreeCleanupPath else { return }
+                retiredWorktreeCleanupPath = nil
+                Task { @MainActor in
+                    do {
+                        try await WorktreeFlowCoordinator.removeManagedWorktree(
+                            at: path,
+                            codex: codex
+                        )
+                        codex.rememberAssociatedManagedWorktreePath(nil, for: thread.id)
+                    } catch {
+                        viewModel.gitSyncAlert = TurnGitSyncAlert(
+                            title: "Worktree Cleanup Failed",
+                            message: error.localizedDescription,
+                            action: .dismissOnly
+                        )
+                    }
+                }
+            }
+            Button("Keep Worktree", role: .cancel) {
+                retiredWorktreeCleanupPath = nil
+            }
+        } message: {
+            Text("The old checkout will be removed only if no chats use it and it contains no local files.")
         }
     }
 
@@ -1051,6 +1092,8 @@ struct TurnView: View {
                         workingDirectory: move.projectPath,
                         threadID: thread.id
                     )
+                    retiredWorktreeCleanupPath = move.retiredManagedWorktreePath
+                    isRetiredWorktreeCleanupPresented = retiredWorktreeCleanupPath != nil
                 } catch {
                     viewModel.gitSyncAlert = TurnGitSyncAlert(
                         title: "Local Handoff Failed",

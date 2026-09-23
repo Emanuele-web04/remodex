@@ -320,7 +320,7 @@ struct ContentView: View {
                     manualPairingCode = ""
                 }
             } message: {
-                Text("Paste the pairing code shown in the terminal on your Mac.")
+                Text("Enter the pairing code shown on your Mac. Codes expire after five minutes; generate a new one if needed.")
             }
             // Settings rides on a full-screen cover instead of `navigationPath`
             // so the gear tap inside the iOS 26 `safeAreaBar` header always
@@ -656,8 +656,12 @@ struct ContentView: View {
             onOpenTerminal: {
                 openTerminalFromSidebar(preferredWorkingDirectory: nil)
             },
-            onOpenNewChatDraft: { source, preferredProjectPath in
-                openNewChatDraftFromSidebar(source: source, preferredProjectPath: preferredProjectPath)
+            onOpenNewChatDraft: { source, preferredProjectPath, preferredRuntimeProvider in
+                openNewChatDraftFromSidebar(
+                    source: source,
+                    preferredProjectPath: preferredProjectPath,
+                    preferredRuntimeProvider: preferredRuntimeProvider
+                )
             },
             onNewChatCreationStateChange: { isCreating in
                 setNewChatOpeningState(isCreating)
@@ -1302,12 +1306,14 @@ struct ContentView: View {
     // opened it, so the draft UI can distinguish general Chat from folder Chat.
     private func openNewChatDraftFromSidebar(
         source: NewChatDraftSource,
-        preferredProjectPath: String?
+        preferredProjectPath: String?,
+        preferredRuntimeProvider: CodexRuntimeProvider? = nil
     ) {
         let route = NewChatDraftRoute(
             id: "new-chat-draft-\(UUID().uuidString)",
             preferredProjectPath: preferredProjectPath,
-            source: source
+            source: source,
+            preferredRuntimeProvider: preferredRuntimeProvider
         )
         isOpeningNewChatFromSidebar = false
         selectedThread = nil
