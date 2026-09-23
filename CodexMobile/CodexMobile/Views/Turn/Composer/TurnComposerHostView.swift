@@ -22,6 +22,9 @@ struct TurnComposerHostView: View {
     let isInputFocused: Binding<Bool>
     let orderedModelOptions: [CodexModelOption]
     let selectedModelTitle: String
+    var openCodeVariantID: String? = nil
+    var onSelectOpenCodeVariant: ((String) -> Void)? = nil
+    var isSendDisabledOverride: Bool = false
     let reasoningDisplayOptions: [TurnComposerReasoningDisplayOption]
     let showsGitControls: Bool
     let isGitBranchSelectorEnabled: Bool
@@ -57,6 +60,7 @@ struct TurnComposerHostView: View {
 
     // ─── ENTRY POINT ─────────────────────────────────────────────
     var body: some View {
+        let isCodexRuntime = thread.runtimeProvider == .codex
         let availableForkDestinations = TurnComposerForkDestination.availableDestinations(
             canForkLocally: canForkLocally,
             canCreateWorktree: showsGitControls && !isWorktreeProject && isGitBranchSelectorEnabled
@@ -109,18 +113,49 @@ struct TurnComposerHostView: View {
             composerMentionedPlugins: viewModel.composerMentionedPlugins,
             composerReviewSelection: viewModel.composerReviewSelection,
             isSubagentsSelectionArmed: viewModel.isSubagentsSelectionArmed,
-            isPlanModeArmed: viewModel.isPlanModeArmed,
+            isPlanModeArmed: isCodexRuntime && viewModel.isPlanModeArmed,
             isVoiceRecording: isVoiceRecording,
             voiceAudioLevels: voiceAudioLevels,
             voiceRecordingDuration: voiceRecordingDuration
         )
         let runtimeThreadId = usesThreadRuntimeSettings ? thread.id : nil
-        let runtimeState = TurnComposerRuntimeState.resolve(
-            codex: codex,
-            threadId: runtimeThreadId,
-            reasoningDisplayOptions: reasoningDisplayOptions
-        )
-        let runtimeActions = TurnComposerRuntimeActions.resolve(codex: codex, threadId: runtimeThreadId)
+        let openCodeModel = isCodexRuntime ? nil : codex.openCodeModel(id: thread.model)
+        let selectedOpenCodeVariant = onSelectOpenCodeVariant == nil
+            ? codex.selectedOpenCodeVariant(for: thread.id) : openCodeVariantID
+        let visibleOpenCodeVariant = selectedOpenCodeVariant.flatMap { selected in
+            openCodeModel?.supportsVariant(selected) == true ? selected : nil
+        }
+        let openCodeReasoningOptions = TurnComposerMetaMapper.openCodeReasoningDisplayOptions(from: openCodeModel)
+        let runtimeState = isCodexRuntime
+            ? TurnComposerRuntimeState.resolve(
+                codex: codex,
+                threadId: runtimeThreadId,
+                reasoningDisplayOptions: reasoningDisplayOptions
+            )
+            : TurnComposerRuntimeState(
+                reasoningDisplayOptions: openCodeReasoningOptions,
+                effectiveReasoningEffort: visibleOpenCodeVariant,
+                selectedReasoningEffort: selectedOpenCodeVariant,
+                reasoningMenuDisabled: openCodeReasoningOptions.isEmpty,
+                selectedServiceTier: nil,
+                supportsFastMode: false,
+                settingsStatus: isThreadRunning ? "Applies to the next turn" : nil,
+                unselectedReasoningTitle: "Automatic"
+            )
+        let runtimeActions = isCodexRuntime
+            ? TurnComposerRuntimeActions.resolve(codex: codex, threadId: runtimeThreadId)
+            : TurnComposerRuntimeActions(
+                selectModel: { _ in },
+                selectAutomaticReasoning: {},
+                selectReasoning: { variant in
+                    if let onSelectOpenCodeVariant {
+                        onSelectOpenCodeVariant(variant)
+                    } else {
+                        codex.setOpenCodeVariant(variant, for: thread.id)
+                    }
+                },
+                selectServiceTier: { _ in }
+            )
         let selectedModelID = codex.visibleSelectedModelIDForComposer(threadId: runtimeThreadId)
         let isRuntimeSelectionLoading = codex.isRuntimeSelectionLoadingForComposer(threadId: runtimeThreadId)
         let hasComposerWorkingDirectory = thread.gitWorkingDirectory != nil
@@ -158,10 +193,10 @@ struct TurnComposerHostView: View {
             autocompleteState: autocompleteState,
             remainingAttachmentSlots: viewModel.remainingAttachmentSlots,
             isComposerInteractionLocked: viewModel.isComposerInteractionLocked(activeTurnID: activeTurnID),
-            isSendDisabled: isVoiceInputActive
+            isSendDisabled: isSendDisabledOverride || isVoiceInputActive
                 || viewModel.isSendDisabled(isConnected: codex.isConnected, activeTurnID: activeTurnID),
             isSending: viewModel.isSending,
-            isPlanModeArmed: viewModel.isPlanModeArmed,
+            isPlanModeArmed: isCodexRuntime && viewModel.isPlanModeArmed,
             queuedCount: viewModel.queuedCount(codex: codex, threadID: thread.id),
             isQueuePaused: viewModel.isQueuePaused(codex: codex, threadID: thread.id),
             activeTurnID: activeTurnID,
@@ -178,6 +213,13 @@ struct TurnComposerHostView: View {
             orderedModelOptions: orderedModelOptions,
             selectedModelID: selectedModelID,
             selectedModelTitle: selectedModelTitle,
+            fixedRuntimeLabelParts: isCodexRuntime ? nil : TurnComposerMetaMapper.openCodeRuntimeLabelParts(
+                modelID: thread.model,
+                option: openCodeModel,
+                variantID: visibleOpenCodeVariant
+            ),
+            allowsRuntimeSelection: isCodexRuntime,
+            allowsEffortSelection: !isCodexRuntime && !openCodeReasoningOptions.isEmpty,
             isLoadingModels: codex.isLoadingModels,
             isRuntimeSelectionLoading: isRuntimeSelectionLoading,
             runtimeState: runtimeState,
@@ -201,6 +243,7 @@ struct TurnComposerHostView: View {
             onTapVoice: onTapVoice,
             onCancelVoiceRecording: onCancelVoiceRecording,
             onSetPlanModeArmed: { isArmed in
+                guard isCodexRuntime else { return }
                 viewModel.setPlanModeArmed(isArmed)
                 viewModel.saveLocalDraft(codex: codex, threadID: thread.id)
             },
@@ -337,5 +380,11 @@ struct TurnComposerHostView: View {
             showsSecondaryBar: showsSecondaryBar,
             allowsCollapsedComposer: allowsCollapsedComposer
         )
+        // OpenCode threads only persist the model id; the catalog supplies its readable name.
+        .task(id: !isCodexRuntime && codex.isConnected) {
+            guard !isCodexRuntime, codex.isConnected,
+                  codex.openCodeModels.isEmpty, !codex.isLoadingOpenCodeModels else { return }
+            _ = try? await codex.listOpenCodeModels()
+        }
     }
 }

@@ -40,7 +40,10 @@ enum WorktreeFlowCoordinator {
     static func startNewWorktreeChat(
         preferredProjectPath: String,
         baseBranch requestedBaseBranch: String? = nil,
-        codex: CodexService
+        codex: CodexService,
+        runtimeProvider: CodexRuntimeProvider = .codex,
+        openCodeModelID: String? = nil,
+        openCodeVariantID: String? = nil
     ) async throws -> CodexThread {
         let normalizedPreferredProjectPath = try requiredProjectPath(
             preferredProjectPath,
@@ -68,7 +71,12 @@ enum WorktreeFlowCoordinator {
         )
 
         do {
-            let thread = try await codex.startThreadIfReady(preferredProjectPath: result.worktreePath)
+            let thread = try await codex.startThreadIfReady(
+                preferredProjectPath: result.worktreePath,
+                runtimeProvider: runtimeProvider,
+                openCodeModelID: openCodeModelID,
+                openCodeVariantID: openCodeVariantID
+            )
             codex.rememberWorktreeOriginPath(normalizedPreferredProjectPath, forThreadId: thread.id)
             return thread
         } catch {

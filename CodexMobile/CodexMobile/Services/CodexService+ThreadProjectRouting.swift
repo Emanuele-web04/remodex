@@ -16,9 +16,14 @@ extension CodexService {
         preferredProjectPath: String? = nil,
         rootlessChatPromptHint: String? = nil,
         pendingComposerAction: CodexPendingThreadComposerAction? = nil,
-        runtimeOverride: CodexThreadRuntimeOverride? = nil
+        runtimeOverride: CodexThreadRuntimeOverride? = nil,
+        runtimeProvider: CodexRuntimeProvider = .codex,
+        openCodeModelID: String? = nil,
+        openCodeVariantID: String? = nil
     ) async throws -> CodexThread {
-        try await awaitRuntimeInitializedIfNeeded()
+        if runtimeProvider == .codex {
+            try await awaitRuntimeInitializedIfNeeded()
+        }
 
         let resolvedProjectPath = await resolvedPreferredProjectPath(
             preferredProjectPath: preferredProjectPath,
@@ -29,13 +34,19 @@ extension CodexService {
             return try await startThread(
                 preferredProjectPath: resolvedProjectPath,
                 pendingComposerAction: pendingComposerAction,
-                runtimeOverride: runtimeOverride
+                runtimeOverride: runtimeOverride,
+                runtimeProvider: runtimeProvider,
+                openCodeModelID: openCodeModelID,
+                openCodeVariantID: openCodeVariantID
             )
         }
 
         return try await startThread(
             preferredProjectPath: resolvedProjectPath,
-            runtimeOverride: runtimeOverride
+            runtimeOverride: runtimeOverride,
+            runtimeProvider: runtimeProvider,
+            openCodeModelID: openCodeModelID,
+            openCodeVariantID: openCodeVariantID
         )
     }
 

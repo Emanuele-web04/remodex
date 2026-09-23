@@ -385,7 +385,7 @@ function sendActivitySnapshot(socket, threadId, status, overrides = {}) {
   });
 }
 
-function createFakeIpcTransport() {
+function createFakeIpcTransport({ failWriteForMethod = null, onRequest = null } = {}) {
   const state = { socket: null, connectionCount: 0, frames: [] };
   return {
     state,
@@ -396,6 +396,10 @@ function createFakeIpcTransport() {
         socket.write = (buffer, callback = () => {}) => {
           const frame = parseFrameBuffer(buffer);
           state.frames.push(frame);
+          if (failWriteForMethod?.(frame.method)) {
+            callback(new Error("IPC write callback failed after the frame was attempted"));
+            return;
+          }
           callback();
           if (frame.method === "initialize") {
             setImmediate(() => emitFrame(socket, {
@@ -406,6 +410,8 @@ function createFakeIpcTransport() {
               handledByClientId: "desktop",
               result: { clientId: "remodex-activity-test" },
             }));
+          } else {
+            onRequest?.(frame, socket);
           }
         };
         socket.destroy = () => {
@@ -425,6 +431,30 @@ function createFakeIpcTransport() {
       },
     },
   };
+}
+
+function answerDesktopOwnerProbe(frame, socket, { owner = true } = {}) {
+  if (frame.method === "thread-owner-discovery") {
+    emitFrame(socket, owner ? {
+      type: "response", requestId: frame.requestId,
+      resultType: "success", method: frame.method,
+      handledByClientId: "desktop", result: { supportsUntrustedAppInput: true },
+    } : {
+      type: "response", requestId: frame.requestId,
+      resultType: "error", error: "no-client-found",
+    });
+    return;
+  }
+  if (frame.method === "thread-follower-load-complete-history") {
+    emitFrame(socket, owner ? {
+      type: "response", requestId: frame.requestId,
+      resultType: "success", method: frame.method,
+      handledByClientId: "desktop", result: { revision: 1 },
+    } : {
+      type: "response", requestId: frame.requestId,
+      resultType: "error", error: "no-client-found",
+    });
+  }
 }
 
 test("desktop turns/list returns newest-first pages without reversing reopen history", () => {
@@ -2227,6 +2257,7 @@ test("desktop IPC follower routes phone turns to Desktop-owned threads", async (
       change: {
         type: "snapshot",
         conversationState: {
+          cwd: "/repo",
           turns: [],
           requests: [],
         },
@@ -2314,11 +2345,19 @@ test("desktop IPC follower routes phone turns to Desktop-owned threads", async (
         threadId: "thread-desktop-owned",
         input: [{ type: "input_text", text: "steer from phone" }],
         expectedTurnId: "turn-from-phone",
+        clientUserMessageId: "user-message-1",
       },
       expectedMethod: "thread-follower-steer-turn",
       expectedParams: {
         conversationId: "thread-desktop-owned",
         input: [{ type: "input_text", text: "steer from phone" }],
+        clientUserMessageId: "user-message-1",
+        restoreMessage: {
+          id: "user-message-1",
+          text: "steer from phone",
+          cwd: "/repo",
+          context: { workspaceRoots: ["/repo"], commentAttachments: [] },
+        },
         expectedTurnId: "turn-from-phone",
       },
     },
@@ -2363,7 +2402,13 @@ test("desktop IPC follower routes phone turns to Desktop-owned threads", async (
       routedFrame.version,
       request.expectedMethod === "thread-follower-interrupt-turn" ? 4 : 1
     );
-    assert.deepEqual(routedFrame.params, request.expectedParams);
+    if (request.method === "turn/steer") {
+      assert.ok(Number.isSafeInteger(routedFrame.params.restoreMessage.createdAt));
+      const { createdAt, ...restoreMessage } = routedFrame.params.restoreMessage;
+      assert.deepEqual({ ...routedFrame.params, restoreMessage }, request.expectedParams);
+    } else {
+      assert.deepEqual(routedFrame.params, request.expectedParams);
+    }
     await waitFor(() => outbound.find((message) => message.id === request.id));
     assert.deepEqual(outbound.find((message) => message.id === request.id), {
       id: request.id,
@@ -2417,7 +2462,7 @@ test("desktop IPC follower routes phone turns to Desktop-owned threads", async (
   assert.equal(serverFrames.length, serverFrameCountBeforeUnsupportedMutations);
 });
 
-test("desktop IPC follower falls back locally when no Desktop client can handle the request", async (t) => {
+test("desktop IPC follower keeps Desktop ownership after unproven no-handler text", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-follower-local-fallback-");
   const serverFrames = [];
   const localForwards = [];
@@ -2437,8 +2482,8 @@ test("desktop IPC follower falls back locally when no Desktop client can handle 
           result: { clientId: "remodex-test" },
         });
       } else if (frame.method === "thread-follower-start-turn") {
-        // Router-style no-handler error: the request never reached any client,
-        // so retrying it locally is safe.
+        // Text alone does not prove whether the broker or a Desktop handler
+        // generated this error after the request was sent.
         writeFrame(socket, {
           type: "response",
           requestId: frame.requestId,
@@ -2499,10 +2544,9 @@ test("desktop IPC follower falls back locally when no Desktop client can handle 
     },
   }));
   assert.equal(handled, true);
-  await waitFor(() => localForwards.length === 1);
-  assert.equal(localForwards[0].id, "phone-turn-start-route-fallback");
-  assert.equal(localForwards[0].method, "turn/start");
-  assert.equal(outbound.some((message) => message.id === "phone-turn-start-route-fallback"), false);
+  await waitFor(() => outbound.some((message) => message.id === "phone-turn-start-route-fallback"));
+  assert.equal(outbound.find((message) => message.id === "phone-turn-start-route-fallback")?.error?.code, -32000);
+  assert.deepEqual(localForwards, []);
 
   const handledAgain = follower.observeInbound(JSON.stringify({
     id: "phone-turn-start-route-fallback-2",
@@ -2512,10 +2556,12 @@ test("desktop IPC follower falls back locally when no Desktop client can handle 
       input: [{ type: "input_text", text: "stay local" }],
     },
   }));
-  assert.equal(handledAgain, false);
+  assert.equal(handledAgain, true);
+  await waitFor(() => outbound.some((message) => message.id === "phone-turn-start-route-fallback-2"));
+  assert.deepEqual(localForwards, []);
   assert.equal(
     serverFrames.filter((frame) => frame.method === "thread-follower-start-turn").length,
-    1
+    2
   );
 });
 
@@ -2716,6 +2762,91 @@ test("desktop IPC follower does not rerun ambiguous Desktop failures locally", a
   const timeoutResponse = outbound.find((message) => message.id === "phone-turn-start-desktop-timeout");
   assert.equal(timeoutResponse.error.code, -32000);
   assert.deepEqual(localForwards, []);
+});
+
+for (const failure of ["handler error", "write callback error"]) {
+test(`desktop IPC follower does not replay a settings update after ${failure}`, async (t) => {
+  const transport = createFakeIpcTransport({
+    failWriteForMethod: failure === "write callback error"
+      ? (method) => method === "thread-follower-update-thread-settings"
+      : null,
+  });
+  const outbound = [];
+  const localForwards = [];
+  const follower = createDesktopIpcActionFollower({
+    netModule: transport.netModule,
+    socketPath: "/unused/ipc.sock",
+    sendApplicationResponse(message) { outbound.push(JSON.parse(message)); },
+    forwardToLocalCodex(message) { localForwards.push(JSON.parse(message)); },
+    requestTimeoutMs: 150,
+  });
+  t.after(() => follower.stopAll());
+
+  follower.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-settings-error" },
+  }));
+  await waitFor(() => transport.state.socket);
+  emitFrame(transport.state.socket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop",
+    version: 6,
+    params: {
+      conversationId: "thread-settings-error",
+      change: { type: "snapshot", conversationState: { turns: [], requests: [] } },
+    },
+  });
+  await wait(25);
+
+  assert.equal(follower.observeInbound(JSON.stringify({
+    id: "phone-settings-error",
+    method: "thread/settings/update",
+    params: { threadId: "thread-settings-error", model: "gpt-test" },
+  })), true);
+  await waitFor(() => transport.state.frames.some((frame) => frame.method === "thread-follower-update-thread-settings"));
+  if (failure === "handler error") {
+    const request = transport.state.frames.find((frame) => frame.method === "thread-follower-update-thread-settings");
+    // Desktop's router and a renderer handler both use this response shape.
+    emitFrame(transport.state.socket, {
+      type: "response",
+      requestId: request.requestId,
+      resultType: "error",
+      error: "no-client-found",
+    });
+  }
+
+  await waitFor(() => outbound.some((message) => message.id === "phone-settings-error"));
+  assert.equal(outbound.find((message) => message.id === "phone-settings-error")?.error?.code, -32000);
+  assert.deepEqual(localForwards, []);
+});
+}
+
+test("desktop IPC follower may use local runtime when no IPC socket exists before writing", async (t) => {
+  const outbound = [];
+  const localForwards = [];
+  const follower = createDesktopIpcActionFollower({
+    socketPath: () => [],
+    netModule: { createConnection() { throw new Error("No socket should be opened"); } },
+    sendApplicationResponse(message) { outbound.push(JSON.parse(message)); },
+    forwardToLocalCodex(message) { localForwards.push(JSON.parse(message)); },
+    ownershipProbeTimeoutMs: 25,
+    requestTimeoutMs: 100,
+  });
+  t.after(() => follower.stopAll());
+
+  follower.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-without-ipc-socket" },
+  }));
+  assert.equal(follower.observeInbound(JSON.stringify({
+    id: "phone-turn-without-ipc-socket",
+    method: "turn/start",
+    params: { threadId: "thread-without-ipc-socket", input: [{ type: "text", text: "Hello" }] },
+  })), true);
+
+  await waitFor(() => localForwards.some((message) => message.id === "phone-turn-without-ipc-socket"));
+  assert.equal(outbound.some((message) => message.id === "phone-turn-without-ipc-socket"), false);
 });
 
 test("desktop IPC follower mirrors live assistant text growth from desktop state", async (t) => {
@@ -4695,15 +4826,14 @@ test("desktop IPC follower retries held ownership probes after IPC connects", as
   assert.deepEqual(localForwards, []);
 });
 
-test("desktop IPC follower ignores stale positive discovery after a held turn already expired", async (t) => {
+test("desktop IPC follower ignores stale positive discovery after a held turn receives an ambiguous error", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-probe-expired-");
   const serverFrames = [];
   const localForwards = [];
   let serverSocket = null;
   let discoveryRequestFrame = null;
 
-  // Ignores discovery probes, and reports no handler for routed requests so the
-  // expired hold falls back to the local app-server.
+  // A broker rejection and an error from a Desktop handler have the same shape.
   const server = net.createServer((socket) => {
     serverSocket = socket;
     attachFrameReader(socket, (frame) => {
@@ -4736,9 +4866,10 @@ test("desktop IPC follower ignores stale positive discovery after a held turn al
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
+  const outbound = [];
   const follower = createDesktopIpcActionFollower({
     socketPath,
-    sendApplicationResponse() {},
+    sendApplicationResponse(message) { outbound.push(JSON.parse(message)); },
     forwardToLocalCodex(rawMessage) {
       localForwards.push(JSON.parse(rawMessage));
     },
@@ -4761,16 +4892,21 @@ test("desktop IPC follower ignores stale positive discovery after a held turn al
   }));
   assert.equal(firstHandled, true);
 
-  // The hold expires and the request falls back to the local app-server.
-  await waitFor(() => localForwards.some((message) => message.id === "phone-turn-start-expired-probe"), 1_000);
+  // The hold expires, but the error cannot authorize local replay.
+  await waitFor(() => outbound.some((message) => message.id === "phone-turn-start-expired-probe"), 1_000);
+  assert.equal(outbound.find((message) => message.id === "phone-turn-start-expired-probe")?.error?.code, -32000);
+  assert.deepEqual(localForwards, []);
   assert.ok(discoveryRequestFrame);
 
-  // A very late positive discovery answer must not flip the thread to Desktop.
+  // A very late positive discovery answer must not replace the sticky route
+  // created by the ambiguous mutation, including after IPC reconnects.
   writeFrame(serverSocket, {
     type: "client-discovery-response",
     requestId: discoveryRequestFrame.requestId,
     response: { canHandle: true },
   });
+  await wait(25);
+  serverSocket.destroy();
   await wait(25);
 
   const secondHandled = follower.observeInbound(JSON.stringify({
@@ -4778,10 +4914,631 @@ test("desktop IPC follower ignores stale positive discovery after a held turn al
     method: "turn/start",
     params: {
       threadId: "thread-probe-expired",
-      input: [{ type: "input_text", text: "must not route to desktop" }],
+      input: [{ type: "input_text", text: "must stay on desktop route" }],
     },
   }));
-  assert.equal(secondHandled, false);
+  assert.equal(secondHandled, true);
+  await waitFor(() => outbound.some((message) => message.id === "phone-turn-start-after-expired-probe"), 1_000);
+  assert.equal(outbound.find((message) => message.id === "phone-turn-start-after-expired-probe")?.error?.code, -32000);
+  assert.deepEqual(localForwards, []);
+  assert.equal(serverFrames.filter((frame) => frame.method === "thread-follower-start-turn").length, 2);
+
+  // An explicit local live-owner claim is the authority that releases the
+  // Desktop route for future phone mutations.
+  assert.equal(serverSocket.destroyed, false, "the owner claim must use the reconnected socket");
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "remodex-owner",
+    version: 6,
+    params: {
+      conversationId: "thread-probe-expired",
+      remodexOwnerSource: "desktop-ipc-live-owner",
+      change: { type: "snapshot", conversationState: { turns: [], requests: [] } },
+    },
+  });
+  await wait(25);
+  assert.equal(follower.observeInbound(JSON.stringify({
+    id: "phone-turn-start-after-owner-claim",
+    method: "turn/start",
+    params: { threadId: "thread-probe-expired", input: [] },
+  })), false);
+});
+
+test("desktop IPC follower routes an old Desktop-origin settings update before its first live snapshot", async (t) => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-desktop-origin-"));
+  t.after(() => fs.rmSync(tempDir, { recursive: true, force: true }));
+  const desktopPath = path.join(tempDir, "desktop.jsonl");
+  const localPath = path.join(tempDir, "local.jsonl");
+  fs.writeFileSync(desktopPath, `${JSON.stringify({
+    type: "session_meta",
+    payload: { id: "old-desktop-task", originator: "Codex Desktop", source: "vscode" },
+  })}\n`);
+  fs.writeFileSync(localPath, `${JSON.stringify({
+    type: "session_meta",
+    payload: { id: "old-local-task", originator: "codex-tui", source: "cli" },
+  })}\n`);
+
+  const transport = createFakeIpcTransport();
+  const outbound = [];
+  const localForwards = [];
+  const follower = createDesktopIpcActionFollower({
+    netModule: transport.netModule,
+    socketPath: "/unused/ipc.sock",
+    sendApplicationResponse(message) { outbound.push(JSON.parse(message)); },
+    forwardToLocalCodex(message) { localForwards.push(JSON.parse(message)); },
+    requestTimeoutMs: 500,
+  });
+  t.after(() => follower.stopAll());
+
+  // thread/read can reveal an old task outside the current sidebar page.
+  follower.observeThreadMetadata({ id: "old-desktop-task", path: desktopPath });
+  follower.observeThreadListResponse({ data: [{ id: "old-local-task", path: localPath }] });
+  assert.equal(follower.observeInbound(JSON.stringify({
+    id: "desktop-settings",
+    method: "thread/settings/update",
+    params: { threadId: "old-desktop-task", model: "gpt-test" },
+  })), true);
+  assert.equal(follower.observeInbound(JSON.stringify({
+    id: "local-settings",
+    method: "thread/settings/update",
+    params: { threadId: "old-local-task", model: "gpt-test" },
+  })), false);
+
+  await waitFor(() => transport.state.frames.some((frame) => frame.method === "thread-follower-update-thread-settings"));
+  const request = transport.state.frames.find((frame) => frame.method === "thread-follower-update-thread-settings");
+  assert.equal(request.params.conversationId, "old-desktop-task");
+  emitFrame(transport.state.socket, {
+    type: "response",
+    requestId: request.requestId,
+    resultType: "success",
+    method: request.method,
+    handledByClientId: "desktop",
+    result: { ok: true },
+  });
+  await waitFor(() => outbound.some((message) => message.id === "desktop-settings"));
+  assert.equal(outbound.find((message) => message.id === "desktop-settings")?.error, undefined);
+  assert.deepEqual(localForwards, []);
+});
+
+test("desktop IPC follower bootstraps metadata-only resume without a snapshot or origin hint", async (t) => {
+  const transport = createFakeIpcTransport({ onRequest: answerDesktopOwnerProbe });
+  const outbound = [];
+  const localForwards = [];
+  const metadataReads = [];
+  const follower = createDesktopIpcActionFollower({
+    netModule: transport.netModule,
+    socketPath: "/unused/ipc.sock",
+    sendApplicationResponse(message) { outbound.push(JSON.parse(message)); },
+    forwardToLocalCodex(message) { localForwards.push(JSON.parse(message)); },
+    async resumeThreadLocally() { throw new Error("Desktop owner must win"); },
+    async readThreadMetadata(threadId) {
+      metadataReads.push(threadId);
+      return { thread: {
+        id: threadId,
+        name: "Old Desktop task",
+        source: "vscode",
+        originator: "Codex Desktop",
+        turns: [{ id: "must-not-embed" }],
+      } };
+    },
+  });
+  t.after(() => follower.stopAll());
+
+  const threadId = "desktop-task-before-snapshot";
+  assert.equal(follower.observeInbound(JSON.stringify({
+    id: "resume-before-snapshot",
+    method: "thread/resume",
+    params: { threadId, excludeTurns: true, model: "phone-model" },
+  })), true);
+  assert.equal(follower.observeInbound(JSON.stringify({
+    id: "legacy-concurrent-resume",
+    method: "thread/resume",
+    params: { threadId },
+  })), true);
+  await waitFor(() => outbound.some((message) => message.id === "resume-before-snapshot"));
+  await waitFor(() => outbound.some((message) => message.id === "legacy-concurrent-resume"));
+  assert.equal(outbound.find((message) => message.id === "legacy-concurrent-resume")?.error?.code, -32000);
+  const resume = outbound.find((message) => message.id === "resume-before-snapshot");
+  assert.equal(resume.result.remodexDesktopIpcMirror, true);
+  assert.equal(resume.result.thread.id, threadId);
+  assert.deepEqual(resume.result.thread.turns, []);
+  assert.deepEqual(metadataReads, [threadId]);
+  assert.deepEqual(localForwards, [], "Desktop's active writer must never receive a second resume");
+  assert.equal(transport.state.frames.some((frame) => frame.method === "thread/resume"), false);
+  assert.equal(transport.state.frames.some((frame) => frame.method === "thread-follower-load-complete-history"), true);
+  await waitFor(() => transport.state.frames.some((frame) =>
+    frame.method === "thread-stream-following-changed"
+      && frame.params?.conversationId === threadId
+      && frame.params?.following === true));
+
+  assert.equal(follower.observeInbound(JSON.stringify({
+    id: "settings-before-snapshot",
+    method: "thread/settings/update",
+    params: { threadId, model: "phone-model" },
+  })), true);
+  await waitFor(() => transport.state.frames.some((frame) =>
+    frame.method === "thread-follower-update-thread-settings"
+      && frame.params?.conversationId === threadId));
+  const settingsRequest = transport.state.frames.find((frame) =>
+    frame.method === "thread-follower-update-thread-settings"
+      && frame.params?.conversationId === threadId);
+  assert.equal(settingsRequest.targetClientId, "desktop");
+  emitFrame(transport.state.socket, {
+    type: "response",
+    requestId: settingsRequest.requestId,
+    resultType: "success",
+    method: settingsRequest.method,
+    handledByClientId: "desktop",
+    result: { ok: true },
+  });
+  await waitFor(() => outbound.some((message) => message.id === "settings-before-snapshot"));
+  assert.equal(outbound.find((message) => message.id === "settings-before-snapshot")?.error, undefined);
+  assert.deepEqual(localForwards, []);
+
+  assert.equal(follower.observeInbound(JSON.stringify({
+    id: "legacy-resume",
+    method: "thread/resume",
+    params: { threadId },
+  })), true);
+  await waitFor(() => outbound.some((message) => message.id === "legacy-resume"));
+  assert.equal(outbound.find((message) => message.id === "legacy-resume")?.error?.code, -32000);
+  assert.deepEqual(localForwards, [], "an older client cannot bypass Desktop writer protection");
+});
+
+test("desktop IPC follower claims local ownership before flushing held settings", async (t) => {
+  const outbound = [];
+  const forwarded = [];
+  let follower;
+  follower = createDesktopIpcActionFollower({
+    socketPath: () => [],
+    ownershipProbeTimeoutMs: 100,
+    sendApplicationResponse(message) { outbound.push(JSON.parse(message)); },
+    forwardToLocalCodex(message) {
+      assert.equal(follower.isLocallyAcquiredThread("held-local-task"), true);
+      forwarded.push(JSON.parse(message));
+    },
+    async readThreadMetadata(threadId) {
+      return { thread: { id: threadId, source: "cli", turns: [] } };
+    },
+    async resumeThreadLocally() {
+      return { thread: { id: "held-local-task", turns: [] } };
+    },
+    isLocallyOwnedThread() { return false; },
+  });
+  t.after(() => follower.stopAll());
+
+  assert.equal(follower.observeInbound(JSON.stringify({
+    id: "read-held-local", method: "thread/read",
+    params: { threadId: "held-local-task", includeTurns: false },
+  })), false);
+  assert.equal(follower.observeInbound(JSON.stringify({
+    id: "settings-held-local", method: "thread/settings/update",
+    params: { threadId: "held-local-task", model: "gpt-test" },
+  })), true);
+  assert.deepEqual(forwarded, []);
+  assert.equal(follower.observeInbound(JSON.stringify({
+    id: "resume-held-local", method: "thread/resume",
+    params: { threadId: "held-local-task", excludeTurns: true },
+  })), true);
+  await waitFor(() => forwarded.length === 1 && outbound.some((message) => message.id === "resume-held-local"));
+  assert.equal(forwarded[0].id, "settings-held-local");
+  assert.equal(outbound.find((message) => message.id === "resume-held-local")?.error, undefined);
+});
+
+test("desktop IPC follower claims a newly created local task before flushing held settings", async (t) => {
+  const forwarded = [];
+  let follower;
+  follower = createDesktopIpcActionFollower({
+    socketPath: () => [],
+    ownershipProbeTimeoutMs: 100,
+    sendApplicationResponse() {},
+    forwardToLocalCodex(message) {
+      assert.equal(follower.isLocallyAcquiredThread("new-held-local-task"), true);
+      forwarded.push(JSON.parse(message));
+    },
+    isLocallyOwnedThread() { return false; },
+  });
+  t.after(() => follower.stopAll());
+
+  assert.equal(follower.observeInbound(JSON.stringify({
+    id: "read-new-held", method: "thread/read", params: { threadId: "new-held-local-task" },
+  })), false);
+  assert.equal(follower.observeInbound(JSON.stringify({
+    id: "settings-new-held", method: "thread/settings/update",
+    params: { threadId: "new-held-local-task", model: "gpt-test" },
+  })), true);
+  assert.deepEqual(forwarded, []);
+  assert.equal(follower.claimNewLocalThread("new-held-local-task"), true);
+  assert.deepEqual(forwarded.map((message) => message.id), ["settings-new-held"]);
+});
+
+test("desktop IPC follower keeps an expired held mutation behind pending resume ownership", async (t) => {
+  const transport = createFakeIpcTransport();
+  const outbound = [];
+  const localForwards = [];
+  let rejectMetadata;
+  const follower = createDesktopIpcActionFollower({
+    netModule: transport.netModule,
+    socketPath: "/unused/ipc.sock",
+    ownershipProbeTimeoutMs: 10,
+    requestTimeoutMs: 50,
+    sendApplicationResponse(message) { outbound.push(JSON.parse(message)); },
+    forwardToLocalCodex(message) { localForwards.push(JSON.parse(message)); },
+    readThreadMetadata() { return new Promise((_, reject) => { rejectMetadata = reject; }); },
+  });
+  t.after(() => follower.stopAll());
+
+  const threadId = "held-failed-resume";
+  assert.equal(follower.observeInbound(JSON.stringify({
+    id: "read-held-failed", method: "thread/read", params: { threadId },
+  })), false);
+  assert.equal(follower.observeInbound(JSON.stringify({
+    id: "turn-held-failed", method: "turn/start", params: { threadId, input: [] },
+  })), true);
+  assert.equal(follower.observeInbound(JSON.stringify({
+    id: "resume-held-failed", method: "thread/resume",
+    params: { threadId, excludeTurns: true },
+  })), true);
+  await waitFor(() => typeof rejectMetadata === "function");
+  await wait(25);
+  assert.equal(transport.state.frames.some((frame) => frame.method === "thread-follower-start-turn"), false);
+  rejectMetadata(new Error("Read-only metadata unavailable"));
+  await waitFor(() => outbound.some((message) => message.id === "resume-held-failed")
+    && outbound.some((message) => message.id === "turn-held-failed"));
+  assert.equal(outbound.find((message) => message.id === "turn-held-failed")?.error?.code, -32000);
+  assert.deepEqual(localForwards, []);
+  assert.equal(transport.state.frames.some((frame) => frame.method === "thread-follower-start-turn"), false);
+});
+
+for (const [desktopError, expectedMessage] of [
+  ["ActiveTurnNotSteerable: the turn already completed", "ActiveTurnNotSteerable: the turn already completed"],
+  ["request-timeout", "Could not continue this Codex Desktop-owned thread from the phone."],
+]) {
+  test(`desktop IPC follower reports steer rejection ${desktopError} without replay`, async (t) => {
+    const transport = createFakeIpcTransport({
+      onRequest(frame, socket) {
+        if (frame.method !== "thread-follower-steer-turn") return;
+        emitFrame(socket, {
+          type: "response", requestId: frame.requestId,
+          resultType: "error", method: frame.method,
+          handledByClientId: "desktop", error: desktopError,
+        });
+      },
+    });
+    const outbound = [];
+    const localForwards = [];
+    const follower = createDesktopIpcActionFollower({
+      netModule: transport.netModule,
+      socketPath: "/unused/ipc.sock",
+      sendApplicationResponse(message) { outbound.push(JSON.parse(message)); },
+      forwardToLocalCodex(message) { localForwards.push(JSON.parse(message)); },
+      requestTimeoutMs: 100,
+    });
+    t.after(() => follower.stopAll());
+
+    follower.observeThreadMetadata({ id: "stale-steer-task", source: "vscode", originator: "Codex Desktop" });
+    assert.equal(follower.observeInbound(JSON.stringify({
+      id: "phone-stale-steer", method: "turn/steer",
+      params: { threadId: "stale-steer-task", expectedTurnId: "old-turn", input: [] },
+    })), true);
+    await waitFor(() => outbound.some((message) => message.id === "phone-stale-steer"));
+    assert.equal(outbound[0].error?.code, -32000);
+    assert.equal(outbound[0].error?.message, expectedMessage);
+    assert.deepEqual(localForwards, []);
+    assert.equal(transport.state.frames.filter((frame) => frame.method === "thread-follower-steer-turn").length, 1);
+  });
+}
+
+test("desktop IPC follower holds a concurrent mutation until resume ownership is known", async (t) => {
+  const transport = createFakeIpcTransport({ onRequest: answerDesktopOwnerProbe });
+  const outbound = [];
+  const localForwards = [];
+  let resolveMetadata;
+  const follower = createDesktopIpcActionFollower({
+    netModule: transport.netModule,
+    socketPath: "/unused/ipc.sock",
+    sendApplicationResponse(message) { outbound.push(JSON.parse(message)); },
+    forwardToLocalCodex(message) { localForwards.push(JSON.parse(message)); },
+    async resumeThreadLocally() { throw new Error("Desktop owner must win"); },
+    readThreadMetadata() { return new Promise((resolve) => { resolveMetadata = resolve; }); },
+  });
+  t.after(() => follower.stopAll());
+
+  const threadId = "desktop-concurrent-bootstrap";
+  assert.equal(follower.observeInbound(JSON.stringify({
+    id: "resume-concurrent", method: "thread/resume", params: { threadId, excludeTurns: true },
+  })), true);
+  assert.equal(follower.observeInbound(JSON.stringify({
+    id: "settings-concurrent", method: "thread/settings/update",
+    params: { threadId, effort: "high" },
+  })), true);
+  await waitFor(() => typeof resolveMetadata === "function");
+  assert.deepEqual(localForwards, []);
+  assert.equal(transport.state.frames.some((frame) =>
+    frame.method === "thread-follower-update-thread-settings"), false);
+
+  resolveMetadata({ thread: { id: threadId, source: "vscode", originator: "Codex Desktop", turns: [] } });
+  await waitFor(() => outbound.some((message) => message.id === "resume-concurrent"));
+  await waitFor(() => transport.state.frames.some((frame) =>
+    frame.method === "thread-follower-update-thread-settings"));
+  assert.deepEqual(localForwards, [], "concurrent settings must not race into a second writer");
+  const settingsRequest = transport.state.frames.find((frame) =>
+    frame.method === "thread-follower-update-thread-settings");
+  emitFrame(transport.state.socket, {
+    type: "response", requestId: settingsRequest.requestId,
+    resultType: "success", method: settingsRequest.method,
+    handledByClientId: "desktop", result: { ok: true },
+  });
+  await waitFor(() => outbound.some((message) => message.id === "settings-concurrent"));
+  assert.equal(outbound.find((message) => message.id === "settings-concurrent")?.error, undefined);
+});
+
+test("desktop IPC follower forwards confirmed local resume and rejects unknown ownership", async (t) => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-resume-owner-"));
+  t.after(() => fs.rmSync(tempDir, { recursive: true, force: true }));
+  const localPath = path.join(tempDir, "local.jsonl");
+  fs.writeFileSync(localPath, `${JSON.stringify({
+    type: "session_meta",
+    payload: { id: "local-task", originator: "codex-tui", source: "cli" },
+  })}\n`);
+
+  const outbound = [];
+  const localForwards = [];
+  const localResumeRequests = [];
+  let resolveLocalResume;
+  const follower = createDesktopIpcActionFollower({
+    socketPath: () => [],
+    sendApplicationResponse(message) { outbound.push(JSON.parse(message)); },
+    forwardToLocalCodex(message) { localForwards.push(JSON.parse(message)); },
+    resumeThreadLocally(message) {
+      localResumeRequests.push(message);
+      if (message.params.threadId !== "local-task") throw new Error("Local task unavailable");
+      return new Promise((resolve) => { resolveLocalResume = resolve; });
+    },
+    async readThreadMetadata(threadId) {
+      if (threadId === "local-task") return { thread: { id: threadId, path: localPath, turns: [] } };
+      if (threadId === "read-failed") throw new Error("read-only metadata unavailable");
+      if (threadId === "mismatch-task") return { thread: { id: "local-task", path: localPath, turns: [] } };
+      return { thread: { id: threadId, turns: [] } };
+    },
+  });
+  t.after(() => follower.stopAll());
+
+  for (const threadId of ["local-task", "unknown-task", "read-failed", "mismatch-task"]) {
+    assert.equal(follower.observeInbound(JSON.stringify({
+      id: `resume-${threadId}`,
+      method: "thread/resume",
+      params: { threadId, excludeTurns: true },
+    })), true);
+  }
+  assert.equal(follower.observeInbound(JSON.stringify({
+    id: "settings-mismatch-task", method: "thread/settings/update",
+    params: { threadId: "mismatch-task", model: "gpt-test" },
+  })), true);
+  assert.equal(follower.observeInbound(JSON.stringify({
+    id: "settings-local-before-resume-ack", method: "thread/settings/update",
+    params: { threadId: "local-task", model: "gpt-test" },
+  })), true);
+  assert.equal(follower.observeInbound(JSON.stringify({
+    id: "review-local-before-resume-ack", method: "review/start",
+    params: { threadId: "local-task" },
+  })), true);
+  await waitFor(() => typeof resolveLocalResume === "function"
+    && outbound.some((message) => message.id === "settings-mismatch-task"));
+  assert.deepEqual(localForwards, [], "settings waits for the writer acquisition response");
+  resolveLocalResume({ thread: { id: "local-task", turns: [] } });
+  await waitFor(() => localForwards.length === 2 && outbound.length === 5);
+  assert.deepEqual(localForwards.map((message) => message.id).sort(), [
+    "review-local-before-resume-ack", "settings-local-before-resume-ack",
+  ]);
+  assert.equal(outbound.find((message) => message.id === "resume-local-task")?.result?.thread?.id, "local-task");
+  assert.deepEqual(localResumeRequests.map((request) => request.params.threadId).sort(), ["local-task", "unknown-task"]);
+  assert.equal(outbound.find((message) => message.id === "resume-unknown-task")?.error?.code, -32000);
+  assert.equal(outbound.find((message) => message.id === "resume-read-failed")?.error?.code, -32000);
+  assert.equal(outbound.find((message) => message.id === "resume-mismatch-task")?.error?.code, -32000);
+  assert.equal(outbound.find((message) => message.id === "settings-mismatch-task")?.error?.code, -32000);
+  assert.equal(outbound.find((message) => message.id === "settings-local-before-resume-ack"), undefined);
+});
+
+test("desktop IPC follower recovers an active-writer race only after Desktop's current role answers", async (t) => {
+  let ownerProbes = 0;
+  const transport = createFakeIpcTransport({
+    onRequest(frame, socket) {
+      if (frame.method === "thread-owner-discovery") {
+        ownerProbes += 1;
+        answerDesktopOwnerProbe(frame, socket, { owner: ownerProbes > 1 });
+      } else {
+        answerDesktopOwnerProbe(frame, socket);
+      }
+    },
+  });
+  const outbound = [];
+  let localResumeAttempts = 0;
+  const follower = createDesktopIpcActionFollower({
+    netModule: transport.netModule,
+    socketPath: "/unused/ipc.sock",
+    sendApplicationResponse(message) { outbound.push(JSON.parse(message)); },
+    async readThreadMetadata(threadId) {
+      return { thread: { id: threadId, source: "vscode", originator: "Codex Desktop" } };
+    },
+    async resumeThreadLocally() {
+      localResumeAttempts += 1;
+      const error = new Error("Task already has an active writer");
+      error.code = -32600;
+      throw error;
+    },
+    requestTimeoutMs: 100,
+  });
+  t.after(() => follower.stopAll());
+
+  assert.equal(follower.observeInbound(JSON.stringify({
+    id: "resume-active-writer-race", method: "thread/resume",
+    params: { threadId: "writer-race-task", excludeTurns: true },
+  })), true);
+  await waitFor(() => outbound.some((message) => message.id === "resume-active-writer-race"));
+  const response = outbound.find((message) => message.id === "resume-active-writer-race");
+  assert.equal(response.error, undefined);
+  assert.equal(response.result?.remodexDesktopIpcMirror, true);
+  assert.equal(ownerProbes, 2);
+  assert.equal(localResumeAttempts, 1);
+  assert.equal(transport.state.frames.filter((frame) =>
+    frame.method === "thread-follower-load-complete-history").length, 1);
+});
+
+test("desktop IPC follower does not acquire a local writer after shutdown", async () => {
+  const outbound = [];
+  let resolveMetadata;
+  let localResumeAttempts = 0;
+  const follower = createDesktopIpcActionFollower({
+    socketPath: () => [],
+    sendApplicationResponse(message) { outbound.push(JSON.parse(message)); },
+    readThreadMetadata() { return new Promise((resolve) => { resolveMetadata = resolve; }); },
+    async resumeThreadLocally() {
+      localResumeAttempts += 1;
+      return { thread: { id: "shutdown-task", turns: [] } };
+    },
+  });
+
+  assert.equal(follower.observeInbound(JSON.stringify({
+    id: "resume-before-shutdown", method: "thread/resume",
+    params: { threadId: "shutdown-task", excludeTurns: true },
+  })), true);
+  await waitFor(() => typeof resolveMetadata === "function");
+  follower.stopAll();
+  resolveMetadata({ thread: { id: "shutdown-task", source: "cli", turns: [] } });
+  await wait(5);
+  assert.equal(localResumeAttempts, 0);
+  assert.deepEqual(outbound, []);
+});
+
+for (const ownerAnswer of ["rejected", "timed-out"]) {
+  test(`desktop IPC follower fails closed when the active writer's owner is ${ownerAnswer}`, async (t) => {
+    const transport = createFakeIpcTransport({
+      onRequest(frame, socket) {
+        if (ownerAnswer === "rejected") answerDesktopOwnerProbe(frame, socket, { owner: false });
+      },
+    });
+    const outbound = [];
+    const localForwards = [];
+    const follower = createDesktopIpcActionFollower({
+      netModule: transport.netModule,
+      socketPath: "/unused/ipc.sock",
+      sendApplicationResponse(message) { outbound.push(JSON.parse(message)); },
+      forwardToLocalCodex(message) { localForwards.push(JSON.parse(message)); },
+      async readThreadMetadata(threadId) {
+        return { thread: { id: threadId, source: "vscode", originator: "Codex Desktop" } };
+      },
+      async resumeThreadLocally() {
+        const error = new Error("Task already has an active writer");
+        error.code = -32600;
+        throw error;
+      },
+      requestTimeoutMs: 25,
+      ownershipProbeTimeoutMs: 10,
+    });
+    t.after(() => follower.stopAll());
+
+    const threadId = `unavailable-owner-${ownerAnswer}`;
+    assert.equal(follower.observeInbound(JSON.stringify({
+      id: "resume-unavailable", method: "thread/resume",
+      params: { threadId, excludeTurns: true },
+    })), true);
+    assert.equal(follower.observeInbound(JSON.stringify({
+      id: "settings-unavailable", method: "thread/settings/update",
+      params: { threadId, model: "gpt-test" },
+    })), true);
+    await waitFor(() => outbound.some((message) => message.id === "resume-unavailable"));
+    assert.match(outbound.find((message) => message.id === "resume-unavailable")?.error?.message || "", /owner is unavailable/);
+    await waitFor(() => outbound.some((message) => message.id === "settings-unavailable"));
+    assert.equal(outbound.find((message) => message.id === "settings-unavailable")?.error?.code, -32000);
+    assert.deepEqual(localForwards, []);
+    assert.equal(transport.state.frames.some((frame) =>
+      frame.method === "thread-follower-update-thread-settings"), false);
+
+    // Even after the ownership probe has expired, no later phone mutation may
+    // fall through to the separate local app-server without a new resume.
+    await wait(15);
+    const lateMethods = [
+      "turn/start", "turn/steer", "turn/interrupt", "thread/compact/start",
+      "review/start", "thread/archive",
+    ];
+    for (const method of lateMethods) {
+      assert.equal(follower.observeInbound(JSON.stringify({
+        id: `late-${method}`, method, params: { threadId },
+      })), true, method);
+    }
+    assert.equal(follower.observeInbound(JSON.stringify({
+      method: "turn/start", params: { threadId },
+    })), true, "a mutation notification must not bypass the owner guard");
+    assert.equal(follower.observeInbound(JSON.stringify({
+      id: "late-history-read", method: "thread/items/list", params: { threadId },
+    })), false, "read-only history remains available");
+    assert.deepEqual(localForwards, []);
+    assert.equal(transport.state.frames.some((frame) =>
+      frame.method.startsWith("thread-follower-") && frame.method !== "thread-follower-load-complete-history"), false);
+    for (const method of lateMethods) {
+      assert.equal(outbound.find((message) => message.id === `late-${method}`)?.error?.code, -32000, method);
+    }
+  });
+}
+
+test("desktop IPC follower prefers a live Desktop snapshot over a local-origin metadata hint", async (t) => {
+  const transport = createFakeIpcTransport();
+  const outbound = [];
+  const localForwards = [];
+  let resolveMetadata;
+  const follower = createDesktopIpcActionFollower({
+    netModule: transport.netModule,
+    socketPath: "/unused/ipc.sock",
+    sendApplicationResponse(message) { outbound.push(JSON.parse(message)); },
+    forwardToLocalCodex(message) { localForwards.push(JSON.parse(message)); },
+    readThreadMetadata() { return new Promise((resolve) => { resolveMetadata = resolve; }); },
+  });
+  t.after(() => follower.stopAll());
+
+  const threadId = "cli-origin-now-desktop-owned";
+  assert.equal(follower.observeInbound(JSON.stringify({
+    id: "resume-owner-race", method: "thread/resume",
+    params: { threadId, excludeTurns: true },
+  })), true);
+  await waitFor(() => typeof resolveMetadata === "function" && transport.state.socket);
+  emitFrame(transport.state.socket, backgroundConversationSnapshot(threadId, "completed"));
+  await waitFor(() => follower.hasLiveThreadState(threadId));
+  resolveMetadata({ thread: { id: threadId, source: "cli", originator: "codex-tui", turns: [] } });
+  await waitFor(() => outbound.some((message) => message.id === "resume-owner-race"));
+  assert.equal(outbound.find((message) => message.id === "resume-owner-race")?.result?.remodexDesktopIpcMirror, true);
+  assert.deepEqual(localForwards, [], "a live Desktop owner wins over historical CLI provenance");
+});
+
+test("desktop IPC follower does not send known Desktop-origin settings to local Codex when IPC is absent", async (t) => {
+  const outbound = [];
+  const localForwards = [];
+  const follower = createDesktopIpcActionFollower({
+    socketPath: () => [],
+    netModule: { createConnection() { throw new Error("No socket should be opened"); } },
+    sendApplicationResponse(message) { outbound.push(JSON.parse(message)); },
+    forwardToLocalCodex(message) { localForwards.push(JSON.parse(message)); },
+    isLocallyOwnedThread(threadId) { return threadId === "desktop-task-now-local"; },
+    requestTimeoutMs: 100,
+  });
+  t.after(() => follower.stopAll());
+
+  follower.observeThreadListResponse({ data: [{ id: "known-desktop-task", source: "vscode" }] });
+  follower.observeThreadMetadata({ id: "desktop-task-now-local", source: "vscode" });
+  assert.equal(follower.observeInbound(JSON.stringify({
+    id: "local-owner-settings",
+    method: "thread/settings/update",
+    params: { threadId: "desktop-task-now-local", model: "gpt-test" },
+  })), false);
+  assert.equal(follower.observeInbound(JSON.stringify({
+    id: "known-desktop-settings",
+    method: "thread/settings/update",
+    params: { threadId: "known-desktop-task", model: "gpt-test" },
+  })), true);
+  await waitFor(() => outbound.some((message) => message.id === "known-desktop-settings"));
+  assert.equal(outbound.find((message) => message.id === "known-desktop-settings")?.error?.code, -32000);
+  assert.deepEqual(localForwards, []);
 });
 
 test("desktop IPC follower ignores stale positive discovery after live owner claims a thread", async (t) => {
@@ -4993,7 +5750,7 @@ test("desktop IPC follower cancels held turns when the live owner removes a thre
   );
 });
 
-test("desktop IPC follower keeps held phone turns queued when discovery denies ownership", async (t) => {
+test("desktop IPC follower keeps held phone turns queued until the routed reply", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-probe-denied-");
   const serverFrames = [];
   const localForwards = [];
@@ -5035,9 +5792,10 @@ test("desktop IPC follower keeps held phone turns queued when discovery denies o
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
+  const outbound = [];
   const follower = createDesktopIpcActionFollower({
     socketPath,
-    sendApplicationResponse() {},
+    sendApplicationResponse(message) { outbound.push(JSON.parse(message)); },
     forwardToLocalCodex(rawMessage) {
       localForwards.push(JSON.parse(rawMessage));
     },
@@ -5068,9 +5826,10 @@ test("desktop IPC follower keeps held phone turns queued when discovery denies o
     false
   );
 
-  // The timer-routed request can still fall back locally after a real no-client-found.
-  await waitFor(() => localForwards.length > 0, 1_000);
-  assert.equal(localForwards[0].id, "phone-turn-start-denied");
+  // A no-client-found reply may also originate inside a Desktop handler.
+  await waitFor(() => outbound.some((message) => message.id === "phone-turn-start-denied"), 1_000);
+  assert.equal(outbound.find((message) => message.id === "phone-turn-start-denied")?.error?.code, -32000);
+  assert.deepEqual(localForwards, []);
   assert.equal(
     serverFrames.some((frame) => frame.method === "thread-follower-start-turn"),
     true
@@ -5078,15 +5837,14 @@ test("desktop IPC follower keeps held phone turns queued when discovery denies o
 });
 
 for (const method of ["turn/start", "thread/settings/update"]) {
-test(`desktop IPC follower routes held ${method} locally after a definitive no-owner response`, async (t) => {
+test(`desktop IPC follower does not replay held ${method} after an ambiguous no-client-found response`, async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-hold-timeout-");
   const serverFrames = [];
   const localForwards = [];
   let serverSocket = null;
 
-  // Models Codex Desktop's real router: client-origin discovery probes are
-  // ignored, but routed requests get a no-client-found error when nobody owns
-  // the thread.
+  // A handled Desktop request can return the same response as the router's
+  // no-owner case, without any provenance field to distinguish the two.
   const server = net.createServer((socket) => {
     serverSocket = socket;
     attachFrameReader(socket, (frame) => {
@@ -5117,9 +5875,10 @@ test(`desktop IPC follower routes held ${method} locally after a definitive no-o
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
+  const outbound = [];
   const follower = createDesktopIpcActionFollower({
     socketPath,
-    sendApplicationResponse() {},
+    sendApplicationResponse(message) { outbound.push(JSON.parse(message)); },
     forwardToLocalCodex(rawMessage) {
       localForwards.push(JSON.parse(rawMessage));
     },
@@ -5142,9 +5901,9 @@ test(`desktop IPC follower routes held ${method} locally after a definitive no-o
   }));
   assert.equal(handled, true);
 
-  await waitFor(() => localForwards.length > 0, 1_000);
-  assert.equal(localForwards[0].id, "phone-turn-start-timeout");
-  assert.equal(localForwards[0].method, method);
+  await waitFor(() => outbound.some((message) => message.id === "phone-turn-start-timeout"), 1_000);
+  assert.equal(outbound.find((message) => message.id === "phone-turn-start-timeout")?.error?.code, -32000);
+  assert.deepEqual(localForwards, []);
 });
 
 }

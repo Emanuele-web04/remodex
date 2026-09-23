@@ -17,6 +17,8 @@ struct ComposerAttachmentMenu: View {
     let isPlanModeArmed: Bool
     let runtimeState: TurnComposerRuntimeState
     let runtimeActions: TurnComposerRuntimeActions
+    var allowsPlanMode: Bool = true
+    var allowsFastMode: Bool = true
     let remainingAttachmentSlots: Int
     let isInteractionLocked: Bool
     let onSetPlanModeArmed: (Bool) -> Void
@@ -45,18 +47,19 @@ struct ComposerAttachmentMenu: View {
     }
 
     private func attachmentMenu() -> UIMenu {
-        var modeActions: [UIMenuElement] = [
-            UIAction(
+        var modeActions: [UIMenuElement] = []
+        if allowsPlanMode {
+            modeActions.append(UIAction(
                 title: "Plan mode",
                 image: RemodexIcon.menuUIImage(systemName: "remodex.plan-mode"),
                 state: isPlanModeArmed ? .on : .off
             ) { _ in
                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
                 onSetPlanModeArmed(!isPlanModeArmed)
-            },
-        ]
+            })
+        }
 
-        if runtimeState.supportsFastMode {
+        if allowsFastMode && runtimeState.supportsFastMode {
             modeActions.append(
                 UIAction(
                     title: "Fast Mode",
@@ -88,10 +91,12 @@ struct ComposerAttachmentMenu: View {
             },
         ]
 
-        return UIMenu(children: [
-            UIMenu(options: [.displayInline], children: modeActions),
-            UIMenu(options: [.displayInline], children: attachmentActions),
-        ])
+        var sections: [UIMenuElement] = []
+        if !modeActions.isEmpty {
+            sections.append(UIMenu(options: [.displayInline], children: modeActions))
+        }
+        sections.append(UIMenu(options: [.displayInline], children: attachmentActions))
+        return UIMenu(children: sections)
     }
 
     // Toggling Fast Mode from the plus menu mirrors the runtime speed menu without adding another visible pill.

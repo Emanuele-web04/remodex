@@ -172,6 +172,10 @@ function createDesktopIpcLiveOwner({
   // the requested cwd so notification-only thread/started events pair correctly.
   const pendingThreadStartRequestIds = new Map();
   const pendingThreadReadRequestIds = new Set();
+  // A forwarded resume transfers an existing task to this app-server only
+  // after its matching response succeeds. Desktop-owned resumes are served by
+  // the follower before they reach this observer.
+  const pendingThreadResumeRequestIds = new Map();
   const pendingThreadHydrationsByThreadId = new Map();
   // Unknown existing threads need a real history baseline before the first
   // Desktop snapshot; any seeded partial state can replace all desktop rows.
@@ -241,7 +245,14 @@ function createDesktopIpcLiveOwner({
     const method = readString(message?.method);
     if (THREAD_READ_METHODS.has(method)) {
       if (message?.id != null) {
-        pendingThreadReadRequestIds.add(String(message.id));
+        if (method === "thread/resume") {
+          const threadId = readThreadIdFromParams(message?.params);
+          if (threadId) {
+            pendingThreadResumeRequestIds.set(String(message.id), threadId);
+          }
+        } else {
+          pendingThreadReadRequestIds.add(String(message.id));
+        }
       }
       markThreadReadByPhone(readThreadIdFromParams(message?.params));
       return;
@@ -352,6 +363,33 @@ function createDesktopIpcLiveOwner({
       }
     }
 
+    if (responseId && pendingThreadResumeRequestIds.has(responseId)) {
+      const requestedThreadId = pendingThreadResumeRequestIds.get(responseId);
+      pendingThreadResumeRequestIds.delete(responseId);
+      const thread = message.error == null
+        && isPlainJSONObject(message.result?.thread)
+        && message.result.remodexDesktopIpcMirror !== true
+        ? message.result.thread
+        : null;
+      if (readString(thread?.id) === requestedThreadId) {
+        const cachedThread = cachedThreadsByThreadId.get(requestedThreadId);
+        const hasResumeHistory = Array.isArray(thread.turns) && thread.turns.length > 0;
+        const hasCachedHistory = Array.isArray(cachedThread?.turns) && cachedThread.turns.length > 0;
+        markOwnedThread(requestedThreadId);
+        if (!hasResumeHistory && hasCachedHistory) {
+          upsertConversationFromThread(cachedThread);
+        }
+        upsertConversationFromThread(thread);
+        if (!hasResumeHistory && !hasCachedHistory) {
+          // Phone resumes normally use excludeTurns. Wait for complete history
+          // before broadcasting the first Desktop snapshot.
+          threadsAwaitingInitialHistoryByThreadId.add(requestedThreadId);
+          requestInitialHistoryBaselineIfDue(requestedThreadId);
+        }
+        scheduleSnapshot(requestedThreadId);
+      }
+    }
+
     if (responseId && pendingThreadStartRequestIds.has(responseId)) {
       pendingThreadStartRequestIds.delete(responseId);
       const thread = readThreadFromResponse(message);
@@ -415,6 +453,7 @@ function createDesktopIpcLiveOwner({
     dirtyThreadIds.clear();
     pendingThreadStartRequestIds.clear();
     pendingThreadReadRequestIds.clear();
+    pendingThreadResumeRequestIds.clear();
     pendingThreadHydrationsByThreadId.clear();
     threadsAwaitingInitialHistoryByThreadId.clear();
     initialHistoryRetryAfterByThreadId.clear();

@@ -16,9 +16,10 @@ struct TurnComposerRuntimeState: Equatable {
     var serviceTiers: [CodexServiceTier] = []
     var settingsStatus: String? = nil
     var inheritsServiceTier = false
+    var unselectedReasoningTitle = "Select reasoning"
 
     var selectedReasoningTitle: String {
-        effectiveReasoningEffort.map(TurnComposerMetaMapper.reasoningTitle(for:)) ?? "Select reasoning"
+        effectiveReasoningEffort.map(TurnComposerMetaMapper.reasoningTitle(for:)) ?? unselectedReasoningTitle
     }
 
     var showsFastModeBadgeOnPill: Bool {

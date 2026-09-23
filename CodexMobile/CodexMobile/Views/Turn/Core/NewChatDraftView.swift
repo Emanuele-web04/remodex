@@ -71,6 +71,10 @@ struct NewChatDraftView: View {
     @State private var macHandoffErrorMessage: String?
     @State private var isDeferringSendForFocusDismissal = false
     @State private var draftRuntimeMode: NewChatDraftRuntimeMode = .local
+    @State private var selectedRuntimeProvider: CodexRuntimeProvider = .codex
+    @State private var selectedOpenCodeModelID: String?
+    @State private var selectedOpenCodeVariantID: String?
+    @State private var openCodeModelsError: String?
     @State private var selectedWorktreeBaseBranch: String?
     @State private var isShowingCreateBranchPrompt = false
     @State private var newDraftBranchName = ""
@@ -163,6 +167,13 @@ struct NewChatDraftView: View {
             voiceInput.clearReconnectRecoveryIfNeeded()
             guard !wasConnected, isConnected else { return }
             refreshDraftGitStateIfNeeded()
+            if selectedRuntimeProvider == .opencode { loadOpenCodeModels() }
+        }
+        .onChange(of: selectedRuntimeProvider) { _, provider in
+            if provider == .opencode {
+                viewModel.setPlanModeArmed(false)
+                loadOpenCodeModels()
+            }
         }
         .onChange(of: scenePhase) { _, phase in
             guard phase != .active else { return }
@@ -320,6 +331,38 @@ struct NewChatDraftView: View {
             .accessibilityLabel("Select folder")
             .accessibilityValue(folderPillLabel)
 
+            UIKitMenuButton {
+                draftContextRowLabel(title: selectedRuntimeProvider == .codex ? "Codex" : "OpenCode") {
+                    providerIcon
+                }
+            } menu: {
+                providerMenu()
+            }
+            .accessibilityLabel("Runtime provider")
+            .accessibilityValue(selectedRuntimeProvider == .codex ? "Codex" : "OpenCode")
+
+            if selectedRuntimeProvider == .opencode {
+                UIKitMenuButton {
+                    draftContextRowLabel(title: openCodeModelRowTitle) {
+                        RemodexIcon.image(systemName: "cpu", size: 19)
+                    }
+                } menu: {
+                    openCodeModelMenu()
+                }
+                .accessibilityLabel("OpenCode model")
+                .accessibilityValue(selectedOpenCodeModel.map { "\($0.displayName), \($0.tier.title)" } ?? "No model selected")
+
+                if let openCodeModelsError {
+                    Text(openCodeModelsError)
+                        .font(AppFont.caption())
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 8)
+                    Button("Retry OpenCode models") { loadOpenCodeModels(force: true) }
+                        .font(AppFont.caption(weight: .semibold))
+                        .padding(.horizontal, 8)
+                }
+            }
+
             if showsGitContextRows {
                 UIKitMenuButton {
                     draftContextRowLabel(title: draftRuntimeMode == .newWorktree ? "New worktree" : "Work locally") {
@@ -367,6 +410,85 @@ struct NewChatDraftView: View {
         .padding(.vertical, 8)
         .padding(.horizontal, 8)
         .contentShape(Rectangle())
+    }
+
+    private var providerIcon: some View {
+        RuntimeProviderIcon(
+            provider: selectedRuntimeProvider,
+            size: 20,
+            color: draftContextRowForeground
+        )
+    }
+
+    private var selectedOpenCodeModel: OpenCodeModelOption? {
+        codex.openCodeModel(id: selectedOpenCodeModelID)
+    }
+
+    private var openCodeModelRowTitle: String {
+        if let selectedOpenCodeModel {
+            return selectedOpenCodeModel.displayName
+        }
+        return codex.isLoadingOpenCodeModels ? "Loading OpenCode models…" : "Select OpenCode model"
+    }
+
+    private func providerMenu() -> UIMenu {
+        let codexAction = UIAction(title: "Codex", state: selectedRuntimeProvider == .codex ? .on : .off) { _ in
+            selectedRuntimeProvider = .codex
+        }
+        let openCodeAction = UIAction(title: "OpenCode", state: selectedRuntimeProvider == .opencode ? .on : .off) { _ in
+            selectedRuntimeProvider = .opencode
+        }
+        return UIMenu(options: [.displayInline, .singleSelection], children: [codexAction, openCodeAction])
+    }
+
+    // One submenu per tier keeps the long Zen catalog from burying Free and Go;
+    // the tier holding the current pick shows it as the submenu subtitle.
+    private func openCodeModelMenu() -> UIMenu {
+        let sections: [UIMenuElement] = OpenCodeModelTier.allCases.compactMap { tier in
+            let models = codex.openCodeModels.filter { $0.tier == tier }
+            guard !models.isEmpty else { return nil }
+            let actions = models.map { model in
+                UIAction(
+                    title: model.displayName,
+                    state: selectedOpenCodeModelID == model.id ? .on : .off
+                ) { _ in
+                    selectedOpenCodeModelID = model.id
+                    selectedOpenCodeVariantID = nil
+                }
+            }
+            let menu = UIMenu(title: tier.title, children: actions)
+            menu.subtitle = models.first { $0.id == selectedOpenCodeModelID }?.displayName
+                ?? "\(models.count) models"
+            return menu
+        }
+        let retry = UIAction(title: "Refresh models", image: UIImage(systemName: "arrow.clockwise")) { _ in
+            loadOpenCodeModels(force: true)
+        }
+        return UIMenu(children: sections + [retry])
+    }
+
+    private func loadOpenCodeModels(force: Bool = false) {
+        guard codex.isConnected, !codex.isLoadingOpenCodeModels, force || codex.openCodeModels.isEmpty else { return }
+        openCodeModelsError = nil
+        Task { @MainActor in
+            do {
+                let openCodeModels = try await codex.listOpenCodeModels()
+                if let selectedOpenCodeModelID,
+                   !openCodeModels.contains(where: { $0.id == selectedOpenCodeModelID }) {
+                    self.selectedOpenCodeModelID = nil
+                    selectedOpenCodeVariantID = nil
+                } else if let selectedOpenCodeVariantID,
+                          let model = openCodeModels.first(where: { $0.id == selectedOpenCodeModelID }),
+                          !model.supportsVariant(selectedOpenCodeVariantID) {
+                    self.selectedOpenCodeVariantID = nil
+                }
+                if openCodeModels.isEmpty {
+                    openCodeModelsError = "No OpenCode Zen, Go, or Free models are available. Set up OpenCode on your Mac and retry."
+                }
+            } catch {
+                openCodeModelsError = "\(error.localizedDescription) Install OpenCode on your Mac, sign in to Zen or Go if needed, and retry."
+            }
+        }
     }
 
     private var toolbarTitleLabel: some View {
@@ -810,6 +932,9 @@ struct NewChatDraftView: View {
                 isInputFocused: $isInputFocused,
                 orderedModelOptions: orderedModelOptions,
                 selectedModelTitle: selectedModelTitle,
+                openCodeVariantID: selectedOpenCodeVariantID,
+                onSelectOpenCodeVariant: { selectedOpenCodeVariantID = $0 },
+                isSendDisabledOverride: selectedRuntimeProvider == .opencode && selectedOpenCodeModel == nil,
                 reasoningDisplayOptions: reasoningDisplayOptions,
                 // The draft's folder/runtime/branch rows own Git context now, so
                 // the composer's collapsible cluster stays off to avoid two
@@ -872,7 +997,9 @@ struct NewChatDraftView: View {
         CodexThread(
             id: route.id,
             title: "New thread",
-            cwd: selectedProjectPath
+            cwd: selectedProjectPath,
+            model: selectedRuntimeProvider == .opencode ? selectedOpenCodeModelID : nil,
+            runtimeProvider: selectedRuntimeProvider
         )
     }
 
@@ -894,6 +1021,9 @@ struct NewChatDraftView: View {
     }
 
     private var selectedModelTitle: String {
+        if selectedRuntimeProvider == .opencode {
+            return selectedOpenCodeModel?.displayName ?? "Select OpenCode model"
+        }
         if let selectedModel = codex.selectedModelOption() {
             return TurnComposerMetaMapper.modelTitle(for: selectedModel)
         }
@@ -979,7 +1109,11 @@ struct NewChatDraftView: View {
 
     private func sendDraft() {
         guard !isVoiceInputActive else { return }
+        guard selectedRuntimeProvider == .codex || selectedOpenCodeModel != nil else { return }
         guard !isDeferringSendForFocusDismissal else { return }
+        let frozenProvider = selectedRuntimeProvider
+        let frozenOpenCodeModelID = selectedRuntimeProvider == .opencode ? selectedOpenCodeModelID : nil
+        let frozenOpenCodeVariantID = selectedRuntimeProvider == .opencode ? selectedOpenCodeVariantID : nil
         isDeferringSendForFocusDismissal = true
         isInputFocused = false
 
@@ -1002,7 +1136,10 @@ struct NewChatDraftView: View {
                 try await WorktreeFlowCoordinator.startNewWorktreeChat(
                     preferredProjectPath: projectPath,
                     baseBranch: baseBranch,
-                    codex: codex
+                    codex: codex,
+                    runtimeProvider: frozenProvider,
+                    openCodeModelID: frozenOpenCodeModelID,
+                    openCodeVariantID: frozenOpenCodeVariantID
                 )
             }
         }
@@ -1014,6 +1151,9 @@ struct NewChatDraftView: View {
                 subscriptions: subscriptions,
                 draftThreadID: route.id,
                 preferredProjectPath: selectedProjectPath,
+                runtimeProvider: frozenProvider,
+                openCodeModelID: frozenOpenCodeModelID,
+                openCodeVariantID: frozenOpenCodeVariantID,
                 makeThread: makeWorktreeThread,
                 onThreadCreated: openThread
             )

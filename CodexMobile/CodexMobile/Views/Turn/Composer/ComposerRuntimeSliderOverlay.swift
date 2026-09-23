@@ -36,6 +36,7 @@ struct ComposerRuntimeSliderOverlay: View {
     let orderedModelOptions: [CodexModelOption]
     let selectedModelID: String?
     let isLoadingModels: Bool
+    var allowsModelSelection: Bool = true
     let onDismiss: () -> Void
 
     // Drives the whole in/out animation: the backdrop fades while the content
@@ -121,30 +122,41 @@ struct ComposerRuntimeSliderOverlay: View {
                 fastModeToggle
             }
 
-            UIKitMenuButton {
-                HStack(spacing: 6) {
-                    Text(modelDisplayTitle)
-                        .font(AppFont.title3(weight: .semibold))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-
-                    if let effortDisplayTitle {
-                        Text(effortDisplayTitle)
-                            .font(AppFont.title3(weight: .regular))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-
-                    RemodexIcon.image(systemName: "chevron.right", size: 14, weight: .semibold)
-                        .foregroundStyle(.secondary)
+            if allowsModelSelection {
+                UIKitMenuButton {
+                    modelLabel(showsChevron: true)
+                } menu: {
+                    modelMenu()
                 }
-                .contentShape(Rectangle())
-            } menu: {
-                modelMenu()
+                .accessibilityLabel(modelMenuAccessibilityLabel)
+            } else {
+                modelLabel(showsChevron: false)
+                    .accessibilityLabel(modelMenuAccessibilityLabel)
             }
-            .accessibilityLabel(modelMenuAccessibilityLabel)
         }
         .frame(maxWidth: .infinity)
+    }
+
+    private func modelLabel(showsChevron: Bool) -> some View {
+        HStack(spacing: 6) {
+            Text(modelDisplayTitle)
+                .font(AppFont.title3(weight: .semibold))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+
+            if let effortDisplayTitle {
+                Text(effortDisplayTitle)
+                    .font(AppFont.title3(weight: .regular))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            if showsChevron {
+                RemodexIcon.image(systemName: "chevron.right", size: 14, weight: .semibold)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .contentShape(Rectangle())
     }
 
     // One-tap fast-mode switch: outline zap = normal speed, solid zap = fast.

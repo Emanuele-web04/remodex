@@ -38,7 +38,7 @@ struct SystemMessageContentView: View {
             userInputPromptSystemView
         case .autoApprovalReview:
             autoApprovalReviewSystemView
-        case .chat:
+        case .chat, .asyncUserInputAnswer:
             if isContextCompactionNotice(text) {
                 contextCompactionNoticeView(text: text)
             } else {

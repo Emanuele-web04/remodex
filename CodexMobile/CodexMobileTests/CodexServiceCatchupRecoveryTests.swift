@@ -116,6 +116,253 @@ final class CodexServiceCatchupRecoveryTests: XCTestCase {
         XCTAssertFalse(service.messages(for: threadID).isEmpty)
     }
 
+    func testOpenCodeOlderPageFillsGapAfterCachedPhoneTurn() async throws {
+        let service = makeService()
+        let threadID = "opencode:ses_history_gap"
+        service.isConnected = true
+        service.isInitialized = true
+        service.supportsTurnPagination = true
+        service.activeThreadId = threadID
+        service.upsertThread(CodexThread(id: threadID, title: "OpenCode", runtimeProvider: .opencode))
+
+        func turn(_ number: Int) -> JSONValue {
+            let timestamp = 1_790_000_000_000 + number * 1_000
+            return .object([
+                "id": .string("opencode-turn:msg_u\(number)"),
+                "status": .string("completed"),
+                "createdAt": .int(timestamp),
+                "items": .array([
+                    .object([
+                        "id": .string("prt_u\(number)"),
+                        "type": .string("message"),
+                        "role": .string("user"),
+                        "createdAt": .int(timestamp),
+                        "content": .array([.object([
+                            "type": .string("input_text"),
+                            "text": .string("U\(number)"),
+                        ])]),
+                    ]),
+                    .object([
+                        "id": .string("prt_a\(number)"),
+                        "type": .string("agentMessage"),
+                        "text": .string("A\(number)"),
+                        "createdAt": .int(timestamp + 1),
+                    ]),
+                ]),
+            ])
+        }
+
+        // The first phone turn was already hydrated, including real part IDs.
+        // Terminal turns 2...7 arrive while the phone is away.
+        let cached = service.decodeMessagesFromThreadRead(
+            threadId: threadID,
+            threadObject: ["id": .string(threadID), "turns": .array([turn(1)])]
+        )
+        service.messagesByThread[threadID] = service.mergeHistoryMessages([], cached)
+
+        var pageCount = 0
+        service.requestTransportOverride = { method, params in
+            XCTAssertEqual(method, "thread/turns/list")
+            XCTAssertEqual(params?.objectValue?["sortDirection"]?.stringValue, "desc")
+            pageCount += 1
+            let page = pageCount == 1
+                ? [7, 6, 5, 4, 3].map(turn)
+                : [2, 1].map(turn)
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object([
+                    "data": .array(page),
+                    "nextCursor": pageCount == 1
+                        ? .string("opencode-turn-cursor:desc:opencode-turn%3Amsg_u3:msg_native%3Abefore")
+                        : .null,
+                ]),
+                includeJSONRPC: false
+            )
+        }
+
+        _ = try await service.loadThreadHistoryIfNeeded(threadId: threadID, forceRefresh: true)
+        XCTAssertEqual(service.messages(for: threadID).filter { $0.role == .user }.map(\.text),
+                       ["U1", "U3", "U4", "U5", "U6", "U7"])
+        await service.loadOlderThreadHistoryPage(threadId: threadID)
+
+        let messages = service.messages(for: threadID)
+        XCTAssertEqual(messages.filter { $0.role == .user }.map(\.text),
+                       ["U1", "U2", "U3", "U4", "U5", "U6", "U7"])
+        XCTAssertEqual(messages.filter { $0.role == .assistant }.map(\.text),
+                       ["A1", "A2", "A3", "A4", "A5", "A6", "A7"])
+        XCTAssertEqual(Set(messages.compactMap(\.itemId)).count, 14)
+        XCTAssertEqual(pageCount, 2)
+    }
+
+    func testOpenCodeOlderPageInsertionReconcilesCachedTurnAtCursorBoundary() throws {
+        let threadID = "opencode:ses_history_insertion"
+        func row(_ number: Int, role: CodexMessageRole, source: String, order: Int) -> CodexMessage {
+            let marker = role == .user ? "u" : "a"
+            return CodexMessage(
+                id: "\(source)-\(marker)\(number)",
+                threadId: threadID,
+                role: role,
+                text: "\(marker.uppercased())\(number)",
+                turnId: "opencode-turn:msg_u\(number)",
+                itemId: "prt_\(marker)\(number)",
+                orderIndex: order
+            )
+        }
+        func rows(_ numbers: [Int], source: String) -> [CodexMessage] {
+            numbers.flatMap { number in
+                [row(number, role: .user, source: source, order: number * 2),
+                 row(number, role: .assistant, source: source, order: number * 2 + 1)]
+            }
+        }
+        func merged(_ existing: [CodexMessage], _ history: [CodexMessage]) throws -> [CodexMessage] {
+            try CodexService.mergeHistoryMessages(
+                existing,
+                history,
+                activeThreadIDs: [],
+                runningThreadIDs: []
+            )
+        }
+
+        // T1 is already on the phone. The first server page contains T3...T7.
+        let initial = try merged(rows([1], source: "phone"), rows([3, 4, 5, 6, 7], source: "server"))
+        let page = rows([1, 2], source: "server")
+        let insertion = CodexService.openCodeOlderPageInsertion(
+            page: page,
+            existing: initial,
+            cursor: .string("opencode-turn-cursor:desc:opencode-turn%3Amsg_u3:msg_native%3Abefore"),
+            hasNewRows: true,
+            isOpenCodeThread: true
+        )
+        XCTAssertNotNil(insertion)
+        guard let insertion else { return }
+        let result = try merged(insertion.existing, insertion.page)
+        XCTAssertEqual(result.filter { $0.role == .user }.map(\.text),
+                       ["U1", "U2", "U3", "U4", "U5", "U6", "U7"])
+        XCTAssertEqual(result.filter { $0.role == .assistant }.map(\.text),
+                       ["A1", "A2", "A3", "A4", "A5", "A6", "A7"])
+        XCTAssertEqual(result.count, 14)
+        XCTAssertEqual(result.first(where: { $0.itemId == "prt_u1" })?.id, "phone-u1")
+    }
+
+    func testOpenCodeOlderPageInsertionHandlesNoOverlapRepeatedPagesAndLeavesCodexUntouched() throws {
+        let threadID = "opencode:ses_repeated_pages"
+        func row(_ number: Int, source: String) -> CodexMessage {
+            CodexMessage(
+                id: "\(source)-\(number)",
+                threadId: threadID,
+                role: .user,
+                text: "U\(number)",
+                turnId: "opencode-turn:msg_u\(number)",
+                itemId: "prt_u\(number)",
+                orderIndex: number
+            )
+        }
+        func merged(_ existing: [CodexMessage], _ history: [CodexMessage]) throws -> [CodexMessage] {
+            try CodexService.mergeHistoryMessages(
+                existing,
+                history,
+                activeThreadIDs: [],
+                runningThreadIDs: []
+            )
+        }
+        let initial = try merged([row(1, source: "phone")], (5...9).map { row($0, source: "server") })
+        let noOverlapPage = [3, 4].map { row($0, source: "server") }
+        let firstInsertion = CodexService.openCodeOlderPageInsertion(
+            page: noOverlapPage,
+            existing: initial,
+            cursor: .string("opencode-turn-cursor:desc:opencode-turn%3Amsg_u5"),
+            hasNewRows: true,
+            isOpenCodeThread: true
+        )
+        XCTAssertNotNil(firstInsertion)
+        guard let firstInsertion else { return }
+        let afterFirstPage = try merged(firstInsertion.existing, firstInsertion.page)
+        XCTAssertEqual(afterFirstPage.map(\.text), ["U1", "U3", "U4", "U5", "U6", "U7", "U8", "U9"])
+
+        let secondInsertion = CodexService.openCodeOlderPageInsertion(
+            page: [1, 2].map { row($0, source: "server") },
+            existing: afterFirstPage,
+            cursor: .string("opencode-turn-cursor:desc:opencode-turn%3Amsg_u3:msg_native%3Abefore"),
+            hasNewRows: true,
+            isOpenCodeThread: true
+        )
+        XCTAssertNotNil(secondInsertion)
+        guard let secondInsertion else { return }
+        let afterSecondPage = try merged(secondInsertion.existing, secondInsertion.page)
+        XCTAssertEqual(afterSecondPage.map(\.text), (1...9).map { "U\($0)" })
+        XCTAssertEqual(afterSecondPage.count, 9)
+        XCTAssertEqual(afterSecondPage.first?.id, "phone-1")
+
+        XCTAssertNil(CodexService.openCodeOlderPageInsertion(
+            page: noOverlapPage,
+            existing: initial,
+            cursor: .string("opencode-turn-cursor:desc:opencode-turn%3Amsg_u5"),
+            hasNewRows: true,
+            isOpenCodeThread: false
+        ))
+    }
+
+    func testOpenCodeOlderPageRebasesWhenLiveItemArrivesDuringDetachedMerge() throws {
+        let threadID = "opencode:ses_live_during_older_page"
+        func row(_ number: Int, source: String, order: Int) -> CodexMessage {
+            CodexMessage(
+                id: "\(source)-\(number)",
+                threadId: threadID,
+                role: .user,
+                text: "U\(number)",
+                turnId: "opencode-turn:msg_u\(number)",
+                itemId: "prt_u\(number)",
+                orderIndex: order
+            )
+        }
+        func merged(_ existing: [CodexMessage], _ history: [CodexMessage]) throws -> [CodexMessage] {
+            try CodexService.mergeHistoryMessages(
+                existing,
+                history,
+                activeThreadIDs: [],
+                runningThreadIDs: []
+            )
+        }
+        let snapshot = [row(1, source: "phone", order: 0), row(3, source: "server", order: 1)]
+        let page = [row(1, source: "server", order: 0), row(2, source: "server", order: 1)]
+        let cursor: JSONValue = .string("opencode-turn-cursor:desc:opencode-turn%3Amsg_u3")
+        let staleInsertion = CodexService.openCodeOlderPageInsertion(
+            page: page, existing: snapshot, cursor: cursor,
+            hasNewRows: true, isOpenCodeThread: true
+        )
+        XCTAssertNotNil(staleInsertion)
+        guard let staleInsertion else { return }
+        let staleMerge = try merged(staleInsertion.existing, staleInsertion.page)
+
+        // The detached merge above captured its input before a live SSE row arrived.
+        let live = row(4, source: "live", order: 20)
+        let current = snapshot + [live]
+        XCTAssertFalse(staleMerge.contains(where: { $0.id == live.id }))
+        XCTAssertTrue(CodexService.openCodeOlderPageNeedsRebase(
+            isOpenCodeThread: true,
+            snapshotRevision: 1,
+            currentRevision: 2,
+            snapshot: snapshot,
+            current: current
+        ))
+        let freshInsertion = CodexService.openCodeOlderPageInsertion(
+            page: page, existing: current, cursor: cursor,
+            hasNewRows: true, isOpenCodeThread: true
+        )
+        XCTAssertNotNil(freshInsertion)
+        guard let freshInsertion else { return }
+        let rebasedMerge = try merged(freshInsertion.existing, freshInsertion.page)
+        XCTAssertEqual(rebasedMerge.map(\.text), ["U1", "U2", "U3", "U4"])
+        XCTAssertEqual(rebasedMerge.last?.id, live.id)
+        XCTAssertFalse(CodexService.openCodeOlderPageNeedsRebase(
+            isOpenCodeThread: false,
+            snapshotRevision: 1,
+            currentRevision: 2,
+            snapshot: snapshot,
+            current: current
+        ))
+    }
+
     func testJsonlFirstPaintStaysProvisionalUntilCanonicalPageArrives() async throws {
         let service = makeService()
         let threadID = "thread-jsonl-first-paint"

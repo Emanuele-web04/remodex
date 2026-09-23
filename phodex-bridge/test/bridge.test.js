@@ -25,12 +25,77 @@ const {
   normalizeRelayBoundJsonRpcMessage,
   persistBridgePreferences,
   resolveJsonlTurnsListRolloutPathForFallback,
+  routeLocalRuntimeSettingsRequest,
   sanitizeLiveGeneratedImageMessageForRelay,
   sanitizeLiveUserNotification,
   isContextualUserItemNotification,
+  isOpenCodeRequest,
+  mergeOpenCodeThreadsIntoListResponse,
   sanitizeThreadHistoryImagesForRelay,
   shouldSuppressRolloutMirrorForThread,
 } = require("../src/bridge");
+
+test("OpenCode requests route by explicit creation provider or namespaced thread id", () => {
+  const runtime = { handlesThreadId: (id) => id.startsWith("opencode:ses_") };
+  assert.equal(isOpenCodeRequest({ method: "remodex/opencode/models" }, runtime), true);
+  assert.equal(isOpenCodeRequest({ method: "thread/start", params: { runtimeProvider: "opencode" } }, runtime), true);
+  assert.equal(isOpenCodeRequest({ method: "turn/start", params: { threadId: "opencode:ses_123" } }, runtime), true);
+  assert.equal(isOpenCodeRequest({ method: "turn/interrupt", params: { thread_id: "opencode:ses_123" } }, runtime), true);
+  assert.equal(isOpenCodeRequest({ method: "thread/start", params: {} }, runtime), false);
+  assert.equal(isOpenCodeRequest({ method: "turn/start", params: { threadId: "codex-123" } }, runtime), false);
+});
+
+test("settings for an unclaimed old task never reach the local Codex writer", async () => {
+  const responses = [];
+  const localMutations = [];
+  let locallyOwned = false;
+  const owner = {
+    isThreadOwned() { return locallyOwned; },
+    updateThreadSettings(threadId, settings) {
+      localMutations.push({ threadId, settings });
+      return Promise.resolve({ runtimeSettings: { model: settings.model } });
+    },
+  };
+  const dependencies = {
+    desktopIpcLiveOwner: owner,
+    sendCodexRequest() { throw new Error("unexpected direct app-server mutation"); },
+    threadRuntimeSettingsStore: null,
+    sendApplicationResponse(message) { responses.push(JSON.parse(message)); },
+    createJsonRpcErrorResponse() { throw new Error("unexpected error formatter"); },
+  };
+  const request = {
+    id: "old-settings",
+    method: "thread/settings/update",
+    params: { threadId: "old-task", model: "gpt-test" },
+  };
+
+  assert.equal(routeLocalRuntimeSettingsRequest(request, dependencies), true);
+  assert.equal(responses[0]?.error?.code, -32000);
+  assert.deepEqual(localMutations, []);
+
+  locallyOwned = true;
+  assert.equal(routeLocalRuntimeSettingsRequest({ ...request, id: "owned-settings" }, dependencies), true);
+  await Promise.resolve();
+  assert.deepEqual(localMutations, [{ threadId: "old-task", settings: { model: "gpt-test" } }]);
+  assert.deepEqual(responses.find((response) => response.id === "owned-settings")?.result,
+    { runtimeSettings: { model: "gpt-test" } });
+});
+
+test("mixed thread list keeps Codex pagination and stable OpenCode identity", () => {
+  const codexResponse = JSON.stringify({
+    id: "list-1",
+    result: {
+      data: [{ id: "codex-1", updatedAt: 1_790_000_000 }],
+      nextCursor: "codex-next",
+    },
+  });
+  const merged = JSON.parse(mergeOpenCodeThreadsIntoListResponse(codexResponse, [
+    { id: "opencode:ses_1", runtimeProvider: "opencode", updatedAt: 1_790_000_001_000 },
+  ]));
+  assert.deepEqual(merged.result.data.map((thread) => thread.id), ["opencode:ses_1", "codex-1"]);
+  assert.equal(merged.result.nextCursor, "codex-next");
+  assert.equal(merged.result.data[0].runtimeProvider, "opencode");
+});
 
 function expectedGeneratedImagePath(threadId, fileName) {
   const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");

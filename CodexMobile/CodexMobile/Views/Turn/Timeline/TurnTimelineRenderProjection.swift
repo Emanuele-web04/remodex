@@ -886,6 +886,7 @@ enum TurnTimelineRenderProjection {
 
     // Keeps user-critical artifacts visible beside the final answer instead of burying them in the disclosure.
     private static func isPriorityVisibleMessage(_ message: CodexMessage, finalMessage: CodexMessage? = nil) -> Bool {
+        if message.asyncUserInput != nil { return true }
         if message.role == .system {
             switch message.kind {
             case .fileChange, .subagentAction, .userInputPrompt:
@@ -896,7 +897,7 @@ enum TurnTimelineRenderProjection {
                 return message.autoApprovalReview?.status != .approved
             case .plan:
                 return message.shouldDisplayInlinePlanResult
-            case .thinking, .toolActivity, .commandExecution, .chat:
+            case .thinking, .toolActivity, .commandExecution, .chat, .asyncUserInputAnswer:
                 return false
             }
         }
@@ -1140,7 +1141,7 @@ enum TurnTimelineRenderProjection {
         switch message.kind {
         case .toolActivity, .commandExecution:
             return true
-        case .thinking, .chat, .plan, .userInputPrompt, .autoApprovalReview, .fileChange, .subagentAction:
+        case .thinking, .chat, .asyncUserInputAnswer, .plan, .userInputPrompt, .autoApprovalReview, .fileChange, .subagentAction:
             return false
         }
     }
@@ -1211,6 +1212,7 @@ enum TurnTimelineRenderProjection {
     ) -> Bool {
         if message.role == .assistant,
            message.isStreaming,
+           message.asyncUserInput == nil,
            isEmptyStreamingPlaceholderText(message.text) {
             return true
         }

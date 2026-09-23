@@ -19,7 +19,7 @@ test("iOS runtime synchronization preserves pending edits across acknowledgement
   const config = fs.readFileSync(path.join(mobile, "Services/CodexService+RuntimeConfig.swift"), "utf8");
   const speed = config.slice(config.indexOf("    func effectiveServiceTier("), config.indexOf("    // Copies per-chat runtime overrides"));
   fs.writeFileSync(overrideFile, `import Foundation\n${override}\nextension CodexService {\n${speed}\n}`);
-  const sources = ["JSONValue", "RPCMessage", "CodexServiceTier", "CodexModelOption", "CodexReasoningEffortOption", "CodexRuntimeSettings"]
+  const sources = ["JSONValue", "RPCMessage", "CodexServiceTier", "CodexModelOption", "CodexReasoningEffortOption", "CodexRuntimeSettings", "OpenCodeModelOption"]
     .map((file) => path.join(mobile, "Models", `${file}.swift`));
   const binary = path.join(directory, "runtime-settings");
   execFileSync("xcrun", ["swiftc", "-default-isolation", "MainActor", "-module-cache-path", path.join(directory, "cache"), "-parse-as-library", ...sources, overrideFile,

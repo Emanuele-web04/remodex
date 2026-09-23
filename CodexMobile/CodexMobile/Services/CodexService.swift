@@ -499,6 +499,9 @@ final class CodexService {
     var messageRevisionByThread: [String: Int] = [:]
     var syncRealtimeEnabled = true
     var availableModels: [CodexModelOption] = []
+    // Last OpenCode catalog from the bridge; shared by the draft picker and thread composer labels.
+    var openCodeModels: [OpenCodeModelOption] = []
+    var isLoadingOpenCodeModels = false
     var selectedModelId: String?
     var hasPersistedSelectedModelId = false
     var selectedGitWriterModelId: String?
@@ -562,6 +565,7 @@ final class CodexService {
     // A Desktop/rollout source handoff needs replace semantics for the mirrored
     // tail, not an append-only merge that leaves stale synthetic rows behind.
     @ObservationIgnored var pendingCanonicalSourceReplacementThreadIDs: Set<String> = []
+    @ObservationIgnored var asyncAnswerVerificationThreadIDs: Set<String> = []
     // A bounded JSONL first paint is useful immediately but remains provisional
     // until the app-server returns its exact cursor-backed page.
     @ObservationIgnored var provisionalPaginatedHistoryThreadIDs: Set<String> = []

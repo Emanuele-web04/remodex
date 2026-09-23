@@ -22,6 +22,7 @@ const {
   hasRelayConnectionGoneStale,
 } = require("./bridge-status");
 const { createCodexTransport } = require("./codex-transport");
+const { createOpenCodeRuntime } = require("./opencode-runtime");
 const {
   createThreadRolloutActivityWatcher,
   findRecentRolloutFileForContextRead,
@@ -784,7 +785,11 @@ function startBridge({
   const forwardedInitializeRequestIds = new Set();
   const bridgeManagedCodexRequestWaiters = new Map();
   const forwardedRequestMethodsById = new Map();
+  const pendingLocalThreadCreationRequestsById = new Map();
   const relaySanitizedResponseMethodsById = new Map();
+  const pendingOpenCodeThreadListRequests = new Map();
+  const openCodeThreadCatalog = new Map();
+  let openCodeCatalogRefresh = null;
   const desktopIpcLiveOwnerObservedInboundKeys = new Set();
   const jsonlTurnsListRolloutCacheByThread = new Map();
   const jsonlTurnsListRolloutMissCacheByThread = new Map();
@@ -875,6 +880,22 @@ function startBridge({
       readConversationState: async (threadId) => seedConversationStateFromThreadRead(
         await sendCodexRequest("thread/read", buildCompleteThreadReadParams(threadId))
       ),
+      readThreadMetadata: async (threadId) => sendCodexRequest("thread/read", {
+        threadId,
+        includeTurns: false,
+      }),
+      async resumeThreadLocally(message) {
+        const result = await sendCodexRequest("thread/resume", message.params);
+        if (isShuttingDown || result?.thread?.id !== message.params?.threadId) return result;
+        // The private request uses a bridge-managed RPC id. Reuse the live
+        // owner's normal matching-response path with the phone's original id,
+        // so only this successful acquisition can claim the local stream.
+        const response = { id: message.id, result };
+        observeDesktopIpcLiveOwnerInbound(JSON.stringify(message), message);
+        desktopIpcLiveOwner?.observeOutbound(JSON.stringify(response), response);
+        rememberThreadFromMessage("codex", JSON.stringify(response), response);
+        return result;
+      },
       forwardToLocalCodex: (rawMessage) => {
         if (handleLocalRuntimeSettingsRequest(parseBridgeMessage(rawMessage))) return;
         observeDesktopIpcLiveOwnerInbound(rawMessage);
@@ -916,6 +937,18 @@ function startBridge({
     env: process.env,
     appPath: config.codexAppPath,
     logPrefix: "[remodex]",
+  });
+  const openCodeRuntime = createOpenCodeRuntime({
+    onNotification(message) {
+      if (message.method === "thread/started" && message.params?.thread?.id) {
+        openCodeThreadCatalog.set(message.params.thread.id, message.params.thread);
+      } else if (message.method === "thread/archived" && message.params?.threadId) {
+        openCodeThreadCatalog.delete(message.params.threadId);
+      } else if (message.method === "thread/unarchived") {
+        refreshOpenCodeThreadCatalog();
+      }
+      sendApplicationResponse(JSON.stringify(message));
+    },
   });
   const voiceHandler = createVoiceHandler({
     sendCodexRequest,
@@ -999,6 +1032,12 @@ function startBridge({
     rolloutLiveMirror?.stopAll();
     desktopIpcActionFollower?.stopAll();
     desktopIpcLiveOwner?.stopAll();
+    pendingOpenCodeThreadListRequests.clear();
+    pendingLocalThreadCreationRequestsById.clear();
+    openCodeThreadCatalog.clear();
+    Promise.resolve().then(() => openCodeRuntime.shutdown()).catch((error) => {
+      console.warn(`[remodex] OpenCode shutdown failed: ${error?.message || "unknown error"}`);
+    });
   }
 
   function stopBridge() {
@@ -1195,6 +1234,17 @@ function startBridge({
       && parsedMessage.params?.threadSettings) {
       threadRuntimeSettingsStore.observe(parsedMessage.params.threadId, parsedMessage.params.threadSettings);
     }
+    if (parsedMessage?.method === "thread/closed" || parsedMessage?.method === "thread/archived") {
+      desktopIpcActionFollower?.releaseLocallyAcquiredThread(parsedMessage.params?.threadId);
+    }
+    if (parsedMessage?.id != null) {
+      const requestId = String(parsedMessage.id);
+      if (pendingLocalThreadCreationRequestsById.delete(requestId)
+        && !parsedMessage.error
+        && config.desktopIpcLiveSyncEnabled === false) {
+        desktopIpcActionFollower?.claimNewLocalThread(parsedMessage.result?.thread?.id);
+      }
+    }
     if (handleBridgeManagedCodexResponse(message, parsedMessage)) {
       return;
     }
@@ -1205,10 +1255,7 @@ function startBridge({
     observeAppServerActivity(parsedMessage);
     pushNotificationTracker.handleOutbound(message, parsedMessage);
     rememberThreadFromMessage("codex", message, parsedMessage);
-    secureTransport.queueOutboundApplicationMessage(
-      sanitizeRelayBoundCodexMessage(message, parsedMessage),
-      sendRelayWireMessage
-    );
+    queueApplicationMessageWithOpenCodeList(message, parsedMessage);
   });
 
   codex.onClose(() => {
@@ -1246,6 +1293,27 @@ function startBridge({
   function handleApplicationMessage(rawMessage) {
     rawMessage = normalizePhoneRuntimeRequest(rawMessage);
     const parsedMessage = parseBridgeMessage(rawMessage);
+    // Register history/list response shaping before either runtime can reply.
+    rememberForwardedRequestMethod(rawMessage);
+    if (parsedMessage?.id != null && !parsedMessage.method
+      && openCodeRuntime.ownsClientResponse(parsedMessage)) {
+      Promise.resolve().then(() => openCodeRuntime.handleClientResponse(parsedMessage)).catch((error) => {
+        console.warn(`[remodex] OpenCode response failed: ${error?.message || "unknown error"}`);
+      });
+      return;
+    }
+    if (isOpenCodeRequest(parsedMessage, openCodeRuntime)) {
+      Promise.resolve().then(() => openCodeRuntime.handleRequest(parsedMessage)).then((result) => {
+        if (parsedMessage.id != null) {
+          sendApplicationResponse(JSON.stringify({ id: parsedMessage.id, result }));
+        }
+      }).catch((error) => {
+        if (parsedMessage.id != null) {
+          sendApplicationResponse(createJsonRpcErrorResponse(parsedMessage.id, error, "opencode_request_failed"));
+        }
+      });
+      return;
+    }
     if (activityStore.handleRequest(parsedMessage)) {
       return;
     }
@@ -1294,7 +1362,6 @@ function startBridge({
     // follower serves from projected Desktop state must hit the same relay
     // sanitize/trim budget as app-server responses, or heavy threads ship as
     // one oversized frame and kill the phone's websocket (EMSGSIZE).
-    rememberForwardedRequestMethod(rawMessage);
     if (desktopIpcActionFollower?.observeInbound(rawMessage, parsedMessage)) {
       return;
     }
@@ -1307,25 +1374,24 @@ function startBridge({
   }
 
   function handleLocalRuntimeSettingsRequest(parsedMessage) {
-    if (parsedMessage?.method === "thread/settings/update" && parsedMessage.id != null) {
-      const { threadId, ...settings } = parsedMessage.params || {};
-      const update = desktopIpcLiveOwner?.updateThreadSettings
-        ? desktopIpcLiveOwner.updateThreadSettings(threadId, settings)
-        : sendCodexRequest("thread/settings/update", { threadId, ...settings }).then(() => ({
-          runtimeSettings: threadRuntimeSettingsStore.commit(threadId, settings, { source: "phone" }),
-        }));
-      Promise.resolve(update).then((result) => {
-        sendApplicationResponse(JSON.stringify({ id: parsedMessage.id, result }));
-      }).catch((error) => {
-        sendApplicationResponse(createJsonRpcErrorResponse(parsedMessage.id, error, "runtime_settings_update_failed"));
-      });
-      return true;
-    }
-    return false;
+    return routeLocalRuntimeSettingsRequest(parsedMessage, {
+      desktopIpcLiveOwner,
+      desktopIpcActionFollower,
+      sendCodexRequest,
+      threadRuntimeSettingsStore,
+      sendApplicationResponse,
+      createJsonRpcErrorResponse,
+    });
   }
 
   function forwardInboundRequestToCodex(rawMessage) {
     const codexRequest = normalizeTurnStartForCodex(rawMessage);
+    const parsedRequest = parseBridgeMessage(codexRequest);
+    if (parsedRequest?.id != null
+      && (parsedRequest.method === "thread/start" || parsedRequest.method === "thread/fork")) {
+      pendingLocalThreadCreationRequestsById.set(String(parsedRequest.id), true);
+      evictOldestEntries(pendingLocalThreadCreationRequestsById, FORWARDED_REQUEST_METHODS_MAX_SIZE);
+    }
     rememberForwardedRequestMethod(rawMessage);
     rememberThreadFromMessage("phone", codexRequest);
     codex.send(codexRequest);
@@ -1428,10 +1494,51 @@ function startBridge({
 
   // Encrypts bridge-generated responses instead of letting the relay see plaintext.
   function sendApplicationResponse(rawMessage) {
+    queueApplicationMessageWithOpenCodeList(rawMessage);
+  }
+
+  function queueApplicationMessageWithOpenCodeList(rawMessage, parsedMessage = null) {
+    const responseId = parsedMessage?.id ?? safeParseJSON(rawMessage)?.id;
+    const requestKey = responseId == null ? "" : String(responseId);
+    const listRequest = pendingOpenCodeThreadListRequests.get(requestKey);
+    const sanitizedMessage = sanitizeRelayBoundCodexMessage(rawMessage, parsedMessage);
+    if (!listRequest || !sanitizedMessage) {
+      secureTransport.queueOutboundApplicationMessage(sanitizedMessage, sendRelayWireMessage);
+      return;
+    }
+
+    pendingOpenCodeThreadListRequests.delete(requestKey);
+    if (listRequest.cursor || listRequest.archived === true || safeParseJSON(sanitizedMessage)?.error) {
+      secureTransport.queueOutboundApplicationMessage(sanitizedMessage, sendRelayWireMessage);
+      return;
+    }
+
     secureTransport.queueOutboundApplicationMessage(
-      sanitizeRelayBoundCodexMessage(rawMessage),
+      mergeOpenCodeThreadsIntoListResponse(sanitizedMessage, [...openCodeThreadCatalog.values()]),
       sendRelayWireMessage
     );
+    refreshOpenCodeThreadCatalog();
+  }
+
+  function refreshOpenCodeThreadCatalog() {
+    if (openCodeCatalogRefresh) return;
+    openCodeCatalogRefresh = Promise.resolve().then(() => openCodeRuntime.listThreads()).then((threads) => {
+      const previousIds = new Set(openCodeThreadCatalog.keys());
+      openCodeThreadCatalog.clear();
+      for (const thread of threads) {
+        openCodeThreadCatalog.set(thread.id, thread);
+        if (!previousIds.has(thread.id)) {
+          sendApplicationResponse(JSON.stringify({
+            method: "thread/started",
+            params: { thread, remodexDesktopMirror: true },
+          }));
+        }
+      }
+    }).catch(() => {
+      // An unavailable optional runtime must not stall Codex's thread catalog.
+    }).finally(() => {
+      openCodeCatalogRefresh = null;
+    });
   }
 
   function handleBridgeManagedThreadTurnsListRequest(rawMessage, sendResponse = sendApplicationResponse) {
@@ -1768,6 +1875,13 @@ function startBridge({
       }
       relaySanitizedResponseMethodsById.set(String(requestId), trackedRequest);
     }
+    if (method === "thread/list") {
+      pendingOpenCodeThreadListRequests.set(String(requestId), {
+        cursor: Boolean(parsed.params?.cursor),
+        archived: parsed.params?.archived === true,
+      });
+      evictOldestEntries(pendingOpenCodeThreadListRequests, FORWARDED_REQUEST_METHODS_MAX_SIZE);
+    }
   }
 
   // Replaces huge inline desktop-history images with lightweight references before relay encryption.
@@ -1811,9 +1925,15 @@ function startBridge({
       || trackedRequest.method === "thread/resume") {
       // One walk over the rows for both enrichers instead of one traversal each.
       forEachThreadRowInResponse(trackedRequest.method, parsed, (thread) => {
+        if (thread.runtimeProvider === "opencode") {
+          return;
+        }
         threadRuntimeSettingsStore.attachToThread(thread);
         threadListProvenanceEnricher.attachToThread(thread);
         worktreeOriginEnricher.attachToThread(thread);
+        if (trackedRequest.method !== "thread/list") {
+          desktopIpcActionFollower?.observeThreadMetadata(thread);
+        }
       });
       normalizedMessage = JSON.stringify(parsed);
       if (trackedRequest.isActiveThreadCatalog) {
@@ -5167,6 +5287,115 @@ function shouldSuppressRolloutMirrorForThread(
   return Boolean(followerIsFresh) || Boolean(ownerIsFresh);
 }
 
+function isOpenCodeRequest(message, runtime) {
+  const method = readString(message?.method);
+  if (!method) {
+    return false;
+  }
+  if (method === "remodex/opencode/models") {
+    return true;
+  }
+  if (method === "thread/start" && message?.params?.runtimeProvider === "opencode") {
+    return true;
+  }
+  const threadId = threadIdFromRequestParams(message?.params)
+    || readString(message?.params?.conversationId);
+  return Boolean(threadId && runtime.handlesThreadId(threadId));
+}
+
+function routeLocalRuntimeSettingsRequest(message, {
+  desktopIpcLiveOwner,
+  desktopIpcActionFollower,
+  sendCodexRequest,
+  threadRuntimeSettingsStore,
+  sendApplicationResponse,
+  createJsonRpcErrorResponse,
+}) {
+  if (message?.method !== "thread/settings/update" || message.id == null) {
+    return false;
+  }
+  const { threadId, ...settings } = message.params || {};
+  // A missing Desktop snapshot after bridge restart is not proof the local
+  // app-server owns this task. The follower handles known Desktop tasks before
+  // this branch; unknown ownership must not create a competing local writer.
+  const liveOwnerHasThread = Boolean(desktopIpcLiveOwner?.isThreadOwned(threadId));
+  const acquiredByLocalResume = Boolean(desktopIpcActionFollower?.isLocallyAcquiredThread(threadId));
+  if (desktopIpcLiveOwner && !liveOwnerHasThread && !acquiredByLocalResume) {
+    sendApplicationResponse(JSON.stringify({
+      id: message.id,
+      error: {
+        code: -32000,
+        message: "Could not confirm this task's owner yet. Reopen the task and retry.",
+      },
+    }));
+    return true;
+  }
+  const update = liveOwnerHasThread && desktopIpcLiveOwner?.updateThreadSettings
+    ? desktopIpcLiveOwner.updateThreadSettings(threadId, settings)
+    : sendCodexRequest("thread/settings/update", { threadId, ...settings }).then(() => ({
+      runtimeSettings: threadRuntimeSettingsStore.commit(threadId, settings, { source: "phone" }),
+    }));
+  Promise.resolve(update).then((result) => {
+    sendApplicationResponse(JSON.stringify({ id: message.id, result }));
+  }).catch((error) => {
+    sendApplicationResponse(createJsonRpcErrorResponse(message.id, error, "runtime_settings_update_failed"));
+  });
+  return true;
+}
+
+// Codex remains the source of its own paginated catalog; append OpenCode roots
+// to the first active page so the phone keeps one provider-neutral sidebar.
+function mergeOpenCodeThreadsIntoListResponse(rawMessage, openCodeThreads) {
+  const response = safeParseBridgeResponse(rawMessage);
+  if (!response?.result || !Array.isArray(openCodeThreads) || openCodeThreads.length === 0) {
+    return rawMessage;
+  }
+  const result = response.result;
+  const key = Array.isArray(result.data) ? "data"
+    : Array.isArray(result.items) ? "items"
+      : Array.isArray(result.threads) ? "threads"
+        : null;
+  if (!key) {
+    return rawMessage;
+  }
+  const rowsById = new Map();
+  for (const row of [...result[key], ...openCodeThreads]) {
+    if (row && typeof row.id === "string") {
+      rowsById.set(row.id, row);
+    }
+  }
+  const merged = [...rowsById.values()].sort((a, b) =>
+    threadListTimestamp(b.updatedAt ?? b.createdAt) - threadListTimestamp(a.updatedAt ?? a.createdAt)
+  );
+  result[key] = merged;
+  if (result.payload && Array.isArray(result.payload[key])) {
+    result.payload[key] = merged;
+  }
+  return JSON.stringify(response);
+}
+
+function safeParseBridgeResponse(rawMessage) {
+  try {
+    return JSON.parse(rawMessage);
+  } catch {
+    return null;
+  }
+}
+
+function threadListTimestamp(value) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.abs(value) < 10_000_000_000 ? value * 1_000 : value;
+  }
+  if (typeof value === "string") {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric) && value.trim()) {
+      return threadListTimestamp(numeric);
+    }
+    return Date.parse(value) || 0;
+  }
+  return 0;
+}
+
 module.exports = {
   annotateTurnStateProbeWithMirrorActiveTurn,
   buildThreadTurnsListRelaySanitizeContext,
@@ -5178,12 +5407,15 @@ module.exports = {
   fetchAdaptiveThreadTurnsListForRelay,
   hasRelayConnectionGoneStale,
   isContextualUserItemNotification,
+  isOpenCodeRequest,
+  mergeOpenCodeThreadsIntoListResponse,
   maybeMergeLatestJsonlTurnIntoTurnsListResponse,
   normalizeTurnStartForCodex,
   normalizePhoneRuntimeRequest,
   normalizeRelayBoundJsonRpcMessage,
   persistBridgePreferences,
   resolveJsonlTurnsListRolloutPathForFallback,
+  routeLocalRuntimeSettingsRequest,
   sanitizeLiveGeneratedImageMessageForRelay,
   sanitizeLiveUserNotification,
   sanitizeThreadHistoryImagesForRelay,

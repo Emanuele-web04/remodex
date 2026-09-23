@@ -208,7 +208,8 @@ extension CodexService {
         }
 
         let text = extractIncomingMessageText(from: itemObject)
-        guard !text.isEmpty else { return }
+        let asyncInput = itemType == "agentmessage" ? CodexAsyncUserInput.decode(from: itemObject) : nil
+        guard !text.isEmpty || asyncInput != nil else { return }
 
         guard let context = resolveAssistantEventContext(
             paramsObject: paramsObject,
@@ -221,14 +222,26 @@ extension CodexService {
             eventObject: eventObject,
             itemObject: itemObject
         )
-        completeAssistantMessage(
-            threadId: context.threadId,
-            turnId: turnId,
-            itemId: context.identity.itemId,
-            sourceItemKey: context.identity.sourceItemKey,
-            assistantPhase: context.identity.phase,
-            text: text
-        )
+        if !text.isEmpty {
+            completeAssistantMessage(
+                threadId: context.threadId,
+                turnId: turnId,
+                itemId: context.identity.itemId,
+                sourceItemKey: context.identity.sourceItemKey,
+                assistantPhase: context.identity.phase,
+                text: text
+            )
+        }
+        if let asyncInput {
+            upsertAsyncUserInput(
+                asyncInput,
+                threadId: context.threadId,
+                turnId: turnId,
+                itemId: context.identity.itemId,
+                text: text,
+                completed: true
+            )
+        }
     }
 
     func isCompletedGeneratedImageItemType(_ itemType: String) -> Bool {
@@ -375,6 +388,16 @@ extension CodexService {
             itemId: context.identity.itemId,
             assistantPhase: context.identity.phase
         )
+        if itemType == "agentmessage", let asyncInput = CodexAsyncUserInput.decode(from: itemObject) {
+            upsertAsyncUserInput(
+                asyncInput,
+                threadId: context.threadId,
+                turnId: turnId,
+                itemId: context.identity.itemId,
+                text: extractIncomingMessageText(from: itemObject),
+                completed: false
+            )
+        }
     }
 }
 
@@ -418,6 +441,13 @@ private extension CodexService {
             itemId: itemObject["id"]?.stringValue,
             createdAt: decodeHistoryTimestamp(from: paramsObject)
         )
+        if thread(for: threadId)?.runtimeProvider != .opencode,
+           var messages = messagesByThread[threadId] {
+            CodexAsyncUserInputProjection.reconcile(&messages)
+            messagesByThread[threadId] = messages
+            persistMessages()
+            updateCurrentOutput(for: threadId)
+        }
         return true
     }
 

@@ -35,7 +35,7 @@
     "thread-follower-start-turn": 2,
     "thread-follower-steer-turn": 1,
     "thread-follower-interrupt-turn": 4,
-    "thread-follower-update-thread-settings": 1,
+    "thread-follower-update-thread-settings": 2,
     "thread-follower-permissions-request-approval-response": 1
   },
   "models": [

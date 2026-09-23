@@ -1692,6 +1692,9 @@ final class TurnViewModel {
         subscriptions: SubscriptionService? = nil,
         draftThreadID: String,
         preferredProjectPath: String?,
+        runtimeProvider: CodexRuntimeProvider = .codex,
+        openCodeModelID: String? = nil,
+        openCodeVariantID: String? = nil,
         makeThread: (@MainActor @Sendable () async throws -> CodexThread)? = nil,
         onThreadCreated: @escaping @MainActor @Sendable (CodexThread) -> Void,
         onSendFailed: (@MainActor @Sendable () -> Void)? = nil
@@ -1729,7 +1732,10 @@ final class TurnViewModel {
                 } else {
                     thread = try await codex.startThreadIfReady(
                         preferredProjectPath: preferredProjectPath,
-                        rootlessChatPromptHint: rootlessChatPromptHint
+                        rootlessChatPromptHint: rootlessChatPromptHint,
+                        runtimeProvider: runtimeProvider,
+                        openCodeModelID: openCodeModelID,
+                        openCodeVariantID: openCodeVariantID
                     )
                 }
                 let preAppendedMessage = movePreAppendedNewThreadUserMessageIfNeeded(

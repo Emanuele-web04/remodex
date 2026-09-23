@@ -8,7 +8,7 @@
 [![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [Follow on X](https://x.com/emanueledpt)
 
-Control [Codex](https://openai.com/index/codex/) from your iPhone. Remodex is a local-first open-source bridge + iOS app that keeps the Codex runtime on your Mac and lets your phone connect through a paired secure session.
+Control [Codex](https://openai.com/index/codex/) or [OpenCode](https://opencode.ai/) from your iPhone. Remodex is a local-first open-source bridge + iOS app that keeps the coding runtime on your Mac and lets your phone connect through a paired secure session.
 
 ## Key App Features
 
@@ -27,6 +27,7 @@ Control [Codex](https://openai.com/index/codex/) from your iPhone. Remodex is a 
 - macOS-only background bridge service via `launchd`
 - Live streaming on your phone while Codex runs on your Mac
 - Shared thread history with Codex on your Mac
+- OpenCode chats with a model chosen at creation, including Zen, Go, and Free models, and shared sessions from your Mac
 
 The repo stays local-first and self-host friendly: the iOS app source does not embed a public hosted endpoint, and the transport layer remains inspectable for anyone who wants to run their own setup.
 
@@ -94,6 +95,7 @@ This repo contains the local bridge, the iOS app target, and their tests:
 - **Node.js** v18+
 - **[Codex CLI](https://github.com/openai/codex)** installed and in your PATH
 - **Codex CLI authenticated on the Mac** (`codex login status` should succeed)
+- **[OpenCode CLI](https://opencode.ai/docs/)** installed on the Mac for OpenCode chats; authenticate Zen or Go in OpenCode before selecting those models
 - **[Codex desktop app](https://openai.com/index/codex/)** (optional — for viewing threads on your Mac)
 - **A signed Remodex iOS build** installed on your iPhone or iPad before scanning the pairing QR
 - **macOS** (for desktop refresh features — the core bridge works on any OS)
@@ -344,6 +346,7 @@ remodex watch
 | `REMODEX_RELAY` | empty in source checkouts; optional in published packages | Session base URL used for QR bootstrap, trusted-session resolve, and phone/Mac session routing |
 | `REMODEX_PUSH_SERVICE_URL` | disabled by default | Optional HTTP base URL for managed push registration/completion |
 | `REMODEX_CODEX_ENDPOINT` | — | Connect to an existing Codex WebSocket instead of spawning a local `codex app-server` |
+| `REMODEX_OPENCODE_BIN` | `~/.opencode/bin/opencode` | Path to the local OpenCode executable if installed elsewhere |
 | `REMODEX_DESKTOP_IPC_LIVE_SYNC` | `true` | Broadcast Remodex-owned active threads over the local Codex Desktop / VSCode IPC bus |
 | `REMODEX_DESKTOP_AUTO_FOLLOW` | `false` | Explicitly opt in to opening phone-driven threads in Codex Desktop |
 | `REMODEX_DESKTOP_IPC_SOCKET` | auto-detected | Override the local Codex IPC socket or Windows named pipe path |

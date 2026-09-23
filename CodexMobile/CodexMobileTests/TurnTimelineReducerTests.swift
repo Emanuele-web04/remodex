@@ -7461,3 +7461,74 @@ private func mermaidSegmentKinds(in content: MermaidMarkdownContent?) -> [Mermai
         }
     }
 }
+
+final class CodexAsyncUserInputProjectionTests: XCTestCase {
+    private func question(id: String = "call-1", date: Date = Date(timeIntervalSince1970: 1_000)) -> CodexMessage {
+        CodexMessage(
+            id: "question",
+            threadId: "thread",
+            role: .assistant,
+            text: "",
+            createdAt: date,
+            turnId: "turn-1",
+            itemId: id,
+            asyncUserInput: CodexAsyncUserInput(questions: [
+                CodexAsyncUserInputQuestion(title: "Pick one", options: ["A", "B"])
+            ])
+        )
+    }
+
+    private func nativeReply(itemID: String, date: Date = Date(timeIntervalSince1970: 1_001)) -> CodexMessage {
+        let key = "[\"request_user_input_async\",\"\(itemID)\",0]"
+        let payload = [["questionItemId": key, "question": "Pick one", "answer": "A"]]
+        let json = String(data: try! JSONSerialization.data(withJSONObject: payload), encoding: .utf8)!
+        return CodexMessage(
+            id: "reply",
+            threadId: "thread",
+            role: .user,
+            text: "<send_user_message_question_reply>\n\(json)\n</send_user_message_question_reply>",
+            createdAt: date,
+            turnId: "turn-2"
+        )
+    }
+
+    func testNativeReplyLinksAfterOlderQuestionPageArrives() {
+        var messages = [nativeReply(itemID: "call-1")]
+        CodexAsyncUserInputProjection.reconcile(&messages)
+        XCTAssertTrue(messages[0].text.hasPrefix("<send_user_message_question_reply>"))
+
+        messages.insert(question(), at: 0)
+        CodexAsyncUserInputProjection.reconcile(&messages)
+        XCTAssertEqual(messages[0].asyncUserInput?.status, .answered)
+        XCTAssertEqual(messages[1].text, "Pick one\nA")
+        XCTAssertEqual(messages[0].createdAt, Date(timeIntervalSince1970: 1_000))
+    }
+
+    func testNativeReplyWithDifferentItemIDDoesNotAnswerQuestion() {
+        var messages = [question(), nativeReply(itemID: "call-other")]
+        CodexAsyncUserInputProjection.reconcile(&messages)
+        XCTAssertEqual(messages[0].asyncUserInput?.status, .unanswered)
+        XCTAssertTrue(messages[1].text.hasPrefix("<send_user_message_question_reply>"))
+    }
+
+    func testTwoFullCanonicalAbsencesReopenRolledBackQuestion() {
+        var messages = [question(), nativeReply(itemID: "call-1")]
+        CodexAsyncUserInputProjection.reconcile(&messages)
+        let canonical = [question()]
+        let firstDelay = CodexAsyncUserInputProjection.reopenRepliesMissingFromCanonicalHistory(
+            &messages,
+            canonical: canonical,
+            now: Date(timeIntervalSince1970: 1_010)
+        )
+        XCTAssertNotNil(firstDelay)
+        XCTAssertEqual(messages[0].asyncUserInput?.status, .answered)
+
+        _ = CodexAsyncUserInputProjection.reopenRepliesMissingFromCanonicalHistory(
+            &messages,
+            canonical: canonical,
+            now: Date(timeIntervalSince1970: 1_013)
+        )
+        XCTAssertEqual(messages.count, 1)
+        XCTAssertEqual(messages[0].asyncUserInput?.status, .unanswered)
+    }
+}

@@ -124,6 +124,7 @@ extension CodexService {
         if merged.agentRole == nil { merged.agentRole = existing.agentRole }
         if merged.model == nil { merged.model = existing.model }
         if merged.modelProvider == nil { merged.modelProvider = existing.modelProvider }
+        if existing.runtimeProvider == .opencode { merged.runtimeProvider = .opencode }
         if merged.reasoningEffort == nil { merged.reasoningEffort = existing.reasoningEffort }
         if merged.serviceTier == nil,
            merged.runtimeSettingsRevision == nil {

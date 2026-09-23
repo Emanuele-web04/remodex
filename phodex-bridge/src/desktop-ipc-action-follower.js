@@ -5,10 +5,12 @@
 // Depends on: net, ./desktop-ipc-conversation-projector, ./desktop-ipc-shared
 
 const { createHash } = require("crypto");
+const fs = require("fs");
 const net = require("net");
 const { createThreadMutationQueue, runtimeSettingsPatch, hasOwn, normalizeThreadSettingsUpdate } = require("./codex-runtime-settings");
 const { projectSemanticItem } = require("./thread-activity-projector");
 const { normalizeSandboxPolicyCompatibility } = require("./desktop-ipc-conversation-adapter");
+const { isDesktopRolloutOrigin } = require("./rollout-live-mirror");
 
 const {
   createDesktopConversationProjector,
@@ -31,11 +33,13 @@ const {
   resolveIpcSocketPathCandidates,
   safeParseJSON,
   toSocketPathCandidatesResolver,
+  visibleUserPromptFromInputEntries,
   writeFrame,
 } = require("./desktop-ipc-shared");
 
 const REQUEST_TIMEOUT_MS = 10_000;
 const OWNERSHIP_PROBE_TIMEOUT_MS = 1_500;
+const DESKTOP_HISTORY_PROBE_TIMEOUT_MS = 5_000;
 // Fresh Desktop threads are not materialized in the local thread store yet, so
 // baseline reads fail until the rollout flushes; retry with backoff instead of
 // hammering thread/read on every patch broadcast.
@@ -46,6 +50,8 @@ const MAX_QUEUED_CHANGES_PER_THREAD = 300;
 // Phone interest survives per-thread release by design, so cap the set to keep a
 // marathon single Desktop connection from accumulating every thread id forever.
 const MAX_ACTIVE_THREAD_IDS = 512;
+const MAX_DESKTOP_ORIGIN_CANDIDATES = 4096;
+const DESKTOP_ORIGIN_METADATA_HEAD_BYTES = 64 * 1024;
 const DESKTOP_IPC_ACTION_SOURCE = "desktop-ipc-action-follower";
 const REMODEX_LIVE_OWNER_SOURCE = "desktop-ipc-live-owner";
 const THREAD_STREAM_FOLLOWING_CHANGED = "thread-stream-following-changed";
@@ -55,6 +61,14 @@ const DESKTOP_STATE_READ_METHODS = new Set([
   "thread/resume",
   "thread/turns/list",
   "thread/goal/get",
+]);
+const OWNER_NEGOTIATION_READ_METHODS = new Set([
+  ...DESKTOP_STATE_READ_METHODS,
+  "thread/contextWindow/read",
+  "thread/items/list",
+  "thread/timeline/list",
+  "thread/search",
+  "thread/searchOccurrences",
 ]);
 // Sidebar refreshes should also keep the Litter subscription alive. Without
 // this, a phone with no selected chat never connects to the Desktop bus and
@@ -226,6 +240,8 @@ function desktopTurnsSnapshotRevision(turns) {
 function createDesktopIpcActionFollower({
   sendApplicationResponse,
   readConversationState = null,
+  readThreadMetadata = null,
+  resumeThreadLocally = null,
   forwardToLocalCodex = null,
   // Synchronous authority check against the bridge's own live owner: threads
   // streamed by the local app-server must never be held, served, or routed as
@@ -352,6 +368,9 @@ function createDesktopIpcActionFollower({
     if (!Array.isArray(rows)) {
       return;
     }
+    for (const thread of rows) {
+      observeThreadMetadata(thread);
+    }
     const candidates = new Set(rows
       .map((thread) => readString(thread?.id))
       .filter((threadId) => threadId && !isLocallyOwnedThread(threadId) && !liveOwnerThreadIds.has(threadId))
@@ -392,6 +411,26 @@ function createDesktopIpcActionFollower({
         backgroundOnlyThreadIds.add(threadId);
       }
       followDesktopThread(threadId);
+    }
+  }
+
+  function observeThreadMetadata(thread) {
+    const threadId = readString(thread?.id);
+    if (!threadId || desktopOriginCheckedThreadIds.has(threadId)) {
+      return;
+    }
+    // Record a cheap pointer only. Reading every rollout head during a
+    // sidebar refresh would turn a small catalog request into disk I/O for
+    // hundreds of old tasks; inspect provenance only when a mutation arrives.
+    desktopOriginCandidatesByThreadId.delete(threadId);
+    desktopOriginCandidatesByThreadId.set(threadId, {
+      id: threadId,
+      path: readString(thread?.path) || readString(thread?.rolloutPath),
+      originator: readString(thread?.originator) || readString(thread?.metadata?.originator),
+      source: readString(thread?.source) || readString(thread?.metadata?.source),
+    });
+    while (desktopOriginCandidatesByThreadId.size > MAX_DESKTOP_ORIGIN_CANDIDATES) {
+      desktopOriginCandidatesByThreadId.delete(desktopOriginCandidatesByThreadId.keys().next().value);
     }
   }
 
@@ -437,17 +476,33 @@ function createDesktopIpcActionFollower({
     ownershipProbeDeadlinesByThreadId.delete(threadId);
     pendingOwnershipProbeTokensByThreadId.delete(threadId);
     desktopOwnedByProbeThreadIds.delete(threadId);
+    confirmedDesktopOwnerClientIdsByThreadId.delete(threadId);
+    // Failure remains fail-closed even if this thread leaves the active LRU.
     notifyActivityRemoval(threadId, "evicted");
   }
   const recoveringThreadIds = new Set();
   const queuedChangesByThreadId = new Map();
   const baselineRecoveryStateByThreadId = new Map();
   const liveOwnerThreadIds = new Set();
+  const locallyAcquiredThreadIds = new Set();
   const heldFollowerRequestsByThreadId = new Map();
   const ownershipProbeDeadlinesByThreadId = new Map();
   const pendingOwnershipProbeTokensByThreadId = new Map();
   const desktopOwnedByProbeThreadIds = new Set();
+  // Once a mutation is queued for Desktop, its outcome may be ambiguous after
+  // disconnect or timeout. Keep that routing decision until the local owner
+  // explicitly claims the thread; an expired probe is not a handoff.
+  const desktopMutationRiskThreadIds = new Set();
+  // A rollout's immutable session_meta can identify an old Desktop task before
+  // this bridge process receives its first live IPC snapshot.
+  const desktopOriginThreadIds = new Set();
+  const desktopOriginCheckedThreadIds = new Set();
+  const desktopOriginCandidatesByThreadId = new Map();
+  const pendingResumeOwnershipByThreadId = new Map();
+  const confirmedDesktopOwnerClientIdsByThreadId = new Map();
+  const ownerUnavailableThreadIds = new Set();
   let nextOwnershipProbeToken = 0;
+  let stopped = false;
 
   function observeInbound(rawMessage, parsedMessage = null) {
     const message = parsedMessage ?? safeParseJSON(rawMessage);
@@ -458,6 +513,35 @@ function createDesktopIpcActionFollower({
     }
 
     const method = readString(message?.method);
+    const requestThreadId = readThreadId(message?.params);
+    if (requestThreadId
+      && ownerUnavailableThreadIds.has(requestThreadId)
+      && method !== "thread/resume"
+      && !OWNER_NEGOTIATION_READ_METHODS.has(method)) {
+      // A failed ownership negotiation must remain fail-closed after its
+      // short probe window. A later or unsupported mutation cannot acquire a
+      // second writer by falling through to the separate local app-server.
+      rejectUnconfirmedOwnerMutation(message);
+      return true;
+    }
+    const pendingResumeOwnership = requestThreadId
+      && pendingResumeOwnershipByThreadId.get(requestThreadId);
+    if (pendingResumeOwnership
+      && method !== "thread/resume"
+      && !OWNER_NEGOTIATION_READ_METHODS.has(method)
+      && !DESKTOP_FOLLOWER_REQUEST_METHODS.has(method)) {
+      pendingResumeOwnership.then(() => {
+        if (stopped) return;
+        if (liveOwnerThreadIds.has(requestThreadId) || isLocallyOwnedThread(requestThreadId)) {
+          forwardToLocalCodex?.(rawMessage);
+        } else {
+          rejectUnconfirmedOwnerMutation(message);
+        }
+      }).catch(() => {
+        if (!stopped) rejectUnconfirmedOwnerMutation(message);
+      });
+      return true;
+    }
     if (DESKTOP_BACKGROUND_DISCOVERY_METHODS.has(method)) {
       ipc.ensureConnected();
       reannounceActiveBackgroundTurns();
@@ -543,6 +627,28 @@ function createDesktopIpcActionFollower({
     }
     if (DESKTOP_FOLLOWER_REQUEST_METHODS.has(method)) {
       const route = buildDesktopFollowerRoute(message);
+      const pendingResumeOwnership = route && pendingResumeOwnershipByThreadId.get(route.threadId);
+      if (pendingResumeOwnership) {
+        // Do not let a second phone mutation overtake ownership classification
+        // while a no-snapshot resume is reading immutable task provenance.
+        pendingResumeOwnership.then(() => {
+          if (stopped) return;
+          if (isDesktopRoutableThread(route.threadId)) {
+            submitDesktopFollowerRequest(route, message);
+          } else if (liveOwnerThreadIds.has(route.threadId)
+            || isLocallyOwnedThread(route.threadId)) {
+            forwardToLocalCodex?.(rawMessage);
+          } else {
+            // Historical CLI provenance permits the resume attempt, but only
+            // its successful app-server response proves local writer ownership.
+            // A concurrent mutation must wait for that acknowledgement.
+            rejectUnconfirmedOwnerMutation(message);
+          }
+        }).catch(() => {
+          if (!stopped) rejectUnconfirmedOwnerMutation(message);
+        });
+        return true;
+      }
       if (route && isDesktopRoutableThread(route.threadId)) {
         submitDesktopFollowerRequest(route, message);
         return true;
@@ -578,6 +684,9 @@ function createDesktopIpcActionFollower({
     if (tryServeDesktopOwnedRead(message)) {
       return true;
     }
+    if (tryBootstrapDesktopResume(message, rawMessage)) {
+      return true;
+    }
 
     if (!DESKTOP_STATE_READ_METHODS.has(method)) {
       return false;
@@ -600,6 +709,7 @@ function createDesktopIpcActionFollower({
   }
 
   function stopAll() {
+    stopped = true;
     for (const threadId of pendingSnapshotsByThreadId.keys()) {
       cancelPendingSnapshot(threadId);
     }
@@ -628,9 +738,17 @@ function createDesktopIpcActionFollower({
     baselineRecoveryStateByThreadId.clear();
     queuedChangesByThreadId.clear();
     liveOwnerThreadIds.clear();
+    locallyAcquiredThreadIds.clear();
     ownershipProbeDeadlinesByThreadId.clear();
     pendingOwnershipProbeTokensByThreadId.clear();
     desktopOwnedByProbeThreadIds.clear();
+    desktopMutationRiskThreadIds.clear();
+    desktopOriginThreadIds.clear();
+    desktopOriginCheckedThreadIds.clear();
+    desktopOriginCandidatesByThreadId.clear();
+    pendingResumeOwnershipByThreadId.clear();
+    confirmedDesktopOwnerClientIdsByThreadId.clear();
+    ownerUnavailableThreadIds.clear();
     for (const queue of heldFollowerRequestsByThreadId.values()) {
       for (const entry of queue) {
         clearTimeout(entry.timer);
@@ -644,7 +762,11 @@ function createDesktopIpcActionFollower({
   function onEnvelope(envelope) {
     if (envelope?.type === "broadcast" && envelope.method === CLIENT_STATUS_CHANGED) {
       if (normalizeToken(envelope.params?.status) === "disconnected") {
-        removeFollowerClient(envelope.params?.clientId || envelope.sourceClientId);
+        const clientId = envelope.params?.clientId || envelope.sourceClientId;
+        removeFollowerClient(clientId);
+        for (const [threadId, ownerClientId] of confirmedDesktopOwnerClientIdsByThreadId) {
+          if (ownerClientId === clientId) confirmedDesktopOwnerClientIdsByThreadId.delete(threadId);
+        }
       }
       return;
     }
@@ -690,6 +812,11 @@ function createDesktopIpcActionFollower({
       liveOwnerThreadIds.delete(threadId);
       ownershipProbeDeadlinesByThreadId.delete(threadId);
       desktopOwnedByProbeThreadIds.delete(threadId);
+      ownerUnavailableThreadIds.delete(threadId);
+      const sourceClientId = readString(envelope.sourceClientId);
+      if (sourceClientId && sourceClientId !== ipc.clientId) {
+        confirmedDesktopOwnerClientIdsByThreadId.set(threadId, sourceClientId);
+      }
     } else if (liveOwnerThreadIds.has(threadId) || isLocallyOwnedThread(threadId)) {
       // Desktop echoes of a locally-streamed thread must not become follower
       // state: they would shadow the app-server as the source for reads and
@@ -910,6 +1037,7 @@ function createDesktopIpcActionFollower({
     queuedChangesByThreadId.clear();
     pendingOwnershipProbeTokensByThreadId.clear();
     desktopOwnedByProbeThreadIds.clear();
+    confirmedDesktopOwnerClientIdsByThreadId.clear();
     clearFollowerState();
     // A lost IPC connection is not evidence that Desktop stopped the turn.
     // Keep announced lifecycle state until a reconnect snapshot, archive, or
@@ -1007,6 +1135,9 @@ function createDesktopIpcActionFollower({
     ownershipProbeDeadlinesByThreadId.delete(threadId);
     pendingOwnershipProbeTokensByThreadId.delete(threadId);
     desktopOwnedByProbeThreadIds.delete(threadId);
+    desktopMutationRiskThreadIds.delete(threadId);
+    confirmedDesktopOwnerClientIdsByThreadId.delete(threadId);
+    ownerUnavailableThreadIds.delete(threadId);
     syncProjectedActions(threadId, []);
     rawStatesByThreadId.delete(threadId);
     rawStateUpdatedAtByThreadId.delete(threadId);
@@ -1035,10 +1166,13 @@ function createDesktopIpcActionFollower({
       activeThreadIds.delete(threadId);
     }
     liveOwnerThreadIds.delete(threadId);
+    locallyAcquiredThreadIds.delete(threadId);
     unfollowDesktopThread(threadId);
     ownershipProbeDeadlinesByThreadId.delete(threadId);
     pendingOwnershipProbeTokensByThreadId.delete(threadId);
     desktopOwnedByProbeThreadIds.delete(threadId);
+    confirmedDesktopOwnerClientIdsByThreadId.delete(threadId);
+    ownerUnavailableThreadIds.add(threadId);
     syncProjectedActions(threadId, []);
     rawStatesByThreadId.delete(threadId);
     rawStateUpdatedAtByThreadId.delete(threadId);
@@ -1109,7 +1243,7 @@ function createDesktopIpcActionFollower({
         }
         // A negative discovery answer only means no currently connected client
         // claimed the request. Keep holding so the bounded timer can route the
-        // request through the bus and only fall back locally after no-client-found.
+        // request through the bus; a response error cannot authorize local replay.
       });
   }
 
@@ -1131,7 +1265,210 @@ function createDesktopIpcActionFollower({
   function isDesktopRoutableThread(threadId) {
     return !liveOwnerThreadIds.has(threadId)
       && !isLocallyOwnedThread(threadId)
-      && (rawStatesByThreadId.has(threadId) || desktopOwnedByProbeThreadIds.has(threadId));
+      && !ownerUnavailableThreadIds.has(threadId)
+      && (rawStatesByThreadId.has(threadId)
+        || desktopOwnedByProbeThreadIds.has(threadId)
+        || desktopMutationRiskThreadIds.has(threadId)
+        || hasDesktopOriginHint(threadId));
+  }
+
+  function hasDesktopOriginHint(threadId) {
+    if (desktopOriginThreadIds.has(threadId)) {
+      return true;
+    }
+    if (desktopOriginCheckedThreadIds.has(threadId)) {
+      return false;
+    }
+    const candidate = desktopOriginCandidatesByThreadId.get(threadId);
+    if (!candidate) {
+      return false;
+    }
+    const desktopOrigin = desktopOriginFromThreadRow(candidate);
+    if (desktopOrigin === null) {
+      return false;
+    }
+    desktopOriginCheckedThreadIds.add(threadId);
+    desktopOriginCandidatesByThreadId.delete(threadId);
+    if (desktopOrigin) {
+      desktopOriginThreadIds.add(threadId);
+    }
+    return desktopOrigin;
+  }
+
+  function rejectUnconfirmedOwnerMutation(message) {
+    if (message?.id == null) return;
+    sendApplicationResponse(JSON.stringify({
+      id: message.id,
+      error: {
+        code: -32000,
+        message: "Could not confirm this task's owner yet. Reopen the task and retry.",
+      },
+    }));
+  }
+
+  function isActiveWriterError(error) {
+    return Number(error?.code) === -32600
+      && /active writer|already has a writer/i.test(readString(error?.message));
+  }
+
+  // Owner discovery can use Desktop's stale ownership cache. A successful
+  // complete-history request is read-only and passes the same current-role gate
+  // as settings and turn commands. Target its claiming client so an unrelated
+  // unresponsive IPC peer cannot turn a negative result into a 10-second wait.
+  async function verifyDesktopOwner(threadId) {
+    if (stopped) return false;
+    let ownerClientId = confirmedDesktopOwnerClientIdsByThreadId.get(threadId);
+    if (!ownerClientId) {
+      try {
+        const discovery = await ipc.sendRequest("thread-owner-discovery", {
+          hostId: "local",
+          conversationId: threadId,
+        }, {
+          returnEnvelope: true,
+          timeoutMs: Math.min(requestTimeoutMs, ownershipProbeTimeoutMs),
+        });
+        ownerClientId = readString(discovery?.handledByClientId);
+      } catch {
+        return false;
+      }
+    }
+    if (!ownerClientId || ownerClientId === ipc.clientId) return false;
+    try {
+      const result = await ipc.sendRequest("thread-follower-load-complete-history", {
+        conversationId: threadId,
+      }, {
+        targetClientId: ownerClientId,
+        timeoutMs: Math.min(requestTimeoutMs, DESKTOP_HISTORY_PROBE_TIMEOUT_MS),
+      });
+      if (stopped || result?.revision == null) return false;
+      confirmedDesktopOwnerClientIdsByThreadId.set(threadId, ownerClientId);
+      ownerUnavailableThreadIds.delete(threadId);
+      return true;
+    } catch {
+      confirmedDesktopOwnerClientIdsByThreadId.delete(threadId);
+      return false;
+    }
+  }
+
+  function sendDesktopMetadataResume(message, thread) {
+    if (message.params?.excludeTurns !== true) {
+      throw new Error("This Codex Desktop task needs a metadata-only resume.");
+    }
+    sendApplicationResponse(JSON.stringify({
+      id: message.id,
+      result: {
+        thread: { ...thread, turns: [] },
+        remodexDesktopIpcMirror: true,
+      },
+    }));
+  }
+
+  async function negotiateResumeOwnership(message, threadId) {
+    const metadata = await readThreadMetadata(threadId);
+    if (stopped) throw new Error("Bridge stopped before task ownership was confirmed.");
+    const thread = metadata?.thread || metadata;
+    if (readString(thread?.id) !== threadId) {
+      throw new Error("Read-only task metadata did not match the requested task.");
+    }
+    const desktopOrigin = desktopOriginFromThreadRow(thread);
+    const desktopHint = desktopOrigin === true || hasDesktopOriginHint(threadId);
+    const desktopVerified = desktopHint && !rawStatesByThreadId.has(threadId)
+      ? await verifyDesktopOwner(threadId)
+      : false;
+    if (stopped) throw new Error("Bridge stopped before task ownership was confirmed.");
+    if (rawStatesByThreadId.has(threadId) || desktopVerified) {
+      desktopOriginThreadIds.add(threadId);
+      return { owner: "desktop", thread, initiatingRequestId: message.id };
+    }
+
+    try {
+      if (typeof resumeThreadLocally !== "function") {
+        throw new Error("Local task resume is unavailable.");
+      }
+      const result = await resumeThreadLocally(message);
+      if (stopped) throw new Error("Bridge stopped before local task resume completed.");
+      if (readString(result?.thread?.id) !== threadId) {
+        throw new Error("Local task resume did not return the requested task.");
+      }
+      locallyAcquiredThreadIds.add(threadId);
+      releaseDesktopThreadState(threadId);
+      return { owner: "local", result, initiatingRequestId: message.id };
+    } catch (error) {
+      if (!isActiveWriterError(error)) throw error;
+      if (rawStatesByThreadId.has(threadId) || await verifyDesktopOwner(threadId)) {
+        desktopOriginThreadIds.add(threadId);
+        return { owner: "desktop", thread, initiatingRequestId: message.id };
+      }
+      throw new Error("This task has an active writer, but its owner is unavailable. Open it in Codex Desktop and retry.");
+    }
+  }
+
+  // An old task's origin is historical; the current writer may be Desktop or
+  // this bridge's app-server. Hold every mutation until a read-only Desktop
+  // check or a successful local resume has confirmed which runtime owns it.
+  function tryBootstrapDesktopResume(message, rawMessage) {
+    if (stopped || message?.method !== "thread/resume" || message.id == null
+      || typeof readThreadMetadata !== "function") {
+      return false;
+    }
+    const threadId = readThreadId(message.params);
+    if (!threadId || liveOwnerThreadIds.has(threadId) || isLocallyOwnedThread(threadId)) {
+      return false;
+    }
+    rememberActiveThread(threadId);
+    ipc.ensureConnected();
+    followDesktopThread(threadId);
+    ownerUnavailableThreadIds.delete(threadId);
+    let ownershipRequest = pendingResumeOwnershipByThreadId.get(threadId);
+    if (!ownershipRequest) {
+      ownershipRequest = Promise.resolve()
+        .then(() => negotiateResumeOwnership(message, threadId))
+        .catch((error) => {
+          if (!stopped) {
+            ownerUnavailableThreadIds.add(threadId);
+            rejectHeldFollowerRequests(threadId, "Could not confirm this task's owner yet. Reopen the task and retry.");
+          }
+          throw error;
+        });
+      pendingResumeOwnershipByThreadId.set(threadId, ownershipRequest);
+      ownershipRequest.finally(() => {
+        if (pendingResumeOwnershipByThreadId.get(threadId) === ownershipRequest) {
+          pendingResumeOwnershipByThreadId.delete(threadId);
+        }
+      }).catch(() => {});
+    }
+    ownershipRequest.then((outcome) => {
+      if (stopped) return;
+      if (tryServeDesktopOwnedRead(message)) {
+        return;
+      }
+      if (outcome.owner === "desktop") {
+        desktopOriginThreadIds.add(threadId);
+        desktopOriginCheckedThreadIds.add(threadId);
+        desktopOriginCandidatesByThreadId.delete(threadId);
+        try {
+          sendDesktopMetadataResume(message, outcome.thread);
+        } catch (error) {
+          sendApplicationResponse(JSON.stringify({
+            id: message.id,
+            error: { code: -32000, message: error.message },
+          }));
+        }
+        return;
+      }
+      if (requestIdKey(outcome.initiatingRequestId) !== requestIdKey(message.id)) {
+        forwardToLocalCodex(rawMessage);
+        return;
+      }
+      sendApplicationResponse(JSON.stringify({ id: message.id, result: outcome.result }));
+    }).catch((error) => {
+      if (stopped) return;
+      sendApplicationResponse(JSON.stringify({
+        id: message.id,
+        error: { code: -32000, message: error.message },
+      }));
+    });
+    return true;
   }
 
   function holdFollowerRequest(threadId, rawMessage) {
@@ -1177,16 +1514,41 @@ function createDesktopIpcActionFollower({
 
   // Codex Desktop's real IPC router ignores client-origin discovery probes, so an
   // unanswered probe proves nothing. Route the expired request through the bus as
-  // a normal request: the router discovers a Desktop owner itself, and a proven
-  // no-handler error falls back to the local app-server via the delivery-failure
-  // path instead of double-running the turn on both runtimes.
+  // a normal request: the router discovers a Desktop owner itself. Once sent,
+  // even a no-client-found reply is ambiguous, so it must not be replayed by
+  // the local app-server.
   function routeExpiredHeldRequestThroughBus(rawMessage) {
     const message = safeParseJSON(rawMessage);
     const route = message ? buildDesktopFollowerRoute(message) : null;
+    if (stopped) return;
     if (route) {
       // The request is being routed definitively now, so a late discovery answer
       // must not retroactively mark the thread Desktop-owned.
       pendingOwnershipProbeTokensByThreadId.delete(route.threadId);
+      if (ownerUnavailableThreadIds.has(route.threadId)) {
+        rejectUnconfirmedOwnerMutation(message);
+        return;
+      }
+      const pendingResumeOwnership = pendingResumeOwnershipByThreadId.get(route.threadId);
+      if (pendingResumeOwnership) {
+        // The probe deadline cannot authorize a mutation while a simultaneous
+        // resume is still negotiating which process owns the writer.
+        pendingResumeOwnership.then(() => {
+          if (stopped) return;
+          if (ownerUnavailableThreadIds.has(route.threadId)) {
+            rejectUnconfirmedOwnerMutation(message);
+          } else if (liveOwnerThreadIds.has(route.threadId) || isLocallyOwnedThread(route.threadId)) {
+            forwardToLocalCodex?.(rawMessage);
+          } else if (isDesktopRoutableThread(route.threadId)) {
+            submitDesktopFollowerRequest(route, message);
+          } else {
+            rejectUnconfirmedOwnerMutation(message);
+          }
+        }).catch(() => {
+          if (!stopped) rejectUnconfirmedOwnerMutation(message);
+        });
+        return;
+      }
     }
     if (!route || liveOwnerThreadIds.has(route.threadId) || isLocallyOwnedThread(route.threadId)) {
       forwardToLocalCodex(rawMessage);
@@ -1957,7 +2319,9 @@ function createDesktopIpcActionFollower({
       return;
     }
 
-    ipc.sendRequest(payload.method, payload.params)
+    ipc.sendRequest(payload.method, payload.params, {
+      targetClientId: confirmedDesktopOwnerClientIdsByThreadId.get(route.threadId),
+    })
       .then(() => {
         pendingRoutesByRequestId.delete(route.requestId);
         sendApplicationResponse(JSON.stringify(
@@ -1965,6 +2329,9 @@ function createDesktopIpcActionFollower({
         ));
       })
       .catch((error) => {
+        if (/no-client-found|client-disconnected/.test(readString(error?.message))) {
+          confirmedDesktopOwnerClientIdsByThreadId.delete(route.threadId);
+        }
         console.warn(`${logPrefix} desktop action reply failed for ${route.threadId}: ${error.message}`);
         sendApplicationResponse(JSON.stringify({
           id: responseMessage.id,
@@ -2008,13 +2375,30 @@ function createDesktopIpcActionFollower({
       };
     }
     if (method === "turn/steer") {
+      const input = Array.isArray(params.input) ? params.input : [];
+      const state = rawStatesByThreadId.get(threadId);
+      const cwd = readString(state?.cwd) || readString(state?.current_working_directory) || null;
+      const clientUserMessageId = readString(params.clientUserMessageId) || requestId;
       return {
         threadId,
         method: "thread-follower-steer-turn",
         params: {
           conversationId: threadId,
-          input: Array.isArray(params.input) ? params.input : [],
+          input,
           ...Object.fromEntries(["clientUserMessageId", "additionalContext", "toolOutput"].filter((key) => hasOwn(params, key)).map((key) => [key, cloneJSON(params[key])])),
+          clientUserMessageId,
+          // Desktop's steerTurn reads restoreMessage.cwd and .context before
+          // forwarding to app-server. Without it, the follower request throws.
+          restoreMessage: {
+            id: clientUserMessageId,
+            text: visibleUserPromptFromInputEntries(input),
+            cwd,
+            context: {
+              workspaceRoots: cwd ? [cwd] : [],
+              commentAttachments: [],
+            },
+            createdAt: now(),
+          },
           expectedTurnId: readString(params.expectedTurnId) || readString(params.expected_turn_id),
         },
       };
@@ -2046,9 +2430,20 @@ function createDesktopIpcActionFollower({
   function submitDesktopFollowerRequest(route, originalMessage) {
     let requestPhase = route.method;
     const startedAt = now();
+    const alreadyDesktopRoutable = isDesktopRoutableThread(route.threadId);
+    // Lock this thread to the Desktop route while the request is queued or in
+    // flight. A second phone mutation must not escape to the local app-server
+    // just because the ownership probe expires or IPC disconnects in between.
+    desktopMutationRiskThreadIds.add(route.threadId);
     enqueueMutation(route.threadId, async () => {
+      if (liveOwnerThreadIds.has(route.threadId) || isLocallyOwnedThread(route.threadId)) {
+        return { forwardLocally: true };
+      }
       const revisionBefore = runtimeSettingsStore?.get?.(route.threadId)?.revision;
       const resolvedRequest = await resolveFollowerRequest(route);
+      if (liveOwnerThreadIds.has(route.threadId) || isLocallyOwnedThread(route.threadId)) {
+        return { forwardLocally: true };
+      }
       if (route.method === "thread-follower-start-turn") {
         // A rejected settings update does not relinquish the Desktop writer.
         // Propagate it without turning a timeout into local delivery failure.
@@ -2065,10 +2460,17 @@ function createDesktopIpcActionFollower({
       return {
         resolvedRequest,
         revisionBefore,
-        result: await ipc.sendRequest(route.method, resolvedRequest.params),
+        result: await ipc.sendRequest(route.method, resolvedRequest.params, {
+          targetClientId: confirmedDesktopOwnerClientIdsByThreadId.get(route.threadId),
+        }),
       };
     })
-      .then(({ resolvedRequest, revisionBefore, result }) => {
+      .then(({ resolvedRequest, revisionBefore, result, forwardLocally }) => {
+        if (forwardLocally) {
+          desktopMutationRiskThreadIds.delete(route.threadId);
+          forwardToLocalCodex?.(JSON.stringify(originalMessage));
+          return;
+        }
         const currentSettings = runtimeSettingsStore?.get?.(route.threadId);
         const receivedOwnerSettings = currentSettings && currentSettings.revision !== revisionBefore;
         let appServerResult = appServerResultForFollowerRequest(route.method, result);
@@ -2090,11 +2492,21 @@ function createDesktopIpcActionFollower({
         }));
       })
       .catch((error) => {
+        if (/no-client-found|client-disconnected/.test(readString(error?.message))) {
+          confirmedDesktopOwnerClientIdsByThreadId.delete(route.threadId);
+        }
         console.warn(`${logPrefix} desktop follower request failed method=${requestPhase} elapsedMs=${now() - startedAt}: ${error.message}`);
         // Only rerun the request locally when we know Desktop never received it.
         // Timeouts and explicit remote errors stay errors: the turn may already be
         // running on Desktop, and executing it again locally would duplicate it.
-        if (typeof forwardToLocalCodex === "function" && isDeliveryFailureError(error)) {
+        const desktopOwnerStillKnown = alreadyDesktopRoutable
+          || rawStatesByThreadId.has(route.threadId)
+          || desktopOwnedByProbeThreadIds.has(route.threadId)
+          || desktopOriginThreadIds.has(route.threadId);
+        if (typeof forwardToLocalCodex === "function"
+          && isDeliveryFailureError(error)
+          && route.method !== "thread-follower-update-thread-settings"
+          && !desktopOwnerStillKnown) {
           const threadId = readString(route.threadId) || readString(route.params?.conversationId);
           if (threadId) {
             releaseDesktopThreadState(threadId);
@@ -2102,14 +2514,25 @@ function createDesktopIpcActionFollower({
           forwardToLocalCodex(JSON.stringify(originalMessage));
           return;
         }
+        const definitiveStaleSteer = route.method === "thread-follower-steer-turn"
+          && error?.desktopIpcResponse === true
+          && isDefinitiveStaleSteerError(error.message);
         sendApplicationResponse(JSON.stringify({
           id: originalMessage.id,
           error: {
             code: -32000,
-            message: "Could not continue this Codex Desktop-owned thread from the phone.",
+            message: definitiveStaleSteer
+              ? error.message
+              : "Could not continue this Codex Desktop-owned thread from the phone.",
           },
         }));
       });
+  }
+
+  function isDefinitiveStaleSteerError(message) {
+    const detail = readString(message);
+    return /\bactiveTurnNotSteerable\b/i.test(detail)
+      || /\bturn is not steerable\b/i.test(detail);
   }
 
   function appServerResultForFollowerRequest(method, result) {
@@ -2149,6 +2572,8 @@ function createDesktopIpcActionFollower({
     await ipc.sendRequest("thread-follower-update-thread-settings", {
       conversationId: threadId,
       threadSettings,
+    }, {
+      targetClientId: confirmedDesktopOwnerClientIdsByThreadId.get(threadId),
     });
   }
 
@@ -2306,7 +2731,24 @@ function createDesktopIpcActionFollower({
   return {
     observeInbound,
     observeThreadListResponse,
+    observeThreadMetadata,
     stopAll,
+    isLocallyAcquiredThread(threadId) {
+      return locallyAcquiredThreadIds.has(readString(threadId));
+    },
+    claimNewLocalThread(threadId) {
+      const normalizedThreadId = readString(threadId);
+      if (!normalizedThreadId) return false;
+      locallyAcquiredThreadIds.add(normalizedThreadId);
+      releaseDesktopThreadState(normalizedThreadId);
+      return true;
+    },
+    releaseLocallyAcquiredThread(threadId) {
+      const normalizedThreadId = readString(threadId);
+      if (!locallyAcquiredThreadIds.has(normalizedThreadId)) return false;
+      removeDesktopThreadState(normalizedThreadId);
+      return true;
+    },
     // True while this thread has live Desktop-owned IPC state mirrored to the
     // phone; used to keep fallback mirrors (rollout tail) silent.
     hasLiveThreadState(threadId) {
@@ -2449,7 +2891,7 @@ function createDesktopIpcClient({
     connectNextSocket();
   }
 
-  function sendRequest(method, params) {
+  function sendRequest(method, params, { targetClientId = "", timeoutMs = requestTimeoutMs, returnEnvelope = false } = {}) {
     ensureConnected();
     if (!socket || socket.destroyed) {
       return Promise.reject(markDeliveryFailureError(new Error("Desktop IPC is not connected.")));
@@ -2463,12 +2905,13 @@ function createDesktopIpcClient({
       clientId,
       initializing: method === "initialize",
     });
+    if (targetClientId) envelope.targetClientId = targetClientId;
 
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         pendingRequests.delete(requestId);
         reject(new Error(`Desktop IPC request timed out: ${method}`));
-      }, requestTimeoutMs);
+      }, timeoutMs);
       timeout.unref?.();
 
       pendingRequests.set(requestId, {
@@ -2476,6 +2919,7 @@ function createDesktopIpcClient({
         resolve,
         reject,
         timeout,
+        returnEnvelope,
       });
       writeFrame(socket, JSON.stringify(envelope), (error) => {
         if (!error) {
@@ -2484,7 +2928,9 @@ function createDesktopIpcClient({
 
         clearTimeout(timeout);
         pendingRequests.delete(requestId);
-        reject(markDeliveryFailureError(error));
+        // socket.write may have delivered a partial or complete frame before
+        // reporting failure. Its callback cannot authorize a second writer.
+        reject(error);
       });
     });
   }
@@ -2583,18 +3029,18 @@ function createDesktopIpcClient({
       pendingRequests.delete(requestId);
       clearTimeout(waiter.timeout);
       if (envelope.resultType === "error") {
-        const error = new Error(envelope.error || `Desktop IPC request failed: ${waiter.method}`);
-        // A no-handler routing error means the request never reached any client,
-        // so callers may safely retry it against the local app-server. Codex
-        // Desktop's router reports this case as "no-client-found".
-        if (/no codex ipc client can handle|no-client-found/i.test(error.message)) {
-          markDeliveryFailureError(error);
-        }
+        const detail = typeof envelope.error === "string"
+          ? envelope.error : readString(envelope.error?.message);
+        const error = new Error(detail || `Desktop IPC request failed: ${waiter.method}`);
+        error.desktopIpcResponse = true;
+        // Desktop's router and a renderer handling a request can both reply
+        // "no-client-found". The error text cannot prove this mutation was
+        // never delivered, so replaying it in the local app-server is unsafe.
         waiter.reject(error);
         return;
       }
 
-      waiter.resolve(envelope.result ?? null);
+      waiter.resolve(waiter.returnEnvelope ? envelope : envelope.result ?? null);
       return;
     }
 
@@ -3643,6 +4089,56 @@ function markDeliveryFailureError(error) {
 
 function isDeliveryFailureError(error) {
   return error?.remodexDeliveryFailed === true;
+}
+
+// Thread/list is available before the first Desktop IPC snapshot. Its rollout
+// path gives an immutable session origin without guessing from a missing
+// discovery answer. Unknown or unreadable provenance stays unknown.
+function desktopOriginFromThreadRow(thread) {
+  const threadId = readString(thread?.id);
+  if (!threadId) {
+    return null;
+  }
+  if (isDesktopRolloutOrigin({
+    originator: thread?.originator || thread?.metadata?.originator,
+    source: thread?.source || thread?.metadata?.source,
+  })) {
+    return true;
+  }
+
+  const filePath = readString(thread?.path) || readString(thread?.rolloutPath);
+  if (!filePath) {
+    return null;
+  }
+  let fileHandle;
+  try {
+    const size = fs.statSync(filePath).size;
+    if (!size) {
+      return null;
+    }
+    fileHandle = fs.openSync(filePath, "r");
+    const buffer = Buffer.alloc(Math.min(size, DESKTOP_ORIGIN_METADATA_HEAD_BYTES));
+    const bytesRead = fs.readSync(fileHandle, buffer, 0, buffer.length, 0);
+    const head = buffer.toString("utf8", 0, bytesRead);
+    const lineEnd = head.indexOf("\n");
+    const firstLine = lineEnd < 0 ? head : head.slice(0, lineEnd);
+    const entry = safeParseJSON(firstLine);
+    const payload = entry?.type === "session_meta" ? entry.payload : null;
+    if (readString(payload?.id) !== threadId) {
+      return null;
+    }
+    return isDesktopRolloutOrigin(payload);
+  } catch {
+    return null;
+  } finally {
+    if (fileHandle !== undefined) {
+      try {
+        fs.closeSync(fileHandle);
+      } catch {
+        // A failed metadata read must not interrupt thread/list delivery.
+      }
+    }
+  }
 }
 
 function seedConversationStateFromThreadRead(response) {

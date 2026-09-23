@@ -54,6 +54,7 @@ private struct MessageRowMessageSignature: Equatable {
     let proposedPlan: MessageRowProposedPlanSignature?
     let subagentAction: MessageRowSubagentActionSignature?
     let structuredUserInputRequest: MessageRowStructuredInputRequestSignature?
+    let asyncUserInput: CodexAsyncUserInput?
     let autoApprovalReview: MessageRowAutoApprovalReviewSignature?
     let orderIndex: Int
 
@@ -80,6 +81,7 @@ private struct MessageRowMessageSignature: Equatable {
         self.subagentAction = message.subagentAction.map(MessageRowSubagentActionSignature.init)
         self.structuredUserInputRequest = message.structuredUserInputRequest
             .map(MessageRowStructuredInputRequestSignature.init)
+        self.asyncUserInput = message.asyncUserInput
         self.autoApprovalReview = message.autoApprovalReview.map(MessageRowAutoApprovalReviewSignature.init)
         self.orderIndex = message.orderIndex
     }
@@ -345,6 +347,7 @@ func timelineSelectableActionText(_ text: String) -> String? {
 // ─── Message row ────────────────────────────────────────────────────
 
 struct MessageRow: View, Equatable {
+    @Environment(CodexService.self) private var codex
     let message: CodexMessage
     let isRetryAvailable: Bool
     let onRetryUserMessage: (String) -> Void
@@ -469,7 +472,7 @@ struct MessageRow: View, Equatable {
                 }
             }
 
-            if window.isPartial {
+            if window.isPartial && !hasUnresolvedNativeAsyncReply {
                 TimelineShowMoreTextButton(
                     hiddenByteCount: window.hiddenByteCount,
                     onTap: expandVisibleText
@@ -514,14 +517,20 @@ struct MessageRow: View, Equatable {
         actionText: String,
         isProgressiveTextWindow: Bool
     ) -> some View {
-        UserMessageBubble(
+        let visibleText = hasUnresolvedNativeAsyncReply ? "Answers sent from Codex" : text
+        return UserMessageBubble(
             message: message,
-            text: text,
-            actionText: actionText,
-            isProgressiveTextWindow: isProgressiveTextWindow,
-            isRetryAvailable: isRetryAvailable,
+            text: visibleText,
+            actionText: hasUnresolvedNativeAsyncReply ? visibleText : actionText,
+            isProgressiveTextWindow: isProgressiveTextWindow && !hasUnresolvedNativeAsyncReply,
+            isRetryAvailable: isRetryAvailable && message.kind != .asyncUserInputAnswer,
             onRetryUserMessage: onRetryUserMessage
         )
+    }
+
+    private var hasUnresolvedNativeAsyncReply: Bool {
+        message.role == .user
+            && message.text.hasPrefix("<send_user_message_question_reply>\n")
     }
 
     private func assistantView(text: String, actionText: String, renderModel: MessageRowRenderModel) -> some View {
@@ -706,6 +715,19 @@ struct MessageRow: View, Equatable {
                     }
                     .padding(.top, trailingAssistantImageReferences.isEmpty ? 0 : 4)
                 }
+            }
+
+            if let asyncInput = message.asyncUserInput {
+                AsyncUserInputCardView(input: asyncInput) { answers in
+                    Task { @MainActor in
+                        await codex.submitAsyncUserInput(
+                            threadId: message.threadId,
+                            messageID: message.id,
+                            answers: answers
+                        )
+                    }
+                }
+                .padding(.top, 8)
             }
 
             if let commentContent, commentContent.hasFindings {

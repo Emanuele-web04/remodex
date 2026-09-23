@@ -87,6 +87,52 @@ private enum RuntimeRequestContract {
 }
 
 extension CodexService {
+    @discardableResult
+    func listOpenCodeModels() async throws -> [OpenCodeModelOption] {
+        isLoadingOpenCodeModels = true
+        defer { isLoadingOpenCodeModels = false }
+        let response = try await sendRequest(
+            method: "remodex/opencode/models",
+            params: .object([:]),
+            timeoutNanoseconds: RuntimeConfigLoadingPolicy.modelListTimeoutNanoseconds,
+            timeoutMessage: "OpenCode models timed out."
+        )
+        guard let items = response.result?.objectValue?["items"]?.arrayValue else {
+            throw CodexServiceError.invalidResponse("OpenCode models response missing items")
+        }
+        let models = items
+            .compactMap { decodeModel(OpenCodeModelOption.self, from: $0) }
+            .sorted { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }
+        openCodeModels = models
+        return models
+    }
+
+    func openCodeModel(id: String?) -> OpenCodeModelOption? {
+        guard let id else { return nil }
+        return openCodeModels.first { $0.id == id }
+    }
+
+    // OpenCode variants are model-specific wire keys, separate from Codex's
+    // app-wide reasoning setting. Only a user selection is persisted locally;
+    // without one the provider chooses its default.
+    func selectedOpenCodeVariant(for threadId: String?) -> String? {
+        guard let threadId else { return nil }
+        if let override = threadRuntimeOverride(for: threadId), override.overridesReasoning {
+            return override.reasoningEffort
+        }
+        return thread(for: threadId)?.reasoningEffort
+    }
+
+    func setOpenCodeVariant(_ variantID: String, for threadId: String?) {
+        guard let threadId = normalizedInterruptIdentifier(threadId),
+              let model = openCodeModel(id: thread(for: threadId)?.model),
+              model.supportsVariant(variantID) else { return }
+        mutateThreadRuntimeOverride(for: threadId) { override in
+            override.reasoningEffort = variantID
+            override.overridesReasoning = true
+        }
+    }
+
     func runtimeAccessConfiguration() -> RuntimeAccessConfiguration {
         RuntimeAccessConfiguration(mode: selectedAccessMode)
     }

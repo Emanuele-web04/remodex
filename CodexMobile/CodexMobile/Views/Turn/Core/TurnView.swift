@@ -1449,6 +1449,13 @@ struct TurnView: View {
     }
 
     private var selectedModelTitle: String {
+        if currentResolvedThread.runtimeProvider == .opencode {
+            let modelID = currentResolvedThread.model
+            return TurnComposerMetaMapper.openCodeRuntimeLabelParts(
+                modelID: modelID,
+                option: codex.openCodeModel(id: modelID)
+            ).modelPart
+        }
         if let selectedModel = codex.selectedModelOption(threadId: thread.id) {
             return TurnComposerMetaMapper.modelTitle(for: selectedModel)
         }

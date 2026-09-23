@@ -28,6 +28,7 @@ enum CodexMessageKind: String, Codable, Hashable, Sendable {
     case plan
     case userInputPrompt
     case autoApprovalReview
+    case asyncUserInputAnswer
 }
 
 struct CodexMessageTextRenderSignature: Codable, Hashable, Sendable {
@@ -85,6 +86,7 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
     var proposedPlan: CodexProposedPlan?
     var subagentAction: CodexSubagentAction?
     var structuredUserInputRequest: CodexStructuredUserInputRequest?
+    var asyncUserInput: CodexAsyncUserInput?
     var autoApprovalReview: CodexAutoApprovalReview?
 
     /// Monotonically increasing counter that preserves insertion order.
@@ -114,6 +116,7 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
         proposedPlan: CodexProposedPlan? = nil,
         subagentAction: CodexSubagentAction? = nil,
         structuredUserInputRequest: CodexStructuredUserInputRequest? = nil,
+        asyncUserInput: CodexAsyncUserInput? = nil,
         autoApprovalReview: CodexAutoApprovalReview? = nil,
         orderIndex: Int? = nil
     ) {
@@ -154,6 +157,7 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
         )
         self.subagentAction = subagentAction
         self.structuredUserInputRequest = structuredUserInputRequest
+        self.asyncUserInput = asyncUserInput
         self.autoApprovalReview = autoApprovalReview
         self.orderIndex = orderIndex ?? CodexMessageOrderCounter.next()
     }
@@ -181,6 +185,7 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
         case proposedPlan
         case subagentAction
         case structuredUserInputRequest
+        case asyncUserInput
         case autoApprovalReview
         case orderIndex
     }
@@ -231,6 +236,7 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
             CodexStructuredUserInputRequest.self,
             forKey: .structuredUserInputRequest
         )
+        asyncUserInput = try container.decodeIfPresent(CodexAsyncUserInput.self, forKey: .asyncUserInput)
         autoApprovalReview = try container.decodeIfPresent(
             CodexAutoApprovalReview.self,
             forKey: .autoApprovalReview
@@ -262,6 +268,7 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
         try container.encodeIfPresent(proposedPlan, forKey: .proposedPlan)
         try container.encodeIfPresent(subagentAction, forKey: .subagentAction)
         try container.encodeIfPresent(structuredUserInputRequest, forKey: .structuredUserInputRequest)
+        try container.encodeIfPresent(asyncUserInput, forKey: .asyncUserInput)
         try container.encodeIfPresent(autoApprovalReview, forKey: .autoApprovalReview)
         try container.encode(orderIndex, forKey: .orderIndex)
     }
@@ -314,6 +321,7 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
             && lhs.proposedPlan == rhs.proposedPlan
             && lhs.subagentAction == rhs.subagentAction
             && lhs.structuredUserInputRequest == rhs.structuredUserInputRequest
+            && lhs.asyncUserInput == rhs.asyncUserInput
             && lhs.autoApprovalReview == rhs.autoApprovalReview
             && lhs.orderIndex == rhs.orderIndex
     }
@@ -341,6 +349,7 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
         hasher.combine(proposedPlan)
         hasher.combine(subagentAction)
         hasher.combine(structuredUserInputRequest)
+        hasher.combine(asyncUserInput)
         hasher.combine(autoApprovalReview)
         hasher.combine(orderIndex)
     }

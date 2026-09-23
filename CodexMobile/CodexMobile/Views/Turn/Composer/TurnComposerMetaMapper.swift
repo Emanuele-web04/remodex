@@ -3,7 +3,7 @@
 // Layer: View Helper
 // Exports: TurnComposerMetaMapper, TurnComposerReasoningDisplayOption,
 //          TurnComposerRuntimeLabelParts
-// Depends on: CodexModelOption, TurnComposerRuntimeState
+// Depends on: CodexModelOption, OpenCodeModelOption, TurnComposerRuntimeState
 
 import Foundation
 
@@ -99,6 +99,66 @@ enum TurnComposerMetaMapper {
         )
     }
 
+    // OpenCode chats pin their model: readable name first, tier as the dim
+    // second part. Falls back to the raw id until the catalog has loaded.
+    static func openCodeRuntimeLabelParts(
+        modelID: String?,
+        option: OpenCodeModelOption?,
+        variantID: String? = nil
+    ) -> TurnComposerRuntimeLabelParts {
+        if let option {
+            let variant = option.reasoningVariants.first { $0.id == variantID }
+            return TurnComposerRuntimeLabelParts(
+                modelPart: option.displayName,
+                effortPart: variant.map(openCodeVariantTitle) ?? option.tier.title
+            )
+        }
+        guard let modelID, !modelID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return TurnComposerRuntimeLabelParts(modelPart: "Select model", effortPart: nil)
+        }
+        return TurnComposerRuntimeLabelParts(
+            modelPart: OpenCodeModelNaming.displayName(forModelID: modelID),
+            effortPart: OpenCodeModelTier(modelID: modelID).title
+        )
+    }
+
+    static func openCodeReasoningDisplayOptions(from model: OpenCodeModelOption?) -> [TurnComposerReasoningDisplayOption] {
+        (model?.reasoningVariants ?? []).enumerated().map { index, variant in
+            TurnComposerReasoningDisplayOption(
+                effort: variant.id,
+                title: openCodeVariantTitle(variant),
+                rankOverride: openCodeVariantRank(variant.reasoningEffort ?? variant.id) ?? 100 + index
+            )
+        }
+        .sorted { $0.rank > $1.rank }
+    }
+
+    static func openCodeVariantTitle(_ variant: OpenCodeModelVariant) -> String {
+        let effort = variant.reasoningEffort ?? variant.id
+        let effortTitle: String
+        switch effort.lowercased() {
+        case "none": effortTitle = "None"
+        case "minimal": effortTitle = "Minimal"
+        case "max": effortTitle = "Max"
+        default: effortTitle = reasoningTitle(for: effort)
+        }
+        guard variant.id.lowercased() != effort.lowercased() else { return effortTitle }
+        return "\(reasoningTitle(for: variant.id)) (\(effortTitle))"
+    }
+
+    private static func openCodeVariantRank(_ value: String) -> Int? {
+        switch value.lowercased() {
+        case "none": return 0
+        case "minimal": return 1
+        case "low": return 2
+        case "medium": return 3
+        case "high": return 4
+        case "xhigh", "extra_high", "extra-high", "very_high", "very-high": return 5
+        case "max": return 6
+        default: return nil
+        }
+    }
+
     // Strips family prefixes ("GPT", "Codex") so the pill shows the short
     // product name, e.g. "GPT-5.5" -> "5.5".
     static func compactModelTitle(from title: String) -> String {
@@ -166,11 +226,13 @@ struct TurnComposerRuntimeLabelParts: Equatable {
 struct TurnComposerReasoningDisplayOption: Identifiable, Equatable {
     let effort: String
     let title: String
+    var rankOverride: Int? = nil
 
     var id: String { effort }
 
     // Provides deterministic ordering for reasoning rows.
     var rank: Int {
+        if let rankOverride { return rankOverride }
         switch title {
         case "Low":
             return 0
