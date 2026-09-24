@@ -5489,7 +5489,8 @@ function decodeOpenCodeThreadListCursor(value) {
   try {
     const cursor = JSON.parse(Buffer.from(value.slice(OPEN_CODE_THREAD_LIST_CURSOR_PREFIX.length), "base64url").toString("utf8"));
     if (!cursor || !Number.isSafeInteger(cursor.o) || cursor.o < 0 || typeof cursor.a !== "boolean") return null;
-    if (cursor.c != null && typeof cursor.c !== "string") return null;
+    if (cursor.c != null && typeof cursor.c !== "string"
+      && (typeof cursor.c !== "object" || Array.isArray(cursor.c))) return null;
     return { codexCursor: cursor.c, openCodeOffset: cursor.o, archived: cursor.a };
   } catch {
     return null;

@@ -388,7 +388,10 @@ extension CodexService {
         return rootThreadIDs
     }
 
-    func unarchiveThread(_ threadId: String) {
+    func unarchiveThread(_ threadId: String, remoteSnapshot: CodexThread? = nil) {
+        if thread(for: threadId) == nil, let remoteSnapshot {
+            upsertThread(remoteSnapshot, treatAsServerState: true)
+        }
         let subtreeThreadIDs = collectSubtreeThreadIDs(for: threadId)
         for subtreeThreadID in subtreeThreadIDs {
             setThreadArchivedLocally(subtreeThreadID, isArchived: false)

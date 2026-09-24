@@ -137,7 +137,7 @@ struct ArchivedChatsView: View {
     }
 
     private func unarchive(_ thread: CodexThread) {
-        codex.unarchiveThread(thread.id)
+        codex.unarchiveThread(thread.id, remoteSnapshot: thread)
         serverArchivedThreads.removeAll { $0.id == thread.id }
     }
 }

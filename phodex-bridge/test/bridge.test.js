@@ -127,6 +127,17 @@ test("mixed thread list keeps each page bounded and pages OpenCode after Codex",
   assert.equal(third.result.nextCursor, null);
 });
 
+test("mixed thread list preserves an object Codex cursor across OpenCode pages", () => {
+  const codexCursor = { token: "older", offset: 12 };
+  const first = JSON.parse(mergeOpenCodeThreadsIntoListResponse(JSON.stringify({
+    id: "first", result: { data: [{ id: "codex-1" }], nextCursor: codexCursor },
+  }), [{ id: "opencode:ses_1" }, { id: "opencode:ses_2" }], { limit: 2 }));
+
+  assert.deepEqual(decodeOpenCodeThreadListCursor(first.result.nextCursor), {
+    codexCursor, openCodeOffset: 1, archived: false,
+  });
+});
+
 test("mixed thread list enforces the relay budget after adding provider rows", () => {
   const hugeTitle = "x".repeat(4 * 1024 * 1024);
   const result = mergeOpenCodeThreadsIntoListResponse(JSON.stringify({

@@ -34,7 +34,9 @@ private struct TurnViewAlertModifier: ViewModifier {
                 Button("Approve") {
                     onApproveApproval(request)
                 }
-                if let onApproveForSession {
+                if let onApproveForSession,
+                   (request.method == "item/commandExecution/requestApproval"
+                    || request.method == "item/command_execution/request_approval") {
                     Button("Always allow this pattern") {
                         onApproveForSession(request)
                     }

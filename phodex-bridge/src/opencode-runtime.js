@@ -292,7 +292,6 @@ function createOpenCodeRuntime({
   completedTurnStateGraceMs = 60_000,
   variantCatchupMs = 5_000,
   turnPollIntervalMs = 750,
-  idleCompletionGraceMs = 5_000,
 } = {}) {
   if (typeof fetchImpl !== "function") throw new Error("OpenCode runtime requires fetch");
   let baseUrl = configuredBaseUrl || "";
@@ -319,6 +318,7 @@ function createOpenCodeRuntime({
   const messageIDsByTurn = new Map();
   const partIDsByTurn = new Map();
   const completedTurnCleanupTimers = new Map();
+  const phoneTurnIds = new Set();
   const pendingUnknownParts = new Map();
   const resolvingUnknownMessages = new Map();
   const sessionStatuses = new Map();
@@ -516,6 +516,7 @@ function createOpenCodeRuntime({
     }
     messageIDsByTurn.delete(turnId);
     partIDsByTurn.delete(turnId);
+    phoneTurnIds.delete(turnId);
     completedTurnCleanupTimers.delete(turnId);
   }
 
@@ -581,8 +582,7 @@ function createOpenCodeRuntime({
   function watchTurn(session, turnId) {
     stopTurnPoll(session.id);
     const state = {
-      turnId, seenBusy: false, seenUserMessage: false, idleSnapshots: 0,
-      startedAt: Date.now(), timer: null,
+      turnId, seenBusy: false, timer: null,
     };
     polledTurns.set(session.id, state);
     const poll = async () => {
@@ -606,37 +606,33 @@ function createOpenCodeRuntime({
           const belongsToTurn = info?.role === "user" && turnId === `opencode-turn:${info.id}`
             || info?.role === "assistant" && turnId === `opencode-turn:${info.parentID}`;
           if (!belongsToTurn) continue;
-          if (info.role === "user") state.seenUserMessage = true;
           rememberMessageInfo(session.id, info, { allowStart: false });
           for (const part of message.parts || []) {
             emitItem({ ...part, sessionID: part.sessionID || session.id, messageID: part.messageID || info.id });
           }
           if (info.role === "assistant") {
-            if (info.time?.completed) assistantCompleted = true;
-            if (info.error) {
-              assistantFailure = info.error?.data?.message || info.error?.message
-                || info.error?.name || "OpenCode turn failed";
-              assistantInterrupted = /abort|interrupt/i.test(info.error?.name || "");
-            }
+            // The latest assistant message determines the result. A retry can
+            // succeed after an earlier assistant message failed.
+            assistantCompleted = Boolean(info.time?.completed);
+            assistantFailure = info.error
+              ? info.error?.data?.message || info.error?.message || info.error?.name || "OpenCode turn failed"
+              : null;
+            assistantInterrupted = Boolean(info.error && /abort|interrupt/i.test(info.error?.name || ""));
           }
         }
         const statusEntry = statuses[session.id];
         const status = statusEntry?.type;
         if (status === "busy" || status === "retry") {
           state.seenBusy = true;
-          state.idleSnapshots = 0;
-        } else {
-          state.idleSnapshots += 1;
         }
         if (status === "error") {
           assistantFailure = assistantFailure || statusEntry?.error?.message || "OpenCode turn failed";
         }
-        // An assistant message can complete before later tool or assistant steps.
-        // Only the session becoming idle establishes that the turn has ended.
+        // A missing status entry is not an idle signal. The assistant's
+        // terminal message or an explicit idle/error status must end the turn.
         if (status !== "busy" && status !== "retry"
-          && (state.seenBusy || assistantCompleted || status === "error"
-            || (state.seenUserMessage && state.idleSnapshots >= 2
-              && Date.now() - state.startedAt >= idleCompletionGraceMs))) {
+          && ((status === "idle" && state.seenBusy) || assistantCompleted
+            || (assistantFailure && status == null) || status === "error")) {
           finishTurn(session.id,
             assistantInterrupted ? "interrupted" : assistantFailure ? "failed" : "completed",
             assistantFailure);
@@ -664,7 +660,7 @@ function createOpenCodeRuntime({
       threadId,
       turnId,
       item,
-      ...(role === "user" ? { remodexDesktopMirror: true } : {}),
+      ...(role === "user" && !phoneTurnIds.has(turnId) ? { remodexDesktopMirror: true } : {}),
     };
     const previous = streamedParts.get(part.id);
     if (!previous) {
@@ -1299,6 +1295,7 @@ function createOpenCodeRuntime({
       const parts = partsFromInput(params.input);
       const messageID = `msg_${randomBytes(12).toString("hex")}`;
       const turnId = `opencode-turn:${messageID}`;
+      phoneTurnIds.add(turnId);
       sessionEventRevisions.set(session.id, (sessionEventRevisions.get(session.id) || 0) + 1);
       try {
         await request(`/session/${encodeURIComponent(session.id)}/prompt_async${directory}`, {
@@ -1307,6 +1304,7 @@ function createOpenCodeRuntime({
             ...(variant ? { variant } : {}), parts },
         });
       } catch (error) {
+        phoneTurnIds.delete(turnId);
         if (running.get(session.id)?.turnId === turnId) running.delete(session.id);
         throw error;
       }
@@ -1399,6 +1397,7 @@ function createOpenCodeRuntime({
     for (const sessionID of polledTurns.keys()) stopTurnPoll(sessionID);
     for (const timer of completedTurnCleanupTimers.values()) clearTimeout(timer);
     completedTurnCleanupTimers.clear();
+    phoneTurnIds.clear();
     streamedParts.clear();
     messageRoles.clear();
     messageTurnIds.clear();

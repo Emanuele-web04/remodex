@@ -250,7 +250,9 @@ test("phone turn polling streams a Mac-created session when serve emits no turn 
     "GET /session/ses_test/message?directory=%2Frepo%2Fapp&limit=20": () => {
       reads += 1;
       return response([
-        { info: { id: userMessageID, role: "user" }, parts: [] },
+        { info: { id: userMessageID, role: "user" }, parts: [
+          { id: "prt_user_phone", type: "text", text: "Continue" },
+        ] },
         { info: { id: "msg_reply", role: "assistant", parentID: userMessageID,
           time: reads > 1 ? { completed: 123 } : {} },
           parts: [{ id: "prt_reply", type: "text", text: reads > 1 ? "Hello" : "Hel",
@@ -262,7 +264,7 @@ test("phone turn polling streams a Mac-created session when serve emits no turn 
   const runtime = createOpenCodeRuntime({
     baseUrl: "http://127.0.0.1:7777", fetchImpl: server.fetch,
     onNotification: (message) => outbound.push(message), turnPollIntervalMs: 5,
-    idleCompletionGraceMs: 10, reconnectDelayMs: 60_000,
+    reconnectDelayMs: 60_000,
   });
   t.after(() => runtime.shutdown());
   await runtime.handleRequest({ method: "turn/start", params: {
@@ -273,6 +275,8 @@ test("phone turn polling streams a Mac-created session when serve emits no turn 
     .map((message) => message.params.delta), ["lo"]);
   assert.equal(outbound.filter((message) => message.method === "item/started"
     && message.params.item.id === "prt_reply").length, 1);
+  assert.equal(outbound.find((message) => message.method === "item/started"
+    && message.params.item.id === "prt_user_phone")?.params.remodexDesktopMirror, undefined);
   assert.equal(outbound.at(-1).params.turn.status, "completed");
 });
 
@@ -351,9 +355,10 @@ test("polled OpenCode assistant errors finish the phone turn as failed", async (
   assert.equal(terminal.params.turn.error.message, "Model unavailable");
 });
 
-test("polled turns settle after repeated idle snapshots without a busy or completed marker", async (t) => {
+test("polled turns wait for terminal evidence when the status map omits a running session", async (t) => {
   let userMessageID;
   let reads = 0;
+  let assistantDone = false;
   const outbound = [];
   const session = { ...createMockServer().session };
   const server = createMockServer({
@@ -364,21 +369,64 @@ test("polled turns settle after repeated idle snapshots without a busy or comple
     },
     "GET /session/ses_test/message?directory=%2Frepo%2Fapp&limit=20": () => {
       reads += 1;
-      return response([{ info: { id: userMessageID, role: "user" }, parts: [] }]);
+      return response([
+        { info: { id: userMessageID, role: "user" }, parts: [] },
+        ...(assistantDone ? [{ info: { id: "msg_reply", role: "assistant", parentID: userMessageID,
+          time: { completed: 123 } }, parts: [] }] : []),
+      ]);
     },
     "GET /session/status?directory=%2Frepo%2Fapp": () => response({}),
   });
   const runtime = createOpenCodeRuntime({
     baseUrl: "http://127.0.0.1:7777", fetchImpl: server.fetch,
     onNotification: (message) => outbound.push(message), turnPollIntervalMs: 5,
-    idleCompletionGraceMs: 10, reconnectDelayMs: 60_000,
+    reconnectDelayMs: 60_000,
+  });
+  t.after(() => runtime.shutdown());
+  await runtime.handleRequest({ method: "turn/start", params: {
+    threadId: "opencode:ses_test", input: [{ text: "Continue" }],
+  } });
+  await waitUntil(() => reads >= 2);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(outbound.some((message) => message.method === "turn/completed"), false);
+  assistantDone = true;
+  await waitUntil(() => outbound.some((message) => message.method === "turn/completed"));
+  assert.equal(outbound.find((message) => message.method === "turn/completed").params.turn.status, "completed");
+});
+
+test("a successful OpenCode retry supersedes an earlier assistant error", async (t) => {
+  let userMessageID;
+  let reads = 0;
+  const outbound = [];
+  const server = createMockServer({
+    "POST /session/ses_test/prompt_async?directory=%2Frepo%2Fapp": ({ options }) => {
+      userMessageID = JSON.parse(options.body).messageID;
+      return response(null, { status: 204 });
+    },
+    "GET /session/ses_test/message?directory=%2Frepo%2Fapp&limit=20": () => {
+      reads += 1;
+      return response([
+        { info: { id: userMessageID, role: "user" }, parts: [] },
+        { info: { id: "msg_failed", role: "assistant", parentID: userMessageID,
+          error: { name: "ProviderError", message: "Temporary error" }, time: { completed: 100 } }, parts: [] },
+        ...(reads > 1 ? [{ info: { id: "msg_success", role: "assistant", parentID: userMessageID,
+          time: { completed: 200 } }, parts: [] }] : []),
+      ]);
+    },
+    "GET /session/status?directory=%2Frepo%2Fapp": () => response({
+      ses_test: { type: reads > 1 ? "idle" : "retry" },
+    }),
+  });
+  const runtime = createOpenCodeRuntime({
+    baseUrl: "http://127.0.0.1:7777", fetchImpl: server.fetch,
+    onNotification: (message) => outbound.push(message), turnPollIntervalMs: 5,
+    reconnectDelayMs: 60_000,
   });
   t.after(() => runtime.shutdown());
   await runtime.handleRequest({ method: "turn/start", params: {
     threadId: "opencode:ses_test", input: [{ text: "Continue" }],
   } });
   await waitUntil(() => outbound.some((message) => message.method === "turn/completed"));
-  assert.ok(reads >= 2);
   assert.equal(outbound.find((message) => message.method === "turn/completed").params.turn.status, "completed");
 });
 
