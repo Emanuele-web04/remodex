@@ -23,6 +23,7 @@ const {
 } = require("./bridge-status");
 const { createCodexTransport } = require("./codex-transport");
 const { createOpenCodeRuntime } = require("./opencode-runtime");
+const { createRelayWatchdog } = require("./relay-watchdog");
 const {
   createThreadRolloutActivityWatcher,
   findRecentRolloutFileForContextRead,
@@ -97,7 +98,6 @@ const {
 const { buildApplyPatchFileChangeItem } = require("./apply-patch-changes");
 
 const execFileAsync = promisify(execFile);
-const RELAY_WATCHDOG_PING_INTERVAL_MS = 10_000;
 const RELAY_HISTORY_IMAGE_REFERENCE_URL = "remodex://history-image-elided";
 const RELAY_THREAD_PAYLOAD_SOFT_LIMIT_BYTES = 4 * 1024 * 1024;
 const OPEN_CODE_THREAD_LIST_CURSOR_PREFIX = "remodex-opencode-list-v1:";
@@ -779,7 +779,7 @@ function startBridge({
   let isShuttingDown = false;
   let reconnectAttempt = 0;
   let reconnectTimer = null;
-  let relayWatchdogTimer = null;
+  let relayWatchdog = null;
   let lastRelayActivityAt = 0;
   let lastConnectionStatus = null;
   let codexLaunchState = config.codexEndpoint ? "connected" : "starting";
@@ -1019,12 +1019,8 @@ function startBridge({
   }
 
   function clearRelayWatchdog() {
-    if (!relayWatchdogTimer) {
-      return;
-    }
-
-    clearInterval(relayWatchdogTimer);
-    relayWatchdogTimer = null;
+    relayWatchdog?.stop();
+    relayWatchdog = null;
   }
 
   function prepareBridgeShutdown() {
@@ -1067,30 +1063,15 @@ function startBridge({
     clearRelayWatchdog();
     markRelayActivity();
 
-    relayWatchdogTimer = setInterval(() => {
-      if (isShuttingDown || socket !== trackedSocket) {
-        clearRelayWatchdog();
-        return;
-      }
-
-      if (trackedSocket.readyState !== WebSocket.OPEN) {
-        return;
-      }
-
-      if (hasRelayConnectionGoneStale(lastRelayActivityAt)) {
+    relayWatchdog = createRelayWatchdog({
+      socket: trackedSocket,
+      getLastActivityAt: () => lastRelayActivityAt,
+      shouldRun: () => !isShuttingDown && socket === trackedSocket,
+      onStale() {
         console.warn("[remodex] relay heartbeat stalled; forcing reconnect");
         logConnectionStatus("disconnected");
-        trackedSocket.terminate();
-        return;
-      }
-
-      try {
-        trackedSocket.ping();
-      } catch {
-        trackedSocket.terminate();
-      }
-    }, RELAY_WATCHDOG_PING_INTERVAL_MS);
-    relayWatchdogTimer.unref?.();
+      },
+    });
   }
 
   // Keeps npm start output compact by emitting only high-signal connection states.
