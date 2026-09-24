@@ -156,7 +156,10 @@ extension CodexService {
     }
 
     func dismissVisibleError(threadId: String) {
-        asyncUserInputErrorsByThread.removeValue(forKey: threadId)
+        guard activeThreadId == threadId else { return }
+        if lastErrorMessage == asyncUserInputErrorsByThread[threadId] {
+            asyncUserInputErrorsByThread.removeValue(forKey: threadId)
+        }
         lastErrorMessage = nil
     }
 
