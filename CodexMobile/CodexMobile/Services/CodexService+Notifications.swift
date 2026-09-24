@@ -60,6 +60,11 @@ final class CodexNotificationCenterDelegateProxy: NSObject, UNUserNotificationCe
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification
     ) async -> UNNotificationPresentationOptions {
+        // A completion queued while Control Center or another app covered the
+        // timeline must remain visible even if iOS delivers it after reactivation.
+        if notification.request.content.userInfo[CodexNotificationPayloadKeys.presentWhenActive] as? Bool == true {
+            return [.banner, .sound]
+        }
         // ScenePhase can remain `.inactive` during a lock or app switch. In that
         // transition the timeline is no longer visible, even if UIKit still
         // routes the notification through the foreground delegate.
@@ -470,6 +475,7 @@ private extension CodexService {
             CodexNotificationPayloadKeys.threadId: threadId,
             CodexNotificationPayloadKeys.turnId: turnId ?? "",
             CodexNotificationPayloadKeys.result: result.rawValue,
+            CodexNotificationPayloadKeys.presentWhenActive: true,
         ]
 
         let request = UNNotificationRequest(

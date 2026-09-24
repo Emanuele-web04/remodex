@@ -266,6 +266,7 @@ enum CodexNotificationPayloadKeys {
     static let turnId = "turnId"
     static let result = "result"
     static let requestId = "requestId"
+    static let presentWhenActive = "presentWhenActive"
 }
 
 // Tracks the real terminal outcome of a run, including user interruption.

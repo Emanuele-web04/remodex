@@ -1760,6 +1760,20 @@ extension CodexService {
             return
         }
 
+        // `opencode run` can leave its server title at the generated timestamp.
+        // Use the first mirrored prompt as a lightweight sidebar preview; a
+        // later real session title still takes precedence over this fallback.
+        if let threadIndex = threadIndex(for: threadId),
+           threads[threadIndex].runtimeProvider == .opencode,
+           threads[threadIndex].displayTitle == CodexThread.defaultDisplayTitle,
+           threads[threadIndex].preview?.isEmpty != false {
+            let firstLine = trimmedText.components(separatedBy: .newlines).first?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !firstLine.isEmpty {
+                threads[threadIndex].preview = String(firstLine.prefix(100))
+            }
+        }
+
         let normalizedItemId = Self.normalizedHistoryIdentifier(itemId)
         if let existingIndex = messagesByThread[threadId]?.lastIndex(where: { candidate in
             guard candidate.role == .user else {

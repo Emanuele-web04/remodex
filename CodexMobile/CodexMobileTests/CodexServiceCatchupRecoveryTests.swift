@@ -116,6 +116,24 @@ final class CodexServiceCatchupRecoveryTests: XCTestCase {
         XCTAssertFalse(service.messages(for: threadID).isEmpty)
     }
 
+    func testMirroredOpenCodePromptTitlesTimestampPlaceholderRow() {
+        let service = makeService()
+        let threadID = "opencode:ses_terminal"
+        service.upsertThread(CodexThread(
+            id: threadID,
+            title: "New session - 2026-09-22T23:15:27.265Z",
+            runtimeProvider: .opencode
+        ))
+
+        service.appendConfirmedMirroredUserMessage(
+            threadId: threadID,
+            turnId: "turn-terminal",
+            text: "inspect the build\nmore details"
+        )
+
+        XCTAssertEqual(service.thread(for: threadID)?.displayTitle, "Inspect the build")
+    }
+
     func testOpenCodeOlderPageFillsGapAfterCachedPhoneTurn() async throws {
         let service = makeService()
         let threadID = "opencode:ses_history_gap"

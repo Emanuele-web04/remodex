@@ -874,6 +874,8 @@ test("parses CRLF global SSE frames and keeps user parts user-scoped", async (t)
   const item = outbound.find((message) => message.method === "item/started")?.params?.item;
   assert.equal(item.role, "user");
   assert.equal(item.content[0].text, "From Mac");
+  assert.equal(outbound.find((message) => message.method === "item/started")?.params?.remodexDesktopMirror, true);
+  assert.equal(outbound.find((message) => message.method === "item/completed")?.params?.remodexDesktopMirror, true);
 });
 
 test("a part arriving after joining a terminal turn resolves its role and durable parent turn", async (t) => {
@@ -897,6 +899,7 @@ test("a part arriving after joining a terminal turn resolves its role and durabl
   const item = outbound.find((event) => event.method === "item/started");
   assert.equal(item?.params.turnId, "opencode-turn:msg_user");
   assert.equal(item?.params.item.type, "agentMessage");
+  assert.equal(item?.params.remodexDesktopMirror, undefined);
   assert.equal(outbound.some((event) => event.params?.turnId === "opencode-turn:msg_assistant"), false);
 });
 

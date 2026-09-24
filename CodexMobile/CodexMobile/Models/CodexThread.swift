@@ -376,25 +376,27 @@ extension CodexThread {
         }
     }
 
+    private func isOpenCodeTimestampPlaceholder(_ value: String?) -> Bool {
+        guard runtimeProvider == .opencode,
+              let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              value.hasPrefix("New session - ") else { return false }
+        return CodexTimestampParser.parseString(String(value.dropFirst("New session - ".count))) != nil
+    }
+
     var displayTitle: String {
         let cleanedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanedName = name?.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanedAgentLabel = agentDisplayLabel?.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanedPreview = preview?.trimmingCharacters(in: .whitespacesAndNewlines)
-        // OpenCode names empty sessions with a timestamp. Treat only that exact
-        // generated shape as a placeholder; keep user-supplied titles intact.
-        let isOpenCodeTimestampPlaceholder: Bool = {
-            guard runtimeProvider == .opencode,
-                  let cleanedTitle,
-                  cleanedTitle.hasPrefix("New session - ") else { return false }
-            let timestamp = String(cleanedTitle.dropFirst("New session - ".count))
-            return CodexTimestampParser.parseString(timestamp) != nil
-        }()
-        let effectiveTitle = Self.isGenericPlaceholderTitle(cleanedTitle) || isOpenCodeTimestampPlaceholder
+        // OpenCode's generated timestamp can arrive in either title or name.
+        // A real user title with the same prefix but no timestamp stays visible.
+        let effectiveTitle = Self.isGenericPlaceholderTitle(cleanedTitle)
+            || isOpenCodeTimestampPlaceholder(cleanedTitle)
             ? nil : cleanedTitle
 
         // Prefer explicit thread name (AI/user rename) over server title fallback.
-        if let cleanedName, !cleanedName.isEmpty {
+        if let cleanedName, !cleanedName.isEmpty,
+           !isOpenCodeTimestampPlaceholder(cleanedName) {
             return cleanedName
         }
 

@@ -1688,6 +1688,33 @@ extension CodexService {
                         }
                         return true
                     }
+                    // A missed live terminal event can be recovered from this
+                    // authoritative turn snapshot. Only notify when the closed
+                    // turn is the one we were tracking, not an older sibling.
+                    if let existingTurnID,
+                       snapshot.latestTurnID == existingTurnID,
+                       let status = snapshot.latestTurnStatus {
+                        let result: CodexRunCompletionResult?
+                        if status.contains("fail") || status.contains("error") {
+                            result = .failed
+                        } else if status.contains("complet") || status == "done" || status == "finished" {
+                            result = .completed
+                        } else {
+                            result = nil
+                        }
+                        if let result {
+                            recordTurnTerminalState(
+                                threadId: normalizedThreadID,
+                                turnId: existingTurnID,
+                                state: result == .failed ? .failed : .completed
+                            )
+                            notifyRunCompletionIfNeeded(
+                                threadId: normalizedThreadID,
+                                turnId: existingTurnID,
+                                result: result
+                            )
+                        }
+                    }
                     clearRunningState(for: normalizedThreadID)
                 }
 

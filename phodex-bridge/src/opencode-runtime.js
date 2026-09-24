@@ -660,11 +660,17 @@ function createOpenCodeRuntime({
     if (completedTurnIds.has(turnId) && !streamedParts.has(part.id)) return false;
     const item = normalizePart(part, role);
     if (!item) return true;
+    const itemParams = {
+      threadId,
+      turnId,
+      item,
+      ...(role === "user" ? { remodexDesktopMirror: true } : {}),
+    };
     const previous = streamedParts.get(part.id);
     if (!previous) {
       streamedParts.set(part.id, { text: part.text || "", part, completed: false, turnId });
       retainTurnPart(turnId, part.id);
-      emit("item/started", { threadId, turnId, item });
+      emit("item/started", itemParams);
     } else if ((part.type === "text" || part.type === "reasoning") && (part.text || "").startsWith(previous.text)) {
       const delta = (part.text || "").slice(previous.text.length);
       if (delta) {
@@ -680,7 +686,7 @@ function createOpenCodeRuntime({
     if (state) state.part = { ...part, text: state.text };
     if (completed && state && !state.completed) {
       state.completed = true;
-      emit("item/completed", { threadId, turnId, item });
+      emit("item/completed", itemParams);
     }
     return true;
   }

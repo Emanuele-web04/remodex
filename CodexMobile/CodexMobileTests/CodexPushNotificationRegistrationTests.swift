@@ -26,6 +26,63 @@ final class CodexPushNotificationRegistrationTests: XCTestCase {
         XCTAssertEqual(service.notificationAuthorizationStatus, .authorized)
     }
 
+    func testInactiveCompletionKeepsBannerIntentWhenDeliveryIsDelayed() async {
+        let center = MockUserNotificationCenter(status: .authorized)
+        let service = makeService(
+            userNotificationCenter: center,
+            remoteNotificationRegistrar: MockRemoteNotificationRegistrar()
+        )
+        service.applicationStateProvider = { .inactive }
+        service.threads = [CodexThread(id: "thread-inactive", title: "Finished work")]
+
+        service.notifyRunCompletionIfNeeded(
+            threadId: "thread-inactive",
+            turnId: "turn-inactive",
+            result: .completed
+        )
+        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertEqual(center.addRequests.count, 1)
+        XCTAssertEqual(
+            center.addRequests.first?.content.userInfo[CodexNotificationPayloadKeys.presentWhenActive] as? Bool,
+            true
+        )
+    }
+
+    func testMissedTerminalEventRecoveredFromSnapshotSchedulesCompletionOnce() async {
+        let center = MockUserNotificationCenter(status: .authorized)
+        let service = makeService(
+            userNotificationCenter: center,
+            remoteNotificationRegistrar: MockRemoteNotificationRegistrar()
+        )
+        service.applicationStateProvider = { .inactive }
+        service.isConnected = true
+        service.isInitialized = true
+        service.supportsTurnPagination = true
+        service.threads = [CodexThread(id: "thread-recovered", title: "Recovered work")]
+        service.markThreadAsRunning("thread-recovered")
+        service.setActiveTurnID("turn-recovered", for: "thread-recovered")
+        service.requestTransportOverride = { method, _ in
+            XCTAssertEqual(method, "thread/turns/list")
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object([
+                    "data": .array([.object([
+                        "id": .string("turn-recovered"),
+                        "status": .string("completed"),
+                    ])]),
+                ]),
+                includeJSONRPC: false
+            )
+        }
+
+        let didRefresh = await service.refreshInFlightTurnState(threadId: "thread-recovered")
+        XCTAssertTrue(didRefresh)
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(center.addRequests.count, 1)
+        XCTAssertEqual(center.addRequests.first?.content.userInfo[CodexNotificationPayloadKeys.turnId] as? String, "turn-recovered")
+    }
+
     func testHandleRemoteNotificationDeviceTokenSyncsManagedPushRegistration() async {
         let center = MockUserNotificationCenter(status: .authorized)
         let registrar = MockRemoteNotificationRegistrar()

@@ -158,6 +158,30 @@ final class CodexThreadStartProjectBindingTests: XCTestCase {
         XCTAssertEqual(thread.displayTitle, "New Thread")
     }
 
+    func testOpenCodeGeneratedTimestampNameFallsBackToPreview() {
+        let placeholder = "New session - 2026-09-22T23:15:27.265Z"
+        let thread = CodexThread(
+            id: "opencode:ses_mirrored",
+            title: placeholder,
+            name: placeholder,
+            preview: "hello from the terminal",
+            runtimeProvider: .opencode
+        )
+
+        XCTAssertEqual(thread.displayTitle, "Hello from the terminal")
+    }
+
+    func testOpenCodeUserTitleWithSimilarPrefixRemainsVisible() {
+        let thread = CodexThread(
+            id: "opencode:ses_named",
+            title: "New session - research notes",
+            name: "New session - research notes",
+            runtimeProvider: .opencode
+        )
+
+        XCTAssertEqual(thread.displayTitle, "New session - research notes")
+    }
+
     func testModelDisplayLabelPrefersProviderName() {
         let thread = CodexThread(
             id: "thread-agent",
