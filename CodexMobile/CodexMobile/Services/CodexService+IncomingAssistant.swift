@@ -442,11 +442,15 @@ private extension CodexService {
             createdAt: decodeHistoryTimestamp(from: paramsObject)
         )
         if thread(for: threadId)?.runtimeProvider != .opencode,
+           messagesByThread[threadId]?.contains(where: { $0.asyncUserInput != nil }) == true,
            var messages = messagesByThread[threadId] {
+            let previous = messages
             CodexAsyncUserInputProjection.reconcile(&messages)
-            messagesByThread[threadId] = messages
-            persistMessages()
-            updateCurrentOutput(for: threadId)
+            if messages != previous {
+                messagesByThread[threadId] = messages
+                persistMessages()
+                updateCurrentOutput(for: threadId)
+            }
         }
         return true
     }

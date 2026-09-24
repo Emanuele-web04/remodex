@@ -62,6 +62,8 @@ extension CodexService {
         runningThreadIDs: Set<String>,
         preferRecentWindow: Bool
     ) async throws -> [CodexMessage] {
+        let threadId = existing.first?.threadId ?? history.first?.threadId
+        let allowsAsyncUserInput = threadId.map { !usesOpenCodeRuntime(threadId: $0) } ?? true
         let mergeTask = Task.detached(priority: .userInitiated) { () throws -> [CodexMessage] in
             if preferRecentWindow {
                 return try Self.mergeRecentHistoryWindow(
@@ -70,7 +72,8 @@ extension CodexService {
                     activeThreadIDs: activeThreadIDs,
                     activeTurnIDs: activeTurnIDs,
                     runningThreadIDs: runningThreadIDs,
-                    windowSize: 160
+                    windowSize: 160,
+                    allowsAsyncUserInput: allowsAsyncUserInput
                 )
             }
 
@@ -79,7 +82,8 @@ extension CodexService {
                 history,
                 activeThreadIDs: activeThreadIDs,
                 activeTurnIDs: activeTurnIDs,
-                runningThreadIDs: runningThreadIDs
+                runningThreadIDs: runningThreadIDs,
+                allowsAsyncUserInput: allowsAsyncUserInput
             )
         }
 
@@ -707,12 +711,15 @@ extension CodexService {
         let activeThreadIDs = Set(activeTurnIdByThread.keys)
         let activeTurnIDs = Set(activeTurnIdByThread.values)
         let runningIDs = runningThreadIDs
+        let threadId = existing.first?.threadId ?? history.first?.threadId
+        let allowsAsyncUserInput = threadId.map { !usesOpenCodeRuntime(threadId: $0) } ?? true
         return (try? Self.mergeHistoryMessages(
             existing,
             history,
             activeThreadIDs: activeThreadIDs,
             activeTurnIDs: activeTurnIDs,
-            runningThreadIDs: runningIDs
+            runningThreadIDs: runningIDs,
+            allowsAsyncUserInput: allowsAsyncUserInput
         )) ?? existing
     }
 
@@ -926,7 +933,8 @@ extension CodexService {
         _ history: [CodexMessage],
         activeThreadIDs: Set<String>,
         activeTurnIDs: Set<String>? = nil,
-        runningThreadIDs: Set<String>
+        runningThreadIDs: Set<String>,
+        allowsAsyncUserInput: Bool = true
     ) throws -> [CodexMessage] {
         if existing.isEmpty {
             // History messages arrive in server order; assign sequential orderIndex values
@@ -1412,7 +1420,7 @@ extension CodexService {
             runningThreadIDs: runningThreadIDs
         )
         merged.sort(by: { $0.orderIndex < $1.orderIndex })
-        if merged.contains(where: { $0.asyncUserInput != nil }) {
+        if allowsAsyncUserInput && merged.contains(where: { $0.asyncUserInput != nil }) {
             CodexAsyncUserInputProjection.reconcile(&merged)
         }
         return historyMessagesMergingGeneratedImageArtifacts(merged)
@@ -1876,7 +1884,8 @@ extension CodexService {
         activeThreadIDs: Set<String>,
         activeTurnIDs: Set<String>? = nil,
         runningThreadIDs: Set<String>,
-        windowSize: Int
+        windowSize: Int,
+        allowsAsyncUserInput: Bool = true
     ) throws -> [CodexMessage] {
         let normalizedWindowSize = max(1, windowSize)
         guard !existing.isEmpty,
@@ -1890,7 +1899,8 @@ extension CodexService {
                 history,
                 activeThreadIDs: activeThreadIDs,
                 activeTurnIDs: activeTurnIDs,
-                runningThreadIDs: runningThreadIDs
+                runningThreadIDs: runningThreadIDs,
+                allowsAsyncUserInput: allowsAsyncUserInput
             )
         }
 
@@ -1903,7 +1913,8 @@ extension CodexService {
             recentHistory,
             activeThreadIDs: activeThreadIDs,
             activeTurnIDs: activeTurnIDs,
-            runningThreadIDs: runningThreadIDs
+            runningThreadIDs: runningThreadIDs,
+            allowsAsyncUserInput: allowsAsyncUserInput
         )
         let boundaryOverlapKeys = Set(stablePrefix.suffix(32).map(Self.historyMessageKey))
         let filteredTail = mergedTail.filter { !boundaryOverlapKeys.contains(historyMessageKey(for: $0)) }

@@ -162,7 +162,7 @@ struct TurnView: View {
                     ))
                 },
                 onDismissError: {
-                    codex.lastErrorMessage = nil
+                    codex.dismissVisibleError(threadId: thread.id)
                 },
                 hasRemoteEarlierMessages: renderSnapshot.hasRemoteOlderHistory,
                 hasLocallyProjectedEarlierMessages: renderSnapshot.hasLocallyProjectedOlderHistory,

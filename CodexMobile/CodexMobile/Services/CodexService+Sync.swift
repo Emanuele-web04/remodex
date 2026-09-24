@@ -644,6 +644,7 @@ extension CodexService {
         clearOutcomeBadge(for: threadId)
         latestTurnTerminalStateByThread.removeValue(forKey: threadId)
         goalByThreadID.removeValue(forKey: threadId)
+        asyncUserInputErrorsByThread.removeValue(forKey: threadId)
         persistThreadRename(nil, for: threadId)
 
         // Drop local-only runtime overrides once a chat is fully removed from the device.

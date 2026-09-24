@@ -437,7 +437,9 @@ final class CodexService {
         didSet {
             // Footer errors belong to the chat where they occurred. Do not
             // carry a previous runtime's error into another conversation.
-            if oldValue != activeThreadId { lastErrorMessage = nil }
+            if oldValue != activeThreadId {
+                lastErrorMessage = activeThreadId.flatMap { asyncUserInputErrorsByThread[$0] }
+            }
         }
     }
     var activeTurnId: String?
@@ -480,6 +482,7 @@ final class CodexService {
     @ObservationIgnored var autoApprovalRetryTokensByReviewKey: [String: CodexAutoApprovalRetryToken] = [:]
     var lastRawMessage: String?
     var lastErrorMessage: String?
+    @ObservationIgnored var asyncUserInputErrorsByThread: [String: String] = [:]
     var recoverableStreamFailuresByThread: [String: CodexStreamFailure] = [:]
     @ObservationIgnored var streamFailureContinuationsInFlight: Set<UUID> = []
     @ObservationIgnored var streamRecoveryConnectionGeneration = 0

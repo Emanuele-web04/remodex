@@ -46,11 +46,12 @@ extension CodexService {
               answers.allSatisfy({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else { return }
         input.answers = answers.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         guard let responseText = input.responseText else { return }
+        setAsyncUserInputError(nil, threadId: threadId)
         guard isConnected, isInitialized else {
             messagesByThread[threadId]?[index].asyncUserInput = input
             persistMessages()
             updateCurrentOutput(for: threadId)
-            lastErrorMessage = "Reconnect to send your answer."
+            setAsyncUserInputError("Reconnect to send your answer.", threadId: threadId)
             return
         }
         let responseMessageID = appendUserMessage(threadId: threadId, text: responseText)
@@ -125,6 +126,7 @@ extension CodexService {
                 )
             }
             setAsyncUserInputStatus(.answered, threadId: threadId, messageID: messageID)
+            setAsyncUserInputError(nil, threadId: threadId)
         } catch {
             // History may have confirmed the reply while the request was in flight.
             if messagesByThread[threadId]?.first(where: { $0.id == messageID })?.asyncUserInput?.status == .answered {
@@ -135,7 +137,7 @@ extension CodexService {
                 await refreshAndFlushQueuedAsyncInput(threadId: threadId)
             } else if !deliveryMayHaveStarted || isDefinitiveAsyncAnswerRejection(error) {
                 resetAsyncUserInputForRetry(threadId: threadId, messageID: messageID)
-                lastErrorMessage = error.localizedDescription
+                setAsyncUserInputError(error.localizedDescription, threadId: threadId)
             } else {
                 // Transport errors can mean the Mac accepted the reply before the socket fell.
                 // Preserve the answer and wait for history instead of sending it twice.
@@ -143,6 +145,19 @@ extension CodexService {
                 scheduleAsyncAnswerVerification(threadId: threadId, delay: 3)
             }
         }
+    }
+
+    private func setAsyncUserInputError(_ message: String?, threadId: String) {
+        let previous = asyncUserInputErrorsByThread[threadId]
+        asyncUserInputErrorsByThread[threadId] = message
+        if activeThreadId == threadId, (message != nil || lastErrorMessage == previous) {
+            lastErrorMessage = message
+        }
+    }
+
+    func dismissVisibleError(threadId: String) {
+        asyncUserInputErrorsByThread.removeValue(forKey: threadId)
+        lastErrorMessage = nil
     }
 
     private func refreshAndFlushQueuedAsyncInput(threadId: String) async {
