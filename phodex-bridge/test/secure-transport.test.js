@@ -358,6 +358,50 @@ test("qr bootstrap starts a fresh replay window instead of leaking buffered mess
   assert.equal(wireMessages.length, 1);
 });
 
+test("secure transport sends initial bridge output without waiting for resumeState", () => {
+  const macIdentity = createOkpKeyPair("ed25519");
+  const phoneIdentity = createOkpKeyPair("ed25519");
+  const phoneEphemeral = createOkpKeyPair("x25519");
+  const secureTransport = createBridgeSecureTransport({
+    sessionId: "session-initial-output",
+    relayUrl: "wss://relay.example/relay",
+    deviceState: {
+      macDeviceId: "mac-initial-output",
+      macIdentityPrivateKey: macIdentity.privateKey,
+      macIdentityPublicKey: macIdentity.publicKey,
+      trustedPhones: {},
+    },
+  });
+  const wireMessages = [];
+  secureTransport.bindLiveSendWireMessage((message) => {
+    wireMessages.push(message);
+    return true;
+  });
+
+  finishHandshake({
+    secureTransport,
+    sessionId: "session-initial-output",
+    macDeviceId: "mac-initial-output",
+    phoneDeviceId: "phone-initial-output",
+    macIdentity,
+    phoneIdentity,
+    phoneEphemeral,
+    handshakeMode: HANDSHAKE_MODE_QR_BOOTSTRAP,
+    lastAppliedBridgeOutboundSeq: 0,
+    skipResumeState: true,
+  });
+
+  assert.equal(secureTransport.isSecureChannelReady(), true);
+  secureTransport.queueOutboundApplicationMessage(
+    JSON.stringify({ id: "initialize", result: { ok: true } }),
+    () => {
+      throw new Error("expected bound sender to handle initial output");
+    }
+  );
+
+  assert.equal(wireMessages.length, 1);
+});
+
 test("rebinding the relay socket replays bridge output from the last phone ack", () => {
   const macIdentity = createOkpKeyPair("ed25519");
   const phoneIdentity = createOkpKeyPair("ed25519");
@@ -775,7 +819,15 @@ test("resume replay does not advance the replay watermark before a phone ack", (
     hkdfSync("sha256", sharedSecret, salt, Buffer.from(`${infoPrefix}|macToPhone`, "utf8"), 32)
   );
 
-  assert.equal(initialReplayWireMessages.length, 1);
+  assert.equal(initialReplayWireMessages.length, 2);
+  const initialReplayPayloads = initialReplayWireMessages.map((message) => {
+    const envelope = JSON.parse(message);
+    return decryptEnvelope(envelope, macToPhoneKey);
+  });
+  assert.deepEqual(
+    initialReplayPayloads.map((payload) => payload.bridgeOutboundSeq),
+    [1, 1]
+  );
 
   const reboundWireMessages = [];
   secureTransport.bindLiveSendWireMessage((message) => {
