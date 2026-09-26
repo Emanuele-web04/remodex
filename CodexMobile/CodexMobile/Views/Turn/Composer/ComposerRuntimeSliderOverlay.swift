@@ -36,6 +36,7 @@ struct ComposerRuntimeSliderOverlay: View {
     let orderedModelOptions: [CodexModelOption]
     let selectedModelID: String?
     let isLoadingModels: Bool
+    var allowsModelSelection: Bool = true
     let onDismiss: () -> Void
 
     // Drives the whole in/out animation: the backdrop fades while the content
@@ -59,6 +60,12 @@ struct ComposerRuntimeSliderOverlay: View {
             // matter where it was opened from or whether the keyboard is up.
             VStack(spacing: 18) {
                 modelRow
+                if !allowsModelSelection {
+                    Text("This chat's model is fixed. Start a new chat to choose a different model.")
+                        .font(AppFont.caption())
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
                 if let status = runtimeState.settingsStatus {
                     Text(status)
                         .font(AppFont.caption())
@@ -121,30 +128,41 @@ struct ComposerRuntimeSliderOverlay: View {
                 fastModeToggle
             }
 
-            UIKitMenuButton {
-                HStack(spacing: 6) {
-                    Text(modelDisplayTitle)
-                        .font(AppFont.title3(weight: .semibold))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-
-                    if let effortDisplayTitle {
-                        Text(effortDisplayTitle)
-                            .font(AppFont.title3(weight: .regular))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-
-                    RemodexIcon.image(systemName: "chevron.right", size: 14, weight: .semibold)
-                        .foregroundStyle(.secondary)
+            if allowsModelSelection {
+                UIKitMenuButton {
+                    modelLabel(showsChevron: true)
+                } menu: {
+                    modelMenu()
                 }
-                .contentShape(Rectangle())
-            } menu: {
-                modelMenu()
+                .accessibilityLabel(modelMenuAccessibilityLabel)
+            } else {
+                modelLabel(showsChevron: false)
+                    .accessibilityLabel(modelMenuAccessibilityLabel)
             }
-            .accessibilityLabel(modelMenuAccessibilityLabel)
         }
         .frame(maxWidth: .infinity)
+    }
+
+    private func modelLabel(showsChevron: Bool) -> some View {
+        HStack(spacing: 6) {
+            Text(modelDisplayTitle)
+                .font(AppFont.title3(weight: .semibold))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+
+            if let effortDisplayTitle {
+                Text(effortDisplayTitle)
+                    .font(AppFont.title3(weight: .regular))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            if showsChevron {
+                RemodexIcon.image(systemName: "chevron.right", size: 14, weight: .semibold)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .contentShape(Rectangle())
     }
 
     // One-tap fast-mode switch: outline zap = normal speed, solid zap = fast.

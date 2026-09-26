@@ -62,6 +62,8 @@ enum GitActionsError: LocalizedError {
             return fallback ?? "Only managed worktrees can be cleaned up automatically."
         case "worktree_cleanup_failed":
             return fallback ?? "We could not clean up the temporary worktree automatically."
+        case "worktree_not_clean", "worktree_in_use", "worktree_usage_unknown", "worktree_not_registered", "worktree_branch_mismatch":
+            return fallback ?? "This worktree cannot be removed safely yet."
         case "handoff_target_dirty":
             return fallback ?? "The handoff destination already has uncommitted changes."
         case "handoff_target_mismatch":
@@ -74,6 +76,25 @@ enum GitActionsError: LocalizedError {
             return fallback ?? "The handoff destination is no longer available on this device."
         default: return fallback ?? "Git operation failed."
         }
+    }
+}
+
+struct GitManagedWorktree: Identifiable, Sendable {
+    let path: String
+    let branch: String?
+    let isClean: Bool
+
+    var id: String { path }
+
+    init?(from json: JSONValue) {
+        guard let object = json.objectValue,
+              let path = object["path"]?.stringValue,
+              !path.isEmpty else {
+            return nil
+        }
+        self.path = path
+        self.branch = object["branch"]?.stringValue
+        self.isClean = object["isClean"]?.boolValue ?? false
     }
 }
 
@@ -199,6 +220,22 @@ final class GitActionsService {
             params["branch"] = .string(branch)
         }
         _ = try await request(method: "git/removeWorktree", params: params)
+    }
+
+    func removeManagedWorktreeSafely(branch: String?) async throws {
+        var params: [String: JSONValue] = [:]
+        if let branch, !branch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            params["branch"] = .string(branch)
+        }
+        _ = try await request(method: "git/removeWorktreeSafely", params: params)
+    }
+
+    func managedWorktrees() async throws -> [GitManagedWorktree] {
+        let json = try await request(method: "git/listManagedWorktrees")
+        guard let entries = json["worktrees"]?.arrayValue else {
+            throw GitActionsError.invalidResponse
+        }
+        return entries.compactMap(GitManagedWorktree.init(from:))
     }
 
     func checkout(branch: String) async throws -> GitCheckoutResult {

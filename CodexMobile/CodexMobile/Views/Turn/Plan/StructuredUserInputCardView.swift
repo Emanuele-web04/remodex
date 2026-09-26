@@ -480,7 +480,7 @@ extension CodexStructuredUserInputQuestion {
     }
 
     var answerFieldPlaceholder: String {
-        isOther ? "Other answer" : "Your answer"
+        options.isEmpty ? "Your answer" : (isOther ? "Other answer" : "Your answer")
     }
 
     var selectionLimitDescription: String? {

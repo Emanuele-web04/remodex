@@ -882,6 +882,11 @@ extension CodexService {
             )
             noteTurnFinished(threadId: threadId, turnId: resolvedTurnID)
             markTurnCompleted(threadId: threadId, turnId: resolvedTurnID)
+            if completesCurrentThreadRun {
+                Task { @MainActor [weak self] in
+                    await self?.flushQueuedAsyncUserInput(threadId: threadId)
+                }
+            }
             if completesCurrentThreadRun, terminalState == .completed {
                 if !shouldRemainLifecycleOnly {
                     Task { @MainActor [weak self] in

@@ -363,7 +363,7 @@ struct TurnGitBranchPickerSheet: View {
                     .disabled(isLoading || isSwitching || isDisabled)
                 }
 
-                if orderedBranches.isEmpty {
+                if orderedBranches.isEmpty && !showsDefaultBranchRow {
                     ContentUnavailableView {
                         RemodexIcon.label("No branches found", systemName: "arrow.triangle.branch")
                     } description: {

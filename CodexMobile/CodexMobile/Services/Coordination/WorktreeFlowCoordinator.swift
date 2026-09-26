@@ -11,6 +11,7 @@ struct WorktreeFlowHandoffMove: Sendable {
     let projectPath: String
     let transferredChanges: Bool
     let createdManagedWorktree: Bool
+    var retiredManagedWorktreePath: String? = nil
 }
 
 enum WorktreeFlowHandoffOutcome: Sendable {
@@ -40,7 +41,10 @@ enum WorktreeFlowCoordinator {
     static func startNewWorktreeChat(
         preferredProjectPath: String,
         baseBranch requestedBaseBranch: String? = nil,
-        codex: CodexService
+        codex: CodexService,
+        runtimeProvider: CodexRuntimeProvider = .codex,
+        openCodeModelID: String? = nil,
+        openCodeVariantID: String? = nil
     ) async throws -> CodexThread {
         let normalizedPreferredProjectPath = try requiredProjectPath(
             preferredProjectPath,
@@ -68,7 +72,12 @@ enum WorktreeFlowCoordinator {
         )
 
         do {
-            let thread = try await codex.startThreadIfReady(preferredProjectPath: result.worktreePath)
+            let thread = try await codex.startThreadIfReady(
+                preferredProjectPath: result.worktreePath,
+                runtimeProvider: runtimeProvider,
+                openCodeModelID: openCodeModelID,
+                openCodeVariantID: openCodeVariantID
+            )
             codex.rememberWorktreeOriginPath(normalizedPreferredProjectPath, forThreadId: thread.id)
             return thread
         } catch {
@@ -177,7 +186,8 @@ enum WorktreeFlowCoordinator {
                 thread: movedThread,
                 projectPath: normalizedLocalCheckoutPath,
                 transferredChanges: didTransferTrackedChanges,
-                createdManagedWorktree: false
+                createdManagedWorktree: false,
+                retiredManagedWorktreePath: sourceProjectPath
             )
         } catch {
             let recoveryDetail = await recoverFailedThreadRebind(
@@ -195,6 +205,21 @@ enum WorktreeFlowCoordinator {
                 )
             )
         }
+    }
+
+    // Called only after a successful Local handoff and an explicit user confirmation.
+    // The bridge rechecks both runtime catalogs and every kind of local file before deleting.
+    static func removeManagedWorktree(
+        at projectPath: String,
+        branch: String? = nil,
+        codex: CodexService
+    ) async throws {
+        let normalizedPath = try requiredProjectPath(
+            projectPath,
+            message: "A valid managed worktree path is required."
+        )
+        let gitService = GitActionsService(codex: codex, workingDirectory: normalizedPath)
+        try await gitService.removeManagedWorktreeSafely(branch: branch)
     }
 
     // Input: source chat plus the Local checkout paired with its repo.

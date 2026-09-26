@@ -1462,6 +1462,7 @@ module.exports = {
   createEmptyConversationState,
   ensureConversationInMap,
   mergeConversationTurnsFromThread,
+  normalizeSandboxPolicyCompatibility,
   normalizeThreadGoal,
   readThreadIdFromParams,
   readTurnIdFromParams,

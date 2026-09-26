@@ -128,7 +128,11 @@ async function handleGitMethod(method, params, options = {}) {
     case "git/transferManagedHandoff":
       return gitTransferManagedHandoff(cwd, params);
     case "git/removeWorktree":
-      return gitRemoveWorktree(cwd, params);
+      return gitRemoveWorktree(cwd, params, options, false);
+    case "git/removeWorktreeSafely":
+      return gitRemoveWorktree(cwd, params, options, true);
+    case "git/listManagedWorktrees":
+      return gitListManagedWorktrees(cwd);
     case "git/stash":
       return gitStash(cwd);
     case "git/stashPop":
@@ -713,7 +717,11 @@ async function createWorktreeAtManagedPath(context, { branch = null, failureMess
     if (didCreateWorktree) {
       await cleanupManagedWorktree(repoRoot, worktreeRootPath, branch);
     } else {
-      fs.rmSync(path.dirname(worktreeRootPath), { recursive: true, force: true });
+      try {
+        fs.rmdirSync(path.dirname(worktreeRootPath));
+      } catch {
+        // A partial checkout may contain files. Keep it for manual recovery.
+      }
     }
 
     if (handoffStashRef) {
@@ -901,7 +909,7 @@ async function gitTransferManagedHandoff(cwd, params) {
   };
 }
 
-async function gitRemoveWorktree(cwd, params) {
+async function gitRemoveWorktree(cwd, params, options = {}, verifyChatCatalog = false) {
   const worktreeRootPath = await resolveRepoRoot(cwd).catch(() => null);
   const localCheckoutRoot = await resolveLocalCheckoutRoot(cwd).catch(() => null);
   const branch = typeof params.branch === "string" ? params.branch.trim() : "";
@@ -915,15 +923,56 @@ async function gitRemoveWorktree(cwd, params) {
   if (!isManagedWorktreePath(worktreeRootPath)) {
     throw gitError("unmanaged_worktree", "Only managed worktrees can be removed automatically.");
   }
-
-  await cleanupManagedWorktree(localCheckoutRoot, worktreeRootPath, branch || null);
-  if (branch && await localBranchExists(localCheckoutRoot, branch)) {
-    throw gitError(
-      "worktree_cleanup_failed",
-      `The temporary worktree was removed, but branch '${branch}' could not be deleted automatically.`
-    );
+  if (path.dirname(path.dirname(normalizeExistingPath(worktreeRootPath))) !== managedWorktreesRoot()) {
+    throw gitError("unmanaged_worktree", "The worktree is outside the managed checkout layout.");
   }
-  return { success: true };
+  const registration = (await registeredWorktrees(localCheckoutRoot))
+    .find((entry) => sameFilePath(entry.path, worktreeRootPath));
+  if (!registration) {
+    throw gitError("worktree_not_registered", "This worktree is no longer registered with Git.");
+  }
+  if (branch && registration.branch !== branch) {
+    throw gitError("worktree_branch_mismatch", "The selected branch does not belong to this worktree.");
+  }
+
+  if (verifyChatCatalog) {
+    await assertWorktreeHasNoBoundChats(worktreeRootPath, options);
+  }
+  await removeCleanManagedWorktree(localCheckoutRoot, worktreeRootPath);
+
+  let removedBranch = false;
+  if (branch && await localBranchExists(localCheckoutRoot, branch)) {
+    try {
+      // Never discard commits unique to the worktree branch.
+      await git(localCheckoutRoot, "branch", "-d", branch);
+      removedBranch = true;
+    } catch {
+      // The checkout is gone; leave an unmerged or otherwise protected branch intact.
+    }
+  }
+  return { success: true, removedBranch };
+}
+
+async function gitListManagedWorktrees(cwd) {
+  const localCheckoutRoot = await resolveLocalCheckoutRoot(cwd).catch(() => null);
+  if (!localCheckoutRoot) {
+    throw gitError("missing_working_directory", "Could not resolve the Local checkout for this project.");
+  }
+  const entries = await registeredWorktrees(localCheckoutRoot);
+  const worktrees = [];
+  for (const entry of entries) {
+    const root = normalizeExistingPath(entry.path);
+    if (!root || !isManagedWorktreePath(root)
+      || path.dirname(path.dirname(root)) !== managedWorktreesRoot()) {
+      continue;
+    }
+    worktrees.push({
+      path: root,
+      branch: entry.branch,
+      isClean: await isWorktreeClean(root),
+    });
+  }
+  return { worktrees };
 }
 
 // ─── Git Stash ────────────────────────────────────────────────
@@ -2087,20 +2136,194 @@ function isPathContainedIn(candidatePath, rootPath) {
 
 async function cleanupManagedWorktree(repoRoot, worktreeRootPath, branchName = null) {
   try {
-    await git(repoRoot, "worktree", "remove", "--force", worktreeRootPath);
+    await removeCleanManagedWorktree(repoRoot, worktreeRootPath);
   } catch {
-    // Fall back to directory cleanup below.
+    // A failed creation can leave copied or generated files behind. Preserve
+    // them and the Git registration for manual recovery instead of forcing a
+    // recursive delete.
+    return;
   }
 
   if (branchName) {
     try {
-      await git(repoRoot, "branch", "-D", branchName);
+      await git(repoRoot, "branch", "-d", branchName);
     } catch {
-      // Best effort: leave the branch around if Git refuses deletion for any reason.
+      // Keep branches with commits not merged into Local.
     }
   }
+}
 
-  fs.rmSync(path.dirname(worktreeRootPath), { recursive: true, force: true });
+function parseRegisteredWorktrees(output) {
+  return String(output || "").split("\0\0").flatMap((record) => {
+    const fields = record.split("\0");
+    const location = fields.find((field) => field.startsWith("worktree "))?.slice(9);
+    if (!location) return [];
+    const branch = fields.find((field) => field.startsWith("branch refs/heads/"))?.slice(18) || null;
+    return [{ path: location, branch }];
+  });
+}
+
+async function registeredWorktrees(localCheckoutRoot) {
+  return parseRegisteredWorktrees(await git(localCheckoutRoot, "worktree", "list", "--porcelain", "-z"));
+}
+
+async function isWorktreeClean(worktreeRootPath) {
+  // `--ignored=matching` includes copied .worktreeinclude files and generated
+  // data that Git's ordinary porcelain status hides.
+  const status = await git(
+    worktreeRootPath,
+    "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching"
+  );
+  return status.length === 0;
+}
+
+async function removeCleanManagedWorktree(localCheckoutRoot, worktreeRootPath) {
+  const registered = await registeredWorktrees(localCheckoutRoot);
+  if (!registered.some((entry) => sameFilePath(entry.path, worktreeRootPath))) {
+    throw gitError("worktree_not_registered", "This worktree is no longer registered with Git.");
+  }
+  if (!(await isWorktreeClean(worktreeRootPath))) {
+    throw gitError(
+      "worktree_not_clean",
+      "This worktree still contains changes, untracked files, or ignored files. Move or remove those files manually before cleanup."
+    );
+  }
+  try {
+    await git(localCheckoutRoot, "worktree", "remove", worktreeRootPath);
+  } catch (error) {
+    throw gitError("worktree_cleanup_failed", error.message || "Git could not remove this worktree.");
+  }
+  // Only remove the empty allocation directory; never recursively delete a
+  // directory that acquired files after the Git operation.
+  try {
+    fs.rmdirSync(path.dirname(worktreeRootPath));
+  } catch (error) {
+    if (error.code !== "ENOTEMPTY" && error.code !== "EEXIST" && error.code !== "ENOENT") {
+      throw gitError("worktree_cleanup_failed", "Git removed the worktree but could not remove its empty wrapper directory.");
+    }
+  }
+}
+
+function catalogRows(result) {
+  const rows = result?.data ?? result?.items ?? result?.threads;
+  if (!Array.isArray(rows)) {
+    throw gitError("worktree_usage_unknown", "Could not verify which chats use this worktree.");
+  }
+  return rows;
+}
+
+function catalogCursor(result) {
+  const cursor = result?.nextCursor ?? result?.next_cursor ?? null;
+  if (cursor === null || cursor === "") return null;
+  if (typeof cursor === "string" || (typeof cursor === "object" && !Array.isArray(cursor))) {
+    return cursor;
+  }
+  throw gitError("worktree_usage_unknown", "The chat catalog returned an unreadable continuation cursor.");
+}
+
+async function codexThreadCatalog(sendCodexRequest, archived, useStateDbOnly) {
+  const rows = [];
+  const cursors = new Set();
+  let cursor = null;
+  let pageCount = 0;
+  do {
+    const result = await sendCodexRequest("thread/list", {
+      archived,
+      sourceKinds: ["cli", "vscode", "appServer", "exec", "unknown"],
+      useStateDbOnly,
+      modelProviders: [],
+      sortKey: "updated_at",
+      limit: 1000,
+      cursor,
+    });
+    rows.push(...catalogRows(result));
+    cursor = catalogCursor(result);
+    const cursorKey = cursor === null ? null : JSON.stringify(cursor);
+    if (cursorKey && cursors.has(cursorKey)) {
+      throw gitError("worktree_usage_unknown", "The chat catalog repeated a page while checking worktree use.");
+    }
+    if (cursorKey) cursors.add(cursorKey);
+    pageCount += 1;
+    if (cursor && pageCount >= 1000) {
+      throw gitError("worktree_usage_unknown", "The chat catalog is too large to verify safely.");
+    }
+  } while (cursor);
+  return rows;
+}
+
+function catalogRowDirectory(row) {
+  if (!row || typeof row !== "object") return null;
+  return firstNonEmptyString([
+    row.directory,
+    row.cwd,
+    row.current_working_directory,
+    row.working_directory,
+    row.projectPath,
+    row.project_path,
+    row.metadata?.directory,
+    row.metadata?.cwd,
+    row.metadata?.projectPath,
+    row.metadata?.project_path,
+  ]);
+}
+
+async function assertWorktreeHasNoBoundChats(worktreeRootPath, { sendCodexRequest, listOpenCodeSessions } = {}) {
+  if (typeof sendCodexRequest !== "function" || typeof listOpenCodeSessions !== "function") {
+    throw gitError("worktree_usage_unknown", "Could not verify which chats use this worktree.");
+  }
+  let rows;
+  try {
+    const [activeDb, archivedDb, activeRollouts, archivedRollouts, openCode] = await Promise.all([
+      codexThreadCatalog(sendCodexRequest, false, true),
+      codexThreadCatalog(sendCodexRequest, true, true),
+      codexThreadCatalog(sendCodexRequest, false, false),
+      codexThreadCatalog(sendCodexRequest, true, false),
+      listOpenCodeSessions(),
+    ]);
+    if (!Array.isArray(openCode)) {
+      throw new Error("OpenCode session catalog is incomplete");
+    }
+    rows = { codex: [...activeDb, ...archivedDb, ...activeRollouts, ...archivedRollouts], openCode };
+  } catch (error) {
+    if (error.errorCode === "worktree_usage_unknown") throw error;
+    throw gitError("worktree_usage_unknown", "Could not verify which chats use this worktree. Try again when both runtimes are available.");
+  }
+  for (const row of rows.openCode) {
+    const directory = catalogRowDirectory(row);
+    if (!directory) {
+      throw gitError("worktree_usage_unknown", "A chat has no known folder, so this worktree cannot be removed safely.");
+    }
+    const normalizedDirectory = normalizeExistingPath(directory);
+    if (normalizedDirectory && isPathContainedIn(normalizedDirectory, worktreeRootPath)) {
+      throw gitError("worktree_in_use", "Another chat still uses this worktree. Move or archive its contents before removing the checkout.");
+    }
+  }
+  const verifiedCodexThreads = new Set();
+  for (const row of rows.codex) {
+    let directory = catalogRowDirectory(row);
+    if (!directory) {
+      const threadId = firstNonEmptyString([row?.id, row?.threadId]);
+      if (!threadId) {
+        throw gitError("worktree_usage_unknown", "A chat has no identifiable folder, so this worktree cannot be removed safely.");
+      }
+      if (verifiedCodexThreads.has(threadId)) continue;
+      let detail;
+      try {
+        detail = (await sendCodexRequest("thread/read", { threadId, includeTurns: false }))?.thread;
+      } catch {
+        throw gitError("worktree_usage_unknown", "Could not verify a chat's folder before removing this worktree.");
+      }
+      directory = catalogRowDirectory(detail);
+      if (!directory && !(detail && Object.hasOwn(detail, "cwd") && detail.cwd === null)) {
+        throw gitError("worktree_usage_unknown", "A chat has no known folder, so this worktree cannot be removed safely.");
+      }
+      verifiedCodexThreads.add(threadId);
+    }
+    const normalizedDirectory = directory ? normalizeExistingPath(directory) : null;
+    if (normalizedDirectory && isPathContainedIn(normalizedDirectory, worktreeRootPath)) {
+      throw gitError("worktree_in_use", "Another chat still uses this worktree. Move its chat to Local before removing the checkout.");
+    }
+  }
 }
 
 function parseWorktreePathByBranch(output, options = {}) {
@@ -2844,6 +3067,7 @@ module.exports = {
     gitCheckout,
     gitStash,
     gitRemoveWorktree,
+    gitListManagedWorktrees,
     isManagedWorktreePath,
     normalizeBranchListEntry,
     normalizeCreatedBranchName,

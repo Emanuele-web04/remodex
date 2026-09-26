@@ -112,7 +112,7 @@ struct ContentView: View {
     }
 
     // Splits lifecycle wiring from presentation modifiers so SwiftUI does not have to type-check one giant body chain.
-    private var rootContentWithLifecycleObservers: some View {
+    private var rootContentWithNavigationObservers: some View {
         rootContent
             .task {
                 RemodexQuickActionCenter.updateShortcutItems(for: codex.threads)
@@ -186,6 +186,10 @@ struct ContentView: View {
                 scheduleSidebarPrewarmIfNeeded()
                 syncDisplayIsland()
             }
+    }
+
+    private var rootContentWithConnectionObservers: some View {
+        rootContentWithNavigationObservers
             .onChange(of: scenePhase) { _, phase in
                 debugSidebarLog("scenePhase changed phase=\(String(describing: phase))")
                 codex.setForegroundState(phase != .background)
@@ -235,6 +239,10 @@ struct ContentView: View {
             .onChange(of: codex.normalizedRelaySessionId) { _, _ in
                 resetSavedMacWakeRecoveryState()
             }
+    }
+
+    private var rootContentWithLifecycleObservers: some View {
+        rootContentWithConnectionObservers
             .onChange(of: codex.threadCompletionBanner) { _, banner in
                 displayIslandCoordinator.rememberCompletion(from: banner, codex: codex)
                 scheduleThreadCompletionBannerDismiss(for: banner)
@@ -312,7 +320,7 @@ struct ContentView: View {
                     manualPairingCode = ""
                 }
             } message: {
-                Text("Paste the pairing code shown in the terminal on your Mac.")
+                Text("Enter the pairing code shown on your Mac. Codes expire after five minutes; generate a new one if needed.")
             }
             // Settings rides on a full-screen cover instead of `navigationPath`
             // so the gear tap inside the iOS 26 `safeAreaBar` header always
@@ -648,8 +656,12 @@ struct ContentView: View {
             onOpenTerminal: {
                 openTerminalFromSidebar(preferredWorkingDirectory: nil)
             },
-            onOpenNewChatDraft: { source, preferredProjectPath in
-                openNewChatDraftFromSidebar(source: source, preferredProjectPath: preferredProjectPath)
+            onOpenNewChatDraft: { source, preferredProjectPath, preferredRuntimeProvider in
+                openNewChatDraftFromSidebar(
+                    source: source,
+                    preferredProjectPath: preferredProjectPath,
+                    preferredRuntimeProvider: preferredRuntimeProvider
+                )
             },
             onNewChatCreationStateChange: { isCreating in
                 setNewChatOpeningState(isCreating)
@@ -1294,12 +1306,14 @@ struct ContentView: View {
     // opened it, so the draft UI can distinguish general Chat from folder Chat.
     private func openNewChatDraftFromSidebar(
         source: NewChatDraftSource,
-        preferredProjectPath: String?
+        preferredProjectPath: String?,
+        preferredRuntimeProvider: CodexRuntimeProvider? = nil
     ) {
         let route = NewChatDraftRoute(
             id: "new-chat-draft-\(UUID().uuidString)",
             preferredProjectPath: preferredProjectPath,
-            source: source
+            source: source,
+            preferredRuntimeProvider: preferredRuntimeProvider
         )
         isOpeningNewChatFromSidebar = false
         selectedThread = nil

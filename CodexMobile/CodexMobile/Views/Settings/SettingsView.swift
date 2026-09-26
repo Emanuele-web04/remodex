@@ -445,7 +445,7 @@ private struct SettingsNotificationsCard: View {
     var body: some View {
         SettingsCard(
             title: "Notifications",
-            footer: "Alerts you when a run finishes while Remodex is in the background."
+            footer: "Local alerts work while Remodex can run in the background. Reliable alerts after iOS suspends the app require a configured push service."
         ) {
             SettingsValueRow(title: "Permission", value: statusLabel)
 

@@ -388,7 +388,10 @@ extension CodexService {
         return rootThreadIDs
     }
 
-    func unarchiveThread(_ threadId: String) {
+    func unarchiveThread(_ threadId: String, remoteSnapshot: CodexThread? = nil) {
+        if thread(for: threadId) == nil, let remoteSnapshot {
+            upsertThread(remoteSnapshot, treatAsServerState: true)
+        }
         let subtreeThreadIDs = collectSubtreeThreadIDs(for: threadId)
         for subtreeThreadID in subtreeThreadIDs {
             setThreadArchivedLocally(subtreeThreadID, isArchived: false)
@@ -641,6 +644,7 @@ extension CodexService {
         clearOutcomeBadge(for: threadId)
         latestTurnTerminalStateByThread.removeValue(forKey: threadId)
         goalByThreadID.removeValue(forKey: threadId)
+        asyncUserInputErrorsByThread.removeValue(forKey: threadId)
         persistThreadRename(nil, for: threadId)
 
         // Drop local-only runtime overrides once a chat is fully removed from the device.

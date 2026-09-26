@@ -9,10 +9,17 @@ import SwiftUI
 struct ArchivedChatsView: View {
     @Environment(CodexService.self) private var codex
     @State private var threadPendingDeletion: CodexThread? = nil
+    @State private var serverArchivedThreads: [CodexThread] = []
+    @State private var loadErrorMessage: String?
 
     private var archivedThreads: [CodexThread] {
-        codex.threads
-            .filter { $0.syncState == .archivedLocal }
+        let localThreads = codex.threads
+        let localIDs = Set(localThreads.map(\.id))
+        let remoteThreads = serverArchivedThreads.filter { remote in
+            !codex.locallyDeletedThreadIDs.contains(remote.id)
+                && !localIDs.contains(remote.id)
+        }
+        return (localThreads.filter { $0.syncState == .archivedLocal } + remoteThreads)
             .sorted {
                 let lhsDate = $0.updatedAt ?? $0.createdAt ?? .distantPast
                 let rhsDate = $1.updatedAt ?? $1.createdAt ?? .distantPast
@@ -43,6 +50,8 @@ struct ArchivedChatsView: View {
         }
         .navigationTitle("Archived Chats")
         .navigationBarTitleDisplayMode(.inline)
+        .task { await loadServerArchivedThreads() }
+        .refreshable { await loadServerArchivedThreads() }
         .confirmationDialog(
             "Remove \"\(threadPendingDeletion?.displayTitle ?? "conversation")\" from this phone?",
             isPresented: Binding(
@@ -54,6 +63,7 @@ struct ArchivedChatsView: View {
             Button("Remove from Phone", role: .destructive) {
                 if let thread = threadPendingDeletion {
                     codex.deleteThreadLocally(thread.id)
+                    serverArchivedThreads.removeAll { $0.id == thread.id }
                 }
                 threadPendingDeletion = nil
             }
@@ -61,7 +71,15 @@ struct ArchivedChatsView: View {
                 threadPendingDeletion = nil
             }
         } message: {
-            Text("This only removes the chat from Remodex on this phone. Nothing is removed from your device or Codex observer.")
+            Text("This only removes the chat from Remodex on this phone. Nothing is removed from your Mac.")
+        }
+        .alert("Could not load archived chats", isPresented: Binding(
+            get: { loadErrorMessage != nil },
+            set: { if !$0 { loadErrorMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) { loadErrorMessage = nil }
+        } message: {
+            Text(loadErrorMessage ?? "Please try again.")
         }
     }
 
@@ -90,7 +108,7 @@ struct ArchivedChatsView: View {
             }
         }
         .swipeActions(edge: .leading, allowsFullSwipe: true) {
-            HapticButton(action: { codex.unarchiveThread(thread.id) }) {
+            HapticButton(action: { unarchive(thread) }) {
                 RemodexIcon.menuLabel("Unarchive", systemName: "tray.and.arrow.up")
             }
             .tint(.blue)
@@ -98,10 +116,28 @@ struct ArchivedChatsView: View {
         .uiKitContextMenu {
             SidebarThreadContextMenu(
                 thread: thread,
-                onArchiveToggle: { codex.unarchiveThread(thread.id) },
+                onArchiveToggle: { unarchive(thread) },
                 onDelete: { threadPendingDeletion = thread }
             )
             .uiMenu()
         }
+    }
+
+    private func loadServerArchivedThreads() async {
+        guard codex.isConnected else { return }
+        do {
+            serverArchivedThreads = try await codex.fetchServerThreads(archived: true).map { remote in
+                var thread = remote
+                thread.syncState = .archivedLocal
+                return thread
+            }
+        } catch {
+            loadErrorMessage = error.localizedDescription
+        }
+    }
+
+    private func unarchive(_ thread: CodexThread) {
+        codex.unarchiveThread(thread.id, remoteSnapshot: thread)
+        serverArchivedThreads.removeAll { $0.id == thread.id }
     }
 }

@@ -7,7 +7,15 @@
 import Foundation
 
 extension CodexService {
+    func usesOpenCodeRuntime(threadId: String) -> Bool {
+        threadId.hasPrefix("opencode:") || thread(for: threadId)?.runtimeProvider == .opencode
+    }
+
     func queueThreadRuntimeSettingsUpdate(threadId: String, fields: Set<String> = ["model", "effort", "serviceTier"]) {
+        guard !usesOpenCodeRuntime(threadId: threadId) else {
+            discardOpenCodeRuntimeSettings(threadId: threadId)
+            return
+        }
         var override = threadRuntimeOverride(for: threadId)
             ?? CodexThreadRuntimeOverride(overridesReasoning: false, overridesServiceTier: false)
         var desired: RPCObject = [
@@ -28,9 +36,28 @@ extension CodexService {
     }
 
     func resumePendingRuntimeSettingsUpdates() {
-        for (threadId, override) in threadRuntimeOverridesByThreadID where !override.pendingRuntimeSettings.isEmpty {
+        for threadId in threadRuntimeOverridesByThreadID.keys where usesOpenCodeRuntime(threadId: threadId) {
+            discardOpenCodeRuntimeSettings(threadId: threadId)
+        }
+        for (threadId, override) in threadRuntimeOverridesByThreadID
+        where !override.pendingRuntimeSettings.isEmpty && !usesOpenCodeRuntime(threadId: threadId) {
             startRuntimeSettingsUpdate(threadId: threadId)
         }
+    }
+
+    private func discardOpenCodeRuntimeSettings(threadId: String) {
+        if lastErrorMessage == runtimeSettingsUpdateErrors[threadId] { lastErrorMessage = nil }
+        runtimeSettingsUpdateErrors.removeValue(forKey: threadId)
+        guard let override = threadRuntimeOverride(for: threadId) else { return }
+        // OpenCode has no Codex owner settings to sync, but its selected
+        // per-turn variant must survive reconnect and app relaunch.
+        let variant = override.overridesReasoning ? override.reasoningEffort : nil
+        applyThreadRuntimeOverride(
+            override.overridesReasoning
+                ? CodexThreadRuntimeOverride(reasoningEffort: variant, overridesReasoning: true, overridesServiceTier: false)
+                : nil,
+            to: threadId
+        )
     }
 
     func cancelRuntimeSettingsUpdates() {
@@ -44,11 +71,28 @@ extension CodexService {
         cancelRuntimeSettingsUpdates()
         confirmedRuntimeSettings.removeAll()
         retiredRuntimeSettingsEpochs.removeAll()
+        if let lastErrorMessage,
+           runtimeSettingsUpdateErrors.values.contains(lastErrorMessage) {
+            self.lastErrorMessage = nil
+        }
         runtimeSettingsUpdateErrors.removeAll()
+    }
+
+    func presentRuntimeSettingsError(for threadId: String) {
+        let threadError = runtimeSettingsUpdateErrors[threadId]
+        if let lastErrorMessage {
+            let belongsToAnotherThread = runtimeSettingsUpdateErrors.contains { entry in
+                entry.key != threadId && entry.value == lastErrorMessage
+            }
+            if belongsToAnotherThread { self.lastErrorMessage = threadError }
+        } else {
+            lastErrorMessage = threadError
+        }
     }
 
     func waitForRuntimeSettingsUpdate(threadId: String) async throws {
         guard isConnected, isInitialized else { throw CodexServiceError.disconnected }
+        if usesOpenCodeRuntime(threadId: threadId) { return }
         while supportsRuntimeSettingsSync {
             guard isConnected, isInitialized else { throw CodexServiceError.disconnected }
             startRuntimeSettingsUpdate(threadId: threadId)
@@ -100,7 +144,8 @@ extension CodexService {
     }
 
     private func startRuntimeSettingsUpdate(threadId: String) {
-        guard supportsRuntimeSettingsSync, isConnected, isInitialized,
+        guard !usesOpenCodeRuntime(threadId: threadId),
+              supportsRuntimeSettingsSync, isConnected, isInitialized,
               runtimeSettingsUpdateTasks[threadId] == nil,
               threadRuntimeOverride(for: threadId)?.pendingRuntimeSettings.isEmpty == false else { return }
         let identifier = UUID()
@@ -120,6 +165,7 @@ extension CodexService {
                     // ownership probes. Use the existing resume path before editing.
                     try await self.ensureThreadResumed(threadId: threadId)
                     guard !Task.isCancelled, self.runtimeSettingsUpdateIDs[threadId] == identifier,
+                          !self.usesOpenCodeRuntime(threadId: threadId),
                           let pending = self.threadRuntimeOverride(for: threadId)?.pendingRuntimeSettings,
                           !pending.isEmpty else { return }
                     sent = pending
@@ -151,7 +197,7 @@ extension CodexService {
                        !pending.isEmpty, pending != sent { continue }
                     let message = "Could not apply task settings: \(error.localizedDescription)"
                     self.runtimeSettingsUpdateErrors[threadId] = message
-                    self.lastErrorMessage = message
+                    if self.activeThreadId == threadId { self.lastErrorMessage = message }
                     return
                 }
             }

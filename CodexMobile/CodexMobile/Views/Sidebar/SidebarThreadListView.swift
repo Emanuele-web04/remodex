@@ -25,6 +25,7 @@ struct SidebarThreadListView: View {
     let onCreateThreadInProjectGroup: (SidebarThreadGroup) -> Void
     var onArchiveProjectGroup: ((SidebarThreadGroup) -> Void)? = nil
     var onDeleteProjectGroup: ((SidebarThreadGroup) -> Void)? = nil
+    var onManageProjectWorktrees: ((SidebarThreadGroup) -> Void)? = nil
     var onRenameThread: ((CodexThread, String) -> Void)? = nil
     var onPinToggleThread: ((CodexThread) -> Void)? = nil
     var onArchiveToggleThread: ((CodexThread) -> Void)? = nil
@@ -220,7 +221,10 @@ struct SidebarThreadListView: View {
             onToggle: { toggleProjectGroupExpansion(group.id) },
             onCreate: { onCreateThreadInProjectGroup(group) },
             onArchive: onArchiveProjectGroup.map { handler in { handler(group) } },
-            onDelete: onDeleteProjectGroup.map { handler in { handler(group) } }
+            onDelete: onDeleteProjectGroup.map { handler in { handler(group) } },
+            onManageWorktrees: group.kind == .project && group.iconSystemName != "remodex.worktree"
+                ? onManageProjectWorktrees.map { handler in { handler(group) } }
+                : nil
         )
     }
 

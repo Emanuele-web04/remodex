@@ -23,6 +23,7 @@ struct SidebarProjectSectionHeader: View {
     let onCreate: () -> Void
     var onArchive: (() -> Void)? = nil
     var onDelete: (() -> Void)? = nil
+    var onManageWorktrees: (() -> Void)? = nil
 
     var body: some View {
         SidebarSectionHeader(
@@ -73,11 +74,23 @@ struct SidebarProjectSectionHeader: View {
     }
 
     private var hasContextMenu: Bool {
-        onArchive != nil || onDelete != nil
+        onArchive != nil || onDelete != nil || onManageWorktrees != nil
     }
 
     private func buildContextMenu() -> UIMenu {
         var children: [UIMenuElement] = []
+
+        if let onManageWorktrees {
+            children.append(
+                UIAction(
+                    title: "Manage Worktrees",
+                    image: RemodexIcon.menuUIImage(systemName: "square.stack.3d.up")
+                ) { _ in
+                    HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                    onManageWorktrees()
+                }
+            )
+        }
 
         if let onArchive {
             children.append(

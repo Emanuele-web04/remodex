@@ -1900,6 +1900,168 @@ test("gitRemoveWorktree removes a managed worktree and its freshly created branc
   }
 });
 
+test("safe worktree cleanup checks active, archived, rollout, and OpenCode chat bindings", async () => {
+  const repoDir = makeTempRepo();
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-codex-home-"));
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = codexHome;
+
+  try {
+    const managed = await __test.gitCreateManagedWorktree(repoDir, {
+      baseBranch: "main", changeTransfer: "none",
+    });
+    const worktreePath = managed.worktreePath;
+    const calls = [];
+    const catalog = {
+      sendCodexRequest: async (method, params) => {
+        calls.push({ method, params });
+        if (method === "thread/read") {
+          return { thread: { id: params.threadId, cwd: null } };
+        }
+        return { data: [{ id: "legacy-rootless" }, { id: "local-chat", cwd: repoDir }], nextCursor: null };
+      },
+      listOpenCodeSessions: async () => [{ id: "open-local", directory: repoDir }],
+    };
+
+    const listed = await __test.gitListManagedWorktrees(repoDir);
+    assert.equal(listed.worktrees.length, 1);
+    assert.equal(listed.worktrees[0].path, worktreePath);
+    assert.equal(listed.worktrees[0].isClean, true);
+
+    await __test.gitRemoveWorktree(worktreePath, {}, catalog, true);
+    assert.equal(fs.existsSync(worktreePath), false);
+    assert.equal(calls.filter((call) => call.method === "thread/list").length, 4);
+    assert.ok(calls.some((call) => call.method === "thread/read" && call.params.threadId === "legacy-rootless"));
+    assert.deepEqual(new Set(calls.filter((call) => call.method === "thread/list").map((call) =>
+      `${call.params.archived}:${call.params.useStateDbOnly}`
+    )), new Set(["false:true", "true:true", "false:false", "true:false"]));
+  } finally {
+    if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previousCodexHome;
+    fs.rmSync(repoDir, { recursive: true, force: true });
+    fs.rmSync(codexHome, { recursive: true, force: true });
+  }
+});
+
+test("safe worktree cleanup refuses chat bindings, missing catalogs, and local files", async () => {
+  const repoDir = makeTempRepo();
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-codex-home-"));
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = codexHome;
+
+  try {
+    fs.writeFileSync(path.join(repoDir, ".gitignore"), "ignored/\n");
+    git(repoDir, "add", ".gitignore");
+    git(repoDir, "commit", "-m", "Ignore generated output");
+    const managed = await __test.gitCreateManagedWorktree(repoDir, {
+      baseBranch: "main", changeTransfer: "none",
+    });
+    const worktreePath = managed.worktreePath;
+    const emptyCatalog = {
+      sendCodexRequest: async () => ({ data: [], nextCursor: null }),
+      listOpenCodeSessions: async () => [],
+    };
+
+    await assert.rejects(
+      __test.gitRemoveWorktree(worktreePath, {}, {}, true),
+      (error) => error?.errorCode === "worktree_usage_unknown"
+    );
+    await assert.rejects(
+      __test.gitRemoveWorktree(worktreePath, {}, {
+        ...emptyCatalog,
+        sendCodexRequest: async () => ({ data: [{ id: "other-chat", cwd: path.join(worktreePath, "phodex-bridge") }] }),
+      }, true),
+      (error) => error?.errorCode === "worktree_in_use"
+    );
+    await assert.rejects(
+      __test.gitRemoveWorktree(worktreePath, {}, {
+        ...emptyCatalog,
+        listOpenCodeSessions: async () => [{ id: "archived-child", directory: worktreePath, time: { archived: 1 } }],
+      }, true),
+      (error) => error?.errorCode === "worktree_in_use"
+    );
+    await assert.rejects(
+      __test.gitRemoveWorktree(worktreePath, {}, {
+        ...emptyCatalog,
+        sendCodexRequest: async (method, params) => params.cursor
+          ? { data: [{ id: "older-chat", cwd: worktreePath }], nextCursor: null }
+          : { data: [], nextCursor: "older-page" },
+      }, true),
+      (error) => error?.errorCode === "worktree_in_use"
+    );
+
+    fs.mkdirSync(path.join(worktreePath, "ignored"));
+    fs.writeFileSync(path.join(worktreePath, "ignored", "output.log"), "keep me");
+    await assert.rejects(
+      __test.gitRemoveWorktree(worktreePath, {}, emptyCatalog, true),
+      (error) => error?.errorCode === "worktree_not_clean"
+    );
+    assert.equal(fs.readFileSync(path.join(worktreePath, "ignored", "output.log"), "utf8"), "keep me");
+    fs.rmSync(path.join(worktreePath, "ignored"), { recursive: true });
+
+    fs.writeFileSync(path.join(worktreePath, "untracked.txt"), "keep me too");
+    await assert.rejects(
+      __test.gitRemoveWorktree(worktreePath, {}, emptyCatalog, true),
+      (error) => error?.errorCode === "worktree_not_clean"
+    );
+    fs.unlinkSync(path.join(worktreePath, "untracked.txt"));
+
+    fs.appendFileSync(path.join(worktreePath, "README.md"), "changed\n");
+    await assert.rejects(
+      __test.gitRemoveWorktree(worktreePath, {}, emptyCatalog, true),
+      (error) => error?.errorCode === "worktree_not_clean"
+    );
+    git(worktreePath, "restore", "README.md");
+    await __test.gitRemoveWorktree(worktreePath, {}, emptyCatalog, true);
+    assert.equal(fs.existsSync(worktreePath), false);
+  } finally {
+    if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previousCodexHome;
+    fs.rmSync(repoDir, { recursive: true, force: true });
+    fs.rmSync(codexHome, { recursive: true, force: true });
+  }
+});
+
+test("safe worktree cleanup preserves a branch with unmerged commits", async () => {
+  const repoDir = makeTempRepo();
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-codex-home-"));
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = codexHome;
+
+  try {
+    const result = await __test.gitCreateWorktree(repoDir, {
+      name: "keep-commits", baseBranch: "main", changeTransfer: "none",
+    });
+    fs.writeFileSync(path.join(result.worktreePath, "committed.txt"), "important\n");
+    git(result.worktreePath, "add", "committed.txt");
+    git(result.worktreePath, "commit", "-m", "Keep this commit");
+
+    const listed = await __test.gitListManagedWorktrees(repoDir);
+    assert.equal(listed.worktrees[0].branch, result.branch);
+    assert.equal(listed.worktrees[0].isClean, true);
+    await assert.rejects(
+      __test.gitRemoveWorktree(result.worktreePath, { branch: "feature/clean-switch" }, {
+        sendCodexRequest: async () => ({ data: [] }),
+        listOpenCodeSessions: async () => [],
+      }, true),
+      (error) => error?.errorCode === "worktree_branch_mismatch"
+    );
+
+    const removal = await __test.gitRemoveWorktree(result.worktreePath, { branch: result.branch }, {
+      sendCodexRequest: async () => ({ data: [] }),
+      listOpenCodeSessions: async () => [],
+    }, true);
+    assert.equal(removal.success, true);
+    assert.equal(removal.removedBranch, false);
+    assert.equal(git(repoDir, "branch", "--list", result.branch), result.branch);
+  } finally {
+    if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previousCodexHome;
+    fs.rmSync(repoDir, { recursive: true, force: true });
+    fs.rmSync(codexHome, { recursive: true, force: true });
+  }
+});
+
 test("gitCreateWorktree rejects dirty handoff when the chosen base branch is not the current branch", async () => {
   const repoDir = makeTempRepo();
 

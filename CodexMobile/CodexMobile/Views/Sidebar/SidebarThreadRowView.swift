@@ -86,6 +86,7 @@ struct SidebarThreadRowView: View {
                 // Keep trailing metadata inside the main stack so long titles truncate before it.
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 6) {
+                        RuntimeProviderIcon(provider: thread.runtimeProvider)
                         // Pinned glyph hidden on the row itself: pinned threads already
                         // live under the "Pinned" section header, so the per-row badge
                         // was redundant. Kept the `isPinned` plumbing for the context
@@ -159,6 +160,7 @@ struct SidebarThreadRowView: View {
     private var subagentRow: some View {
         HapticButton(action: onTap) {
             HStack(alignment: .center, spacing: 8) {
+                RuntimeProviderIcon(provider: thread.runtimeProvider, size: 17)
                 SidebarSubagentNameLabel(thread: thread)
                     .frame(maxWidth: .infinity, alignment: .leading)
 

@@ -3404,7 +3404,7 @@ test("live owner applies Desktop thread settings and broadcasts phone read state
     type: "request",
     requestId: "update-settings-1",
     sourceClientId: "desktop",
-    version: 1,
+    version: 2,
     method: "thread-follower-update-thread-settings",
     params: {
       conversationId: "thread-settings",
@@ -5007,4 +5007,138 @@ test("local settings mutations serialize acknowledgements and retain newer runti
   assert.equal(result.runtimeSettings.model, "sol");
   assert.equal(result.runtimeSettings.serviceTier, "future-speed");
   assert.equal(store.get("task").reasoningEffort, "high");
+});
+
+test("a forwarded local resume claims ownership only after its matching successful response", (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-local-resume-owner-");
+  const owner = createDesktopIpcLiveOwner({
+    socketPath,
+    sendCodexRequest: async () => ({ ok: true }),
+    sendRawCodexMessage() {},
+  });
+  t.after(() => { owner.stopAll(); fs.rmSync(tempDir, { recursive: true, force: true }); });
+
+  // A phone read can cache history, but it does not acquire a local writer.
+  owner.observeInbound(JSON.stringify({
+    id: "read-existing",
+    method: "thread/read",
+    params: { threadId: "existing-cli" },
+  }));
+  owner.observeOutbound(JSON.stringify({
+    id: "read-existing",
+    result: { thread: {
+      id: "existing-cli", cwd: "/tmp/project", turns: [{ id: "old-turn", items: [] }],
+    } },
+  }));
+  assert.equal(owner.isThreadOwned("existing-cli"), false);
+
+  owner.observeInbound(JSON.stringify({
+    id: "resume-existing",
+    method: "thread/resume",
+    params: { threadId: "existing-cli", excludeTurns: true },
+  }));
+  assert.equal(owner.isThreadOwned("existing-cli"), false);
+  owner.observeOutbound(JSON.stringify({
+    id: "unrelated",
+    result: { thread: { id: "existing-cli", turns: [] } },
+  }));
+  assert.equal(owner.isThreadOwned("existing-cli"), false);
+
+  owner.observeOutbound(JSON.stringify({
+    id: "resume-existing",
+    result: { thread: { id: "existing-cli", cwd: "/tmp/project", turns: [] } },
+  }));
+  assert.equal(owner.isThreadOwned("existing-cli"), true);
+  assert.equal(owner._debugSnapshot("existing-cli").turns[0].turnId, "old-turn");
+});
+
+test("a successful local resume hydrates excluded history before its first snapshot", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-local-resume-hydrate-");
+  const reads = [];
+  const owner = createDesktopIpcLiveOwner({
+    socketPath,
+    async sendCodexRequest(method, params) {
+      reads.push({ method, params });
+      return { thread: {
+        id: "uncached-cli", cwd: "/tmp/project", turns: [{ id: "full-turn", items: [] }],
+      } };
+    },
+    sendRawCodexMessage() {},
+  });
+  t.after(() => { owner.stopAll(); fs.rmSync(tempDir, { recursive: true, force: true }); });
+
+  owner.observeInbound(JSON.stringify({
+    id: "resume-uncached",
+    method: "thread/resume",
+    params: { threadId: "uncached-cli", excludeTurns: true },
+  }));
+  owner.observeOutbound(JSON.stringify({
+    id: "resume-uncached",
+    result: { thread: { id: "uncached-cli", cwd: "/tmp/project", turns: [] } },
+  }));
+  assert.equal(owner.isThreadOwned("uncached-cli"), true);
+  await waitFor(() => owner._debugSnapshot("uncached-cli")?.turns?.length === 1);
+  assert.equal(owner._debugSnapshot("uncached-cli").turns[0].turnId, "full-turn");
+  assert.equal(reads.length, 1);
+  assert.equal(reads[0].method, "thread/read");
+  assert.equal(reads[0].params.threadId, "uncached-cli");
+});
+
+test("failed, mismatched, or unobserved resumes never claim local ownership", (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-local-resume-failure-");
+  const owner = createDesktopIpcLiveOwner({
+    socketPath,
+    sendCodexRequest: async () => ({ ok: true }),
+    sendRawCodexMessage() {},
+  });
+  t.after(() => { owner.stopAll(); fs.rmSync(tempDir, { recursive: true, force: true }); });
+
+  const successfulResponse = (id, threadId = "existing-cli") => JSON.stringify({
+    id, result: { thread: { id: threadId, turns: [] } },
+  });
+  // Private bridge preflights and follower-served Desktop responses have no
+  // matching forwarded phone resume in this observer.
+  owner.observeOutbound(successfulResponse("private-preflight"));
+  assert.equal(owner.isThreadOwned("existing-cli"), false);
+
+  owner.observeInbound(JSON.stringify({
+    id: "failed-resume", method: "thread/resume", params: { threadId: "existing-cli" },
+  }));
+  owner.observeOutbound(JSON.stringify({
+    id: "failed-resume", error: { code: -32600, message: "already has an active writer" },
+  }));
+  assert.equal(owner.isThreadOwned("existing-cli"), false);
+  owner.observeOutbound(successfulResponse("failed-resume"));
+  assert.equal(owner.isThreadOwned("existing-cli"), false, "a failed request must clear its pending claim");
+
+  owner.observeInbound(JSON.stringify({
+    id: "synthetic-resume", method: "thread/resume", params: { threadId: "existing-cli" },
+  }));
+  owner.observeOutbound(JSON.stringify({
+    id: "synthetic-resume",
+    result: { thread: { id: "existing-cli", turns: [] }, remodexDesktopIpcMirror: true },
+  }));
+  assert.equal(owner.isThreadOwned("existing-cli"), false);
+
+  owner.observeInbound(JSON.stringify({
+    id: "malformed-resume", method: "thread/resume", params: { threadId: "existing-cli" },
+  }));
+  owner.observeOutbound(JSON.stringify({
+    id: "malformed-resume", result: { id: "existing-cli" },
+  }));
+  assert.equal(owner.isThreadOwned("existing-cli"), false);
+
+  owner.observeInbound(JSON.stringify({
+    id: "mismatched-resume", method: "thread/resume", params: { threadId: "existing-cli" },
+  }));
+  owner.observeOutbound(successfulResponse("mismatched-resume", "other-cli"));
+  assert.equal(owner.isThreadOwned("existing-cli"), false);
+  assert.equal(owner.isThreadOwned("other-cli"), false);
+
+  owner.observeInbound(JSON.stringify({
+    id: "stopped-resume", method: "thread/resume", params: { threadId: "existing-cli" },
+  }));
+  owner.stopAll();
+  owner.observeOutbound(successfulResponse("stopped-resume"));
+  assert.equal(owner.isThreadOwned("existing-cli"), false);
 });

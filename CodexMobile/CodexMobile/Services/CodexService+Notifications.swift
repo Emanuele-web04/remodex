@@ -60,8 +60,18 @@ final class CodexNotificationCenterDelegateProxy: NSObject, UNUserNotificationCe
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification
     ) async -> UNNotificationPresentationOptions {
-        // The in-app timeline and run badges already explain the new state.
-        []
+        // A completion queued while Control Center or another app covered the
+        // timeline must remain visible even if iOS delivers it after reactivation.
+        if (notification.request.content.userInfo[CodexNotificationPayloadKeys.presentWhenActive] as? NSNumber)?.boolValue == true {
+            return [.banner, .sound]
+        }
+        // ScenePhase can remain `.inactive` during a lock or app switch. In that
+        // transition the timeline is no longer visible, even if UIKit still
+        // routes the notification through the foreground delegate.
+        let isVisible = await MainActor.run {
+            service?.isAppInForeground == true && service?.applicationStateProvider() == .active
+        }
+        return isVisible ? [] : [.banner, .sound]
     }
 
     func userNotificationCenter(
@@ -222,9 +232,11 @@ extension CodexService {
         }
     }
 
-    // Schedules a local alert only when a run finishes while the app is away from the foreground.
+    // Schedules a local alert while the app is backgrounded or transitioning
+    // away from the screen. iOS may suspend the app after its finite grace window;
+    // reliable delivery after suspension requires configured APNs push.
     func notifyRunCompletionIfNeeded(threadId: String, turnId: String?, result: CodexRunCompletionResult) {
-        guard !isAppInForeground else {
+        guard !isAppInForeground || applicationStateProvider() != .active else {
             return
         }
 
@@ -245,7 +257,7 @@ extension CodexService {
         requestID: JSONValue,
         questions: [CodexStructuredUserInputQuestion]
     ) {
-        guard !isAppInForeground else {
+        guard !isAppInForeground || applicationStateProvider() != .active else {
             return
         }
 
@@ -463,6 +475,7 @@ private extension CodexService {
             CodexNotificationPayloadKeys.threadId: threadId,
             CodexNotificationPayloadKeys.turnId: turnId ?? "",
             CodexNotificationPayloadKeys.result: result.rawValue,
+            CodexNotificationPayloadKeys.presentWhenActive: true,
         ]
 
         let request = UNNotificationRequest(

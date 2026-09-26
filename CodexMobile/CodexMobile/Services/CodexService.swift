@@ -266,6 +266,7 @@ enum CodexNotificationPayloadKeys {
     static let turnId = "turnId"
     static let result = "result"
     static let requestId = "requestId"
+    static let presentWhenActive = "presentWhenActive"
 }
 
 // Tracks the real terminal outcome of a run, including user interruption.
@@ -432,7 +433,15 @@ final class CodexService {
     // Tracks the non-blocking bootstrap that hydrates chats/models after the socket is ready.
     var isBootstrappingConnectionSync = false
     var currentOutput = ""
-    var activeThreadId: String?
+    var activeThreadId: String? {
+        didSet {
+            // Footer errors belong to the chat where they occurred. Do not
+            // carry a previous runtime's error into another conversation.
+            if oldValue != activeThreadId {
+                lastErrorMessage = activeThreadId.flatMap { asyncUserInputErrorsByThread[$0] }
+            }
+        }
+    }
     var activeTurnId: String?
     var activeTurnIdByThread: [String: String] = [:]
     // Monotonic live turn-start token. Unlike running/id snapshots, this cannot
@@ -473,6 +482,7 @@ final class CodexService {
     @ObservationIgnored var autoApprovalRetryTokensByReviewKey: [String: CodexAutoApprovalRetryToken] = [:]
     var lastRawMessage: String?
     var lastErrorMessage: String?
+    @ObservationIgnored var asyncUserInputErrorsByThread: [String: String] = [:]
     var recoverableStreamFailuresByThread: [String: CodexStreamFailure] = [:]
     @ObservationIgnored var streamFailureContinuationsInFlight: Set<UUID> = []
     @ObservationIgnored var streamRecoveryConnectionGeneration = 0
@@ -499,6 +509,9 @@ final class CodexService {
     var messageRevisionByThread: [String: Int] = [:]
     var syncRealtimeEnabled = true
     var availableModels: [CodexModelOption] = []
+    // Last OpenCode catalog from the bridge; shared by the draft picker and thread composer labels.
+    var openCodeModels: [OpenCodeModelOption] = []
+    var isLoadingOpenCodeModels = false
     var selectedModelId: String?
     var hasPersistedSelectedModelId = false
     var selectedGitWriterModelId: String?
@@ -562,6 +575,7 @@ final class CodexService {
     // A Desktop/rollout source handoff needs replace semantics for the mirrored
     // tail, not an append-only merge that leaves stale synthetic rows behind.
     @ObservationIgnored var pendingCanonicalSourceReplacementThreadIDs: Set<String> = []
+    @ObservationIgnored var asyncAnswerVerificationThreadIDs: Set<String> = []
     // A bounded JSONL first paint is useful immediately but remains provisional
     // until the app-server returns its exact cursor-backed page.
     @ObservationIgnored var provisionalPaginatedHistoryThreadIDs: Set<String> = []

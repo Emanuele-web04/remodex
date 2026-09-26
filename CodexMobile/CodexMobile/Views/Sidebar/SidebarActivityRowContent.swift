@@ -23,6 +23,7 @@ struct SidebarActivityRowContent: View {
         HapticButton(action: onTap) {
             VStack(alignment: .leading, spacing: 5) {
                 HStack(spacing: 12) {
+                    RuntimeProviderIcon(provider: thread.runtimeProvider, size: 18)
                     Text(thread.displayTitle)
                         .font(AppFont.body())
                         .foregroundStyle(.primary)
@@ -46,15 +47,15 @@ struct SidebarActivityRowContent: View {
                 }
 
                 HStack(spacing: 12) {
-                    HStack(spacing: 6) {
-                        RemodexIcon.image(systemName: projectLabel == nil ? "bubble.left" : "folder", size: 13)
-                        Text(projectLabel ?? "Chats")
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                    }
-                    .font(AppFont.footnote())
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    RemodexIcon.image(systemName: projectLabel == nil ? "bubble.left" : "folder", size: 13)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 18, height: 18)
+                    Text(projectLabel ?? "Chats")
+                        .font(AppFont.footnote())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .frame(maxWidth: .infinity, alignment: .leading)
 
                     if let diffTotals, diffTotals.hasChanges {
                         HStack(spacing: 5) {

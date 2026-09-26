@@ -225,6 +225,8 @@ extension CodexService {
               !loadingOlderThreadHistoryIDs.contains(threadId) else {
             return
         }
+        let isOpenCodeThread = thread(for: threadId)?.runtimeProvider == .opencode
+        let refreshGeneration = currentPerThreadRefreshGeneration(for: threadId)
 
         loadingOlderThreadHistoryIDs.insert(threadId)
         olderHistoryLoadErrorByThreadID.removeValue(forKey: threadId)
@@ -250,7 +252,8 @@ extension CodexService {
                 let elapsedMs = Int(Date().timeIntervalSince(startedAt) * 1000)
                 let hasNextCursor = cursorHasValue(page.nextCursor)
                 debugSyncLog("thread/turns/list older thread=\(threadId) limit=\(ThreadHistoryHydrationPolicy.olderTurnPageSize) turns=\(page.turns.count) hasNextCursor=\(hasNextCursor) elapsedMs=\(elapsedMs)")
-                guard !Task.isCancelled else {
+                guard !Task.isCancelled,
+                      (!isOpenCodeThread || isPerThreadRefreshCurrent(for: threadId, generation: refreshGeneration)) else {
                     return
                 }
 
@@ -287,13 +290,25 @@ extension CodexService {
                     return
                 }
 
-                let existingMessages = messagesByThread[threadId] ?? []
-                let orderedOlderMessages = olderHistoryMessagesFilteredAndOrderedBeforeExisting(
+                var existingMessages = messagesByThread[threadId] ?? []
+                var existingMessageRevision = messageRevision(for: threadId)
+                var newOlderMessages = olderHistoryMessagesFilteredAndOrderedBeforeExisting(
                     olderMessages,
                     existingMessages: existingMessages
                 )
+                var openCodeInsertion = Self.openCodeOlderPageInsertion(
+                    page: olderMessages,
+                    existing: existingMessages,
+                    cursor: pageCursor,
+                    hasNewRows: !newOlderMessages.isEmpty,
+                    isOpenCodeThread: isOpenCodeThread
+                )
+                // Keep overlapping canonical rows in an OpenCode page. They are
+                // the anchors that place newly loaded turns among cached phone
+                // turns, rather than blindly prepending them before the cache.
+                var orderedOlderMessages = openCodeInsertion?.page ?? newOlderMessages
 
-                if orderedOlderMessages.isEmpty {
+                if newOlderMessages.isEmpty {
                     debugSyncLog("thread/turns/list older duplicate page thread=\(threadId) decodedMessages=\(olderMessages.count) hasNextCursor=\(hasNextCursor)")
                     if hasNextCursor,
                        page.nextCursor != pageCursor,
@@ -314,8 +329,8 @@ extension CodexService {
                     return
                 }
 
-                let merged = try await mergeHistoryMessagesOffMainActor(
-                    existing: existingMessages,
+                var merged = try await mergeHistoryMessagesOffMainActor(
+                    existing: openCodeInsertion?.existing ?? existingMessages,
                     history: orderedOlderMessages,
                     activeThreadIDs: Set(activeTurnIdByThread.keys),
                     activeTurnIDs: Set(activeTurnIdByThread.values),
@@ -323,8 +338,68 @@ extension CodexService {
                     preferRecentWindow: false
                 )
 
-                guard !Task.isCancelled else {
+                guard !Task.isCancelled,
+                      isPerThreadRefreshCurrent(for: threadId, generation: refreshGeneration) else {
                     return
+                }
+
+                let pageNeedsRebase = Self.openCodeOlderPageNeedsRebase(
+                    isOpenCodeThread: isOpenCodeThread,
+                    snapshotRevision: existingMessageRevision,
+                    currentRevision: messageRevision(for: threadId),
+                    snapshot: existingMessages,
+                    current: messagesByThread[threadId] ?? []
+                ) || (!isOpenCodeThread && (
+                    existingMessageRevision != messageRevision(for: threadId)
+                        || existingMessages != (messagesByThread[threadId] ?? [])
+                ))
+                if pageNeedsRebase {
+                    // A live item arrived while the detached merge was working.
+                    // Recompute the page against that newer timeline so the old
+                    // snapshot cannot replace the live row when we write back.
+                    existingMessages = messagesByThread[threadId] ?? []
+                    existingMessageRevision = messageRevision(for: threadId)
+                    newOlderMessages = olderHistoryMessagesFilteredAndOrderedBeforeExisting(
+                        olderMessages,
+                        existingMessages: existingMessages
+                    )
+                    openCodeInsertion = Self.openCodeOlderPageInsertion(
+                        page: olderMessages,
+                        existing: existingMessages,
+                        cursor: pageCursor,
+                        hasNewRows: !newOlderMessages.isEmpty,
+                        isOpenCodeThread: isOpenCodeThread
+                    )
+                    orderedOlderMessages = openCodeInsertion?.page ?? newOlderMessages
+                    if newOlderMessages.isEmpty {
+                        merged = existingMessages
+                    } else {
+                        merged = try await mergeHistoryMessagesOffMainActor(
+                            existing: openCodeInsertion?.existing ?? existingMessages,
+                            history: orderedOlderMessages,
+                            activeThreadIDs: Set(activeTurnIdByThread.keys),
+                            activeTurnIDs: Set(activeTurnIdByThread.values),
+                            runningThreadIDs: runningThreadIDs,
+                            preferRecentWindow: false
+                        )
+                    }
+                    guard !Task.isCancelled,
+                          isPerThreadRefreshCurrent(for: threadId, generation: refreshGeneration),
+                          !Self.openCodeOlderPageNeedsRebase(
+                            isOpenCodeThread: isOpenCodeThread,
+                            snapshotRevision: existingMessageRevision,
+                            currentRevision: messageRevision(for: threadId),
+                            snapshot: existingMessages,
+                            current: messagesByThread[threadId] ?? []
+                          ),
+                          isOpenCodeThread || (
+                            existingMessageRevision == messageRevision(for: threadId)
+                                && existingMessages == (messagesByThread[threadId] ?? [])
+                          ) else {
+                        // Keep this cursor: a later older-page load can retry
+                        // after the live stream settles.
+                        return
+                    }
                 }
 
                 if merged == existingMessages {
@@ -361,10 +436,11 @@ extension CodexService {
                 )
                 expandThreadTimelineProjectionForRemoteOlderMessages(
                     threadId: threadId,
-                    addedCount: orderedOlderMessages.count
+                    addedCount: max(0, merged.count - existingMessages.count)
                 )
-                debugSyncLog("thread/turns/list older merge thread=\(threadId) decodedMessages=\(olderMessages.count) newMessages=\(orderedOlderMessages.count) totalMessages=\(merged.count) hasNextCursor=\(hasNextCursor)")
+                debugSyncLog("thread/turns/list older merge thread=\(threadId) decodedMessages=\(olderMessages.count) newMessages=\(max(0, merged.count - existingMessages.count)) totalMessages=\(merged.count) hasNextCursor=\(hasNextCursor)")
                 messagesByThread[threadId] = merged
+                CodexMessageOrderCounter.seed(fromThreadMessages: merged)
                 persistMessages()
                 updateCurrentOutput(for: threadId)
                 return
@@ -590,6 +666,54 @@ extension CodexService {
     // Descending pages arrive newest-first; the history decoder expects chronological turn order.
     func chronologicalTurnsFromDescendingPage(_ turns: [JSONValue]) -> [JSONValue] {
         Array(turns.reversed())
+    }
+
+    // OpenCode's cursor names the oldest turn in the already loaded page. Keep
+    // that turn as the insertion boundary: the local cache may also contain
+    // phone turns older than the page, with a gap filled by this older fetch.
+    nonisolated static func openCodeOlderPageInsertion(
+        page: [CodexMessage],
+        existing: [CodexMessage],
+        cursor: JSONValue,
+        hasNewRows: Bool,
+        isOpenCodeThread: Bool
+    ) -> (existing: [CodexMessage], page: [CodexMessage])? {
+        let prefix = "opencode-turn-cursor:desc:"
+        guard isOpenCodeThread,
+              hasNewRows,
+              case .string(let rawCursor) = cursor,
+              rawCursor.hasPrefix(prefix),
+              let encodedBoundaryTurnID = String(rawCursor.dropFirst(prefix.count))
+                .split(separator: ":", maxSplits: 1).first,
+              let boundaryTurnID = String(encodedBoundaryTurnID).removingPercentEncoding,
+              !boundaryTurnID.isEmpty,
+              let boundaryOrder = existing
+                .filter({ $0.turnId == boundaryTurnID })
+                .map(\.orderIndex)
+                .min(),
+              boundaryOrder <= Int.max - page.count else {
+            return nil
+        }
+
+        var shiftedExisting = existing
+        for index in shiftedExisting.indices where shiftedExisting[index].orderIndex >= boundaryOrder {
+            shiftedExisting[index].orderIndex += page.count
+        }
+        var positionedPage = page
+        for index in positionedPage.indices {
+            positionedPage[index].orderIndex = boundaryOrder + index
+        }
+        return (shiftedExisting, positionedPage)
+    }
+
+    static func openCodeOlderPageNeedsRebase(
+        isOpenCodeThread: Bool,
+        snapshotRevision: Int,
+        currentRevision: Int,
+        snapshot: [CodexMessage],
+        current: [CodexMessage]
+    ) -> Bool {
+        isOpenCodeThread && (snapshotRevision != currentRevision || snapshot != current)
     }
 
     // Older pages are prepended chronologically; dedupe items without dropping partial turns.

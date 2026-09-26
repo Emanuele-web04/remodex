@@ -16,6 +16,8 @@ struct ComposerBottomBar: View {
     let runtimeLabelParts: TurnComposerRuntimeLabelParts
     let runtimeState: TurnComposerRuntimeState
     let runtimeActions: TurnComposerRuntimeActions
+    var allowsRuntimeSelection: Bool = true
+    var allowsEffortSelection: Bool = false
     let remainingAttachmentSlots: Int
     let isComposerInteractionLocked: Bool
     let isSendDisabled: Bool
@@ -87,6 +89,8 @@ struct ComposerBottomBar: View {
                 isPlanModeArmed: isPlanModeArmed,
                 runtimeState: runtimeState,
                 runtimeActions: runtimeActions,
+                allowsPlanMode: allowsRuntimeSelection,
+                allowsFastMode: allowsRuntimeSelection,
                 remainingAttachmentSlots: remainingAttachmentSlots,
                 isInteractionLocked: isComposerInteractionLocked,
                 onSetPlanModeArmed: onSetPlanModeArmed,
@@ -94,18 +98,22 @@ struct ComposerBottomBar: View {
                 onTapTakePhoto: onTapTakePhoto
             )
             .padding(.leading, 6)
-            ComposerAccessModeControl(
-                selectedAccessMode: selectedAccessMode,
-                isInteractionLocked: isComposerInteractionLocked,
-                onSelect: onSelectAccessMode
-            )
+            if allowsRuntimeSelection {
+                ComposerAccessModeControl(
+                    selectedAccessMode: selectedAccessMode,
+                    isInteractionLocked: isComposerInteractionLocked,
+                    onSelect: onSelectAccessMode
+                )
+            }
             Spacer(minLength: 0)
 
             // Ring + runtime pill travel together on the trailing side; the
             // tight inner spacing keeps the ring visually attached to the
             // model/effort block instead of floating in the Spacer gap.
             HStack(spacing: 4) {
-                inlineStatusControl
+                if allowsRuntimeSelection {
+                    inlineStatusControl
+                }
                 runtimeMenuControl
             }
 
@@ -181,10 +189,11 @@ struct ComposerBottomBar: View {
     private var runtimeMenuControl: some View {
         ComposerRuntimePill(
             labelParts: runtimeLabelParts,
-            showsFastModeBadge: runtimeState.showsFastModeBadgeOnPill,
+            showsFastModeBadge: allowsRuntimeSelection && runtimeState.showsFastModeBadgeOnPill,
             onTap: onTapRuntimePill
         )
         .equatable()
+        .disabled(!allowsRuntimeSelection && !allowsEffortSelection)
     }
 
     private var inlineStatusControl: some View {
@@ -248,8 +257,8 @@ private struct ComposerRuntimePill: View, Equatable {
         }
         .buttonStyle(.plain)
         // Let the pill hug its content; the Spacer in the bottom bar absorbs
-        // leftover width, and layoutPriority(-1) makes the effort label the
-        // first thing to truncate when the bar runs out of room.
+        // leftover width. When the bar runs out of room the effort label
+        // truncates first, then long model names (OpenCode ids) tail-truncate.
         .layoutPriority(-1)
         .tint(metaLabelColor)
         .accessibilityLabel(accessibilityLabel)
@@ -269,7 +278,7 @@ private struct ComposerRuntimePill: View, Equatable {
                     .fontWeight(.regular)
                     .foregroundStyle(Color.primary)
                     .lineLimit(1)
-                    .fixedSize(horizontal: true, vertical: false)
+                    .truncationMode(.tail)
                     .layoutPriority(1)
 
                 if let effortPart = labelParts.effortPart, !effortPart.isEmpty {

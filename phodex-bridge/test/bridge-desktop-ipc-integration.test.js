@@ -14,6 +14,241 @@ const path = require("node:path");
 const { setTimeout: wait } = require("node:timers/promises");
 const WebSocket = require("ws");
 
+test("bridge resumes an old Desktop task from read-only metadata before any IPC snapshot", async (t) => {
+  const { tempDir, socketPath: ipcSocketPath } = createIpcTestSocket("remodex-bridge-resume-bootstrap-");
+  const ipcFrames = [];
+  const ipcServer = net.createServer((socket) => {
+    attachFrameReader(socket, (frame) => {
+      ipcFrames.push(frame);
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response", requestId: frame.requestId,
+          resultType: "success", method: "initialize",
+          handledByClientId: "desktop", result: { clientId: "bridge-test" },
+        });
+      } else if (frame.method === "thread-owner-discovery") {
+        writeFrame(socket, {
+          type: "response", requestId: frame.requestId,
+          resultType: "success", method: frame.method,
+          handledByClientId: "desktop", result: { supportsUntrustedAppInput: true },
+        });
+      } else if (frame.method === "thread-follower-load-complete-history") {
+        writeFrame(socket, {
+          type: "response", requestId: frame.requestId,
+          resultType: "success", method: frame.method,
+          handledByClientId: "desktop", result: { revision: 1 },
+        });
+      } else if (frame.method === "thread-follower-update-thread-settings") {
+        writeFrame(socket, {
+          type: "response", requestId: frame.requestId,
+          resultType: "success", method: frame.method,
+          handledByClientId: "desktop", result: { applied: true },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => ipcServer.listen(ipcSocketPath, resolve));
+  const relayServer = new WebSocket.Server({ port: 0 });
+  const relayMessages = [];
+  let relaySocket = null;
+  let bridge = null;
+  let fakeCodex = null;
+  await new Promise((resolve) => relayServer.once("listening", resolve));
+  relayServer.on("connection", (socket) => {
+    relaySocket = socket;
+    socket.on("message", (data) => {
+      const parsed = safeParseJSON(data.toString("utf8"));
+      if (parsed) relayMessages.push(parsed);
+    });
+  });
+  const { startBridge } = loadBridgeWithTestDoubles({
+    createCodexTransportImpl() {
+      fakeCodex = createFakeCodexTransport({
+        threadReadResult: {
+          thread: {
+            id: "desktop-bootstrap-task",
+            name: "Old Desktop task",
+            source: "vscode",
+            originator: "Codex Desktop",
+            turns: [],
+          },
+        },
+      });
+      return fakeCodex;
+    },
+  });
+  t.after(() => {
+    bridge?.stop();
+    relaySocket?.close();
+    relayServer.close();
+    ipcServer.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+  bridge = startBridge({
+    printPairingQr: false,
+    config: {
+      relayUrl: `ws://127.0.0.1:${relayServer.address().port}`,
+      pushServiceUrl: "",
+      refreshEnabled: false,
+      keepMacAwakeEnabled: false,
+      codexEndpoint: "",
+      refreshCommand: "",
+      codexBundleId: "",
+      codexAppPath: "",
+      desktopIpcSocketPath: ipcSocketPath,
+      desktopIpcLiveSyncEnabled: false,
+    },
+  });
+  await waitFor(() => relaySocket && relaySocket.readyState === WebSocket.OPEN);
+  relaySocket.send(JSON.stringify({
+    id: "resume-bootstrap",
+    method: "thread/resume",
+    params: { threadId: "desktop-bootstrap-task", excludeTurns: true },
+  }));
+  const response = await waitForMessage(relayMessages, (message) => message.id === "resume-bootstrap");
+  assert.equal(response.result?.thread?.id, "desktop-bootstrap-task");
+  assert.equal(response.result?.remodexDesktopIpcMirror, true);
+  assert.deepEqual(response.result?.thread?.turns, []);
+  assert.deepEqual(fakeCodex.sent.filter((message) => message.method === "thread/read")
+    .map((message) => message.params), [{ threadId: "desktop-bootstrap-task", includeTurns: false }]);
+  assert.equal(fakeCodex.sent.some((message) => message.method === "thread/resume"), false);
+  assert.equal(ipcFrames.some((frame) => frame.method === "thread-follower-load-complete-history"), true);
+  relaySocket.send(JSON.stringify({
+    id: "settings-bootstrap", method: "thread/settings/update",
+    params: { threadId: "desktop-bootstrap-task", model: "gpt-test" },
+  }));
+  const settings = await waitForMessage(relayMessages, (message) => message.id === "settings-bootstrap");
+  assert.equal(settings.error, undefined);
+  const desktopSettings = ipcFrames.find((frame) => frame.method === "thread-follower-update-thread-settings");
+  assert.equal(desktopSettings?.targetClientId, "desktop");
+  assert.equal(fakeCodex.sent.some((message) => message.method === "thread/settings/update"), false);
+});
+
+for (const desktopIpcLiveSyncEnabled of [true, false]) {
+test(`bridge transfers a dormant Desktop-origin task after local resume succeeds (live sync ${desktopIpcLiveSyncEnabled})`, async (t) => {
+  const { tempDir, socketPath: ipcSocketPath } = createIpcTestSocket("remodex-bridge-local-takeover-");
+  const relayServer = new WebSocket.Server({ port: 0 });
+  const relayMessages = [];
+  const ipcFrames = [];
+  let relaySocket = null;
+  let bridge = null;
+  let fakeCodex = null;
+  await new Promise((resolve) => relayServer.once("listening", resolve));
+  relayServer.on("connection", (socket) => {
+    relaySocket = socket;
+    socket.on("message", (data) => {
+      const parsed = safeParseJSON(data.toString("utf8"));
+      if (parsed) relayMessages.push(parsed);
+    });
+  });
+  const ipcServer = net.createServer((socket) => {
+    attachFrameReader(socket, (frame) => {
+      ipcFrames.push(frame);
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response", requestId: frame.requestId,
+          resultType: "success", method: "initialize",
+          handledByClientId: "desktop", result: { clientId: "bridge-test" },
+        });
+      } else if (frame.method === "thread-owner-discovery") {
+        writeFrame(socket, {
+          type: "response", requestId: frame.requestId,
+          resultType: "error", error: "no-client-found",
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => ipcServer.listen(ipcSocketPath, resolve));
+  const { startBridge } = loadBridgeWithTestDoubles({
+    createCodexTransportImpl() {
+      fakeCodex = createFakeCodexTransport({
+        threadReadResult: { thread: {
+          id: "dormant-desktop-task", source: "vscode", originator: "Codex Desktop", turns: [],
+        } },
+      });
+      return fakeCodex;
+    },
+  });
+  t.after(() => {
+    bridge?.stop();
+    relaySocket?.close();
+    relayServer.close();
+    ipcServer.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+  bridge = startBridge({
+    printPairingQr: false,
+    config: bridgeTestConfig(relayServer, {
+      desktopIpcSocketPath: ipcSocketPath,
+      desktopIpcLiveSyncEnabled,
+    }),
+  });
+  await waitFor(() => relaySocket && relaySocket.readyState === WebSocket.OPEN);
+  relaySocket.send(JSON.stringify({
+    id: "resume-dormant", method: "thread/resume",
+    params: { threadId: "dormant-desktop-task", excludeTurns: true },
+  }));
+  relaySocket.send(JSON.stringify({
+    id: "settings-dormant", method: "thread/settings/update",
+    params: { threadId: "dormant-desktop-task", model: "gpt-test" },
+  }));
+  await waitFor(() => fakeCodex.sent.some((message) => message.method === "thread/resume"));
+  assert.equal(fakeCodex.sent.some((message) => message.method === "thread/settings/update"), false);
+  const localResume = fakeCodex.sent.find((message) => message.method === "thread/resume");
+  fakeCodex.emitMessage({ id: localResume.id, result: {
+    thread: { id: "dormant-desktop-task", source: "vscode", originator: "Codex Desktop", turns: [] },
+  } });
+  const resume = await waitForMessage(relayMessages, (message) => message.id === "resume-dormant");
+  assert.equal(resume.result?.thread?.id, "dormant-desktop-task");
+  assert.notEqual(resume.result?.remodexDesktopIpcMirror, true);
+  await waitFor(() => fakeCodex.sent.some((message) => message.method === "thread/settings/update"));
+  const localSettings = fakeCodex.sent.find((message) => message.method === "thread/settings/update");
+  fakeCodex.emitMessage({ id: localSettings.id, result: {} });
+  const settings = await waitForMessage(relayMessages, (message) => message.id === "settings-dormant");
+  assert.equal(settings.error, undefined);
+  assert.equal(ipcFrames.some((frame) => frame.method === "thread-follower-update-thread-settings"), false);
+  if (!desktopIpcLiveSyncEnabled) {
+    // Unsubscribe alone does not release Codex's writer. The app-server's
+    // thread/closed notification is the confirmed loss of this local claim.
+    fakeCodex.emitMessage({ method: "thread/closed", params: { threadId: "dormant-desktop-task" } });
+    relaySocket.send(JSON.stringify({
+      id: "settings-after-close", method: "thread/settings/update",
+      params: { threadId: "dormant-desktop-task", model: "another-model" },
+    }));
+    const afterClose = await waitForMessage(relayMessages, (message) => message.id === "settings-after-close");
+    assert.equal(afterClose.error?.code, -32000);
+    assert.equal(fakeCodex.sent.filter((message) => message.method === "thread/settings/update").length, 1);
+
+    // A successful start or fork also proves local ownership when live
+    // mirroring is disabled. Settings on the new task must remain usable.
+    for (const [method, params, newThreadId] of [
+      ["thread/start", { cwd: tempDir }, "new-local-task"],
+      ["thread/fork", { threadId: "new-local-task" }, "forked-local-task"],
+    ]) {
+      const requestId = `create-${newThreadId}`;
+      relaySocket.send(JSON.stringify({ id: requestId, method, params }));
+      await waitFor(() => fakeCodex.sent.some((message) => message.id === requestId));
+      fakeCodex.emitMessage({ id: requestId, result: { thread: { id: newThreadId, turns: [] } } });
+      const created = await waitForMessage(relayMessages, (message) => message.id === requestId);
+      assert.equal(created.result?.thread?.id, newThreadId);
+
+      const settingsId = `settings-${newThreadId}`;
+      relaySocket.send(JSON.stringify({
+        id: settingsId, method: "thread/settings/update",
+        params: { threadId: newThreadId, model: "gpt-test" },
+      }));
+      await waitFor(() => fakeCodex.sent.some((message) => message.method === "thread/settings/update"
+        && message.params?.threadId === newThreadId));
+      const localSettings = fakeCodex.sent.find((message) => message.method === "thread/settings/update"
+        && message.params?.threadId === newThreadId);
+      fakeCodex.emitMessage({ id: localSettings.id, result: {} });
+      const createdSettings = await waitForMessage(relayMessages, (message) => message.id === settingsId);
+      assert.equal(createdSettings.error, undefined);
+    }
+  }
+});
+}
+
 test("bridge forwards desktop IPC actions to the phone and routes replies back to Codex Desktop", async (t) => {
   const { tempDir, socketPath: ipcSocketPath } = createIpcTestSocket("remodex-bridge-ipc-");
   const relayServer = new WebSocket.Server({ port: 0 });
@@ -65,7 +300,13 @@ test("bridge forwards desktop IPC actions to the phone and routes replies back t
 
   const { startBridge } = loadBridgeWithTestDoubles({
     createCodexTransportImpl() {
-      fakeCodex = createFakeCodexTransport();
+      fakeCodex = createFakeCodexTransport({
+        threadReadResult: {
+          thread: {
+            id: "thread-ipc", source: "vscode", originator: "Codex Desktop", turns: [],
+          },
+        },
+      });
       return fakeCodex;
     },
   });
@@ -101,15 +342,14 @@ test("bridge forwards desktop IPC actions to the phone and routes replies back t
   relaySocket.send(JSON.stringify({
     id: "resume-from-phone",
     method: "thread/resume",
-    params: { threadId: "thread-ipc" },
+    params: { threadId: "thread-ipc", excludeTurns: true },
   }));
 
   await waitFor(() => ipcServerSocket, 2_000);
   await wait(25);
-  assert.equal(
-    fakeCodex.sent.some((message) => message.method === "thread/read"),
-    false
-  );
+  assert.deepEqual(fakeCodex.sent.filter((message) => message.method === "thread/read")
+    .map((message) => message.params), [{ threadId: "thread-ipc", includeTurns: false }]);
+  assert.equal(fakeCodex.sent.some((message) => message.method === "thread/resume"), false);
 
   writeFrame(ipcServerSocket, {
     type: "broadcast",
@@ -135,6 +375,9 @@ test("bridge forwards desktop IPC actions to the phone and routes replies back t
       },
     },
   });
+  await wait(1_650);
+  assert.equal(fakeCodex.sent.some((message) => message.method === "thread/resume"), false,
+    "an arriving Desktop snapshot must cancel the speculative local writer acquisition");
 
   const actionMessage = await waitForMessage(relayMessages, (message) => message.id === 36);
   assert.equal(actionMessage.method, "item/tool/requestUserInput");
@@ -791,6 +1034,13 @@ test("bridge preserves catalog request limits and excludes archived or cursor pa
       fakeCodex = createFakeCodexTransport();
       return fakeCodex;
     },
+    createOpenCodeRuntimeImpl() {
+      return {
+        handlesThreadId() { return false; },
+        shutdown() {},
+        async listThreadCatalog() { return { active: [], archived: [] }; },
+      };
+    },
     desktopIpcActionFollowerModule: {
       createDesktopIpcActionFollower() {
         return {
@@ -825,6 +1075,100 @@ test("bridge preserves catalog request limits and excludes archived or cursor pa
     { id: "catalog", limit: 70 },
     { id: "probe", limit: 1 },
   ]);
+});
+
+test("bridge pages mixed active and archived catalogs without forwarding its cursor to Codex", async (t) => {
+  const relayServer = new WebSocket.Server({ port: 0 });
+  const relayMessages = [];
+  let relaySocket = null;
+  let bridge = null;
+  let fakeCodex = null;
+  let movedToArchive = false;
+  await new Promise((resolve) => relayServer.once("listening", resolve));
+  relayServer.on("connection", (socket) => {
+    relaySocket = socket;
+    socket.on("message", (data) => relayMessages.push(JSON.parse(data.toString("utf8"))));
+  });
+  const { startBridge } = loadBridgeWithTestDoubles({
+    createCodexTransportImpl() {
+      fakeCodex = createFakeCodexTransport();
+      return fakeCodex;
+    },
+    createOpenCodeRuntimeImpl() {
+      return {
+        handlesThreadId() { return false; },
+        shutdown() {},
+        async listThreadCatalog() {
+          return {
+            active: (movedToArchive ? [2, 1] : [3, 2, 1]).map((number) => ({
+              id: `opencode:ses_${number}`, runtimeProvider: "opencode", updatedAt: number,
+            })),
+            archived: [...(movedToArchive ? [{
+              id: "opencode:ses_3", runtimeProvider: "opencode",
+              syncState: "archivedLocal", updatedAt: 3,
+            }] : []), {
+              id: "opencode:ses_archived", runtimeProvider: "opencode",
+              syncState: "archivedLocal", updatedAt: 1,
+            }],
+          };
+        },
+      };
+    },
+  });
+  t.after(() => {
+    bridge?.stop();
+    relaySocket?.close();
+    relayServer.close();
+  });
+  bridge = startBridge({ printPairingQr: false, config: bridgeTestConfig(relayServer) });
+  await waitFor(() => relaySocket?.readyState === WebSocket.OPEN);
+
+  relaySocket.send(JSON.stringify({ id: "mixed-1", method: "thread/list", params: { limit: 2 } }));
+  await waitFor(() => fakeCodex.sent.some((message) => message.id === "mixed-1"));
+  fakeCodex.emitMessage({ id: "mixed-1", result: { data: [
+    { id: "codex-5", updatedAt: 5 }, { id: "codex-4", updatedAt: 4 },
+  ], nextCursor: "codex-page-2" } });
+  const first = await waitForMessage(relayMessages, (message) => message.id === "mixed-1");
+  assert.equal(first.result.data.length, 2);
+  assert.ok(first.result.nextCursor.startsWith("remodex-opencode-list-v1:"));
+
+  relaySocket.send(JSON.stringify({ id: "mixed-2", method: "thread/list", params: {
+    limit: 2, cursor: first.result.nextCursor,
+  } }));
+  await waitFor(() => fakeCodex.sent.some((message) => message.id === "mixed-2"));
+  assert.equal(fakeCodex.sent.find((message) => message.id === "mixed-2").params.cursor, "codex-page-2");
+  fakeCodex.emitMessage({ id: "mixed-2", result: {
+    data: [{ id: "codex-3", updatedAt: 3 }], nextCursor: null,
+  } });
+  const second = await waitForMessage(relayMessages, (message) => message.id === "mixed-2");
+  assert.deepEqual(second.result.data.map((row) => row.id), ["codex-3", "opencode:ses_3"]);
+
+  const codexRequestsBeforeOpenCodeOnlyPage = fakeCodex.sent.length;
+  relaySocket.send(JSON.stringify({ id: "mixed-3", method: "thread/list", params: {
+    limit: 2, cursor: second.result.nextCursor,
+  } }));
+  const third = await waitForMessage(relayMessages, (message) => message.id === "mixed-3");
+  assert.deepEqual(third.result.data.map((row) => row.id), ["opencode:ses_2", "opencode:ses_1"]);
+  assert.equal(third.result.nextCursor, null);
+  assert.equal(fakeCodex.sent.length, codexRequestsBeforeOpenCodeOnlyPage);
+
+  relaySocket.send(JSON.stringify({ id: "archived-mixed", method: "thread/list", params: {
+    archived: true, limit: 2,
+  } }));
+  await waitFor(() => fakeCodex.sent.some((message) => message.id === "archived-mixed"));
+  fakeCodex.emitMessage({ id: "archived-mixed", result: { data: [], nextCursor: null } });
+  const archived = await waitForMessage(relayMessages, (message) => message.id === "archived-mixed");
+  assert.equal(archived.result.data[0].id, "opencode:ses_archived");
+  assert.equal(archived.result.data[0].runtimeProvider, "opencode");
+  assert.equal(archived.result.data[0].syncState, "archivedLocal");
+
+  movedToArchive = true;
+  relaySocket.send(JSON.stringify({ id: "after-mac-archive", method: "thread/list", params: { limit: 2 } }));
+  await waitFor(() => fakeCodex.sent.some((message) => message.id === "after-mac-archive"));
+  fakeCodex.emitMessage({ id: "after-mac-archive", result: { data: [], nextCursor: null } });
+  await waitForMessage(relayMessages, (message) => message.id === "after-mac-archive");
+  await waitForMessage(relayMessages, (message) => message.method === "thread/archived"
+    && message.params?.threadId === "opencode:ses_3");
 });
 
 test("bridge Activity is opt-in and canonical-only endpoints need no Desktop IPC", async (t) => {
@@ -1040,7 +1384,9 @@ test("Activity subscribe performs no reads and snapshots an unopened Desktop thr
   relaySocket.send(JSON.stringify({ id: "archived-sidebar", method: "thread/list", params: { archived: true } }));
   await waitFor(() => fakeCodex.sent.some((message) => message.id === "archived-sidebar"));
   fakeCodex.emitMessage({ id: "archived-sidebar", result: { data: [{ id: "archived-thread" }] } });
-  await waitForMessage(relayMessages, (message) => message.id === "archived-sidebar");
+  // The bridge briefly waits for OpenCode's archived catalog so a fresh phone
+  // can see server-archived sessions on the first request.
+  await waitForMessage(relayMessages, (message) => message.id === "archived-sidebar", 3_000);
   assert.equal(ipcFrames.length, 2, "archived lists must not change active subscriptions");
   fakeCodex.emitMessage({
     method: "thread/name/updated",
@@ -1220,6 +1566,7 @@ test("bridge recovers a growing rollout behind a connected stale Desktop stream"
 // Loads bridge.js with plaintext test transports while leaving the production module untouched.
 function loadBridgeWithTestDoubles({
   createCodexTransportImpl,
+  createOpenCodeRuntimeImpl = null,
   desktopIpcActionFollowerModule = null,
   desktopIpcLiveOwnerModule = null,
   rolloutLiveMirrorModule = null,
@@ -1230,6 +1577,9 @@ function loadBridgeWithTestDoubles({
   Module._load = function loadWithBridgeDoubles(request, parent, isMain) {
     if (parent?.filename === bridgePath && request === "./codex-transport") {
       return { createCodexTransport: createCodexTransportImpl };
+    }
+    if (parent?.filename === bridgePath && request === "./opencode-runtime" && createOpenCodeRuntimeImpl) {
+      return { createOpenCodeRuntime: createOpenCodeRuntimeImpl };
     }
     if (parent?.filename === bridgePath && request === "./rollout-live-mirror" && rolloutLiveMirrorModule) {
       return rolloutLiveMirrorModule;

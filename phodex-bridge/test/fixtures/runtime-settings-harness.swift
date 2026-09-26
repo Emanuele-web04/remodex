@@ -6,6 +6,9 @@ enum CodexServiceError: Error {
     case disconnected
 }
 
+enum HarnessRuntimeProvider { case codex, opencode }
+struct HarnessThread { var runtimeProvider: HarnessRuntimeProvider }
+
 @MainActor final class CodexService {
     var supportsServiceTier = true
     var supportsRuntimeSettingsSync = true
@@ -28,6 +31,7 @@ enum CodexServiceError: Error {
     var resumedThreadIDs: Set<String> = []
     var resumeGate: CheckedContinuation<Void, Error>?
     var delayResume = false
+    var activeThreadId: String?
 
     func ensureThreadResumed(threadId: String) async throws {
         if resumedThreadIDs.contains(threadId) { return }
@@ -38,6 +42,11 @@ enum CodexServiceError: Error {
 
     func threadRuntimeOverride(for id: String?) -> CodexThreadRuntimeOverride? { id.flatMap { threadRuntimeOverridesByThreadID[$0] } }
     func applyThreadRuntimeOverride(_ value: CodexThreadRuntimeOverride, to id: String) { threadRuntimeOverridesByThreadID[id] = value }
+    func applyThreadRuntimeOverride(_ value: CodexThreadRuntimeOverride?, to id: String) {
+        if let value { threadRuntimeOverridesByThreadID[id] = value }
+        else { threadRuntimeOverridesByThreadID.removeValue(forKey: id) }
+    }
+    func thread(for id: String) -> HarnessThread? { nil }
     func runtimeModelIdentifierForTurn(threadId: String) -> String? { threadRuntimeOverride(for: threadId)?.modelId ?? globalModel }
     func selectedReasoningEffortForSelectedModel(threadId: String?) -> String? { threadRuntimeOverride(for: threadId)?.reasoningEffort ?? globalEffort }
     func selectedModelSupportsServiceTier(_ tier: CodexServiceTier, threadId: String?) -> Bool { true }
@@ -217,6 +226,7 @@ enum CodexServiceError: Error {
 
         // A failed older slider edit cannot strand a newer choice in the queue.
         let rapid = CodexService()
+        rapid.activeThreadId = id
         rapid.applyConfirmedRuntimeSettings(settings(1), threadId: id)
         rapid.threadRuntimeOverridesByThreadID[id]!.reasoningEffort = "unsupported"
         rapid.queueThreadRuntimeSettingsUpdate(threadId: id, fields: ["effort"])

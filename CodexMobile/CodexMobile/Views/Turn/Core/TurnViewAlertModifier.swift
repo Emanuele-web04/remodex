@@ -16,6 +16,7 @@ private struct TurnViewAlertModifier: ViewModifier {
 
     let onDeclineApproval: (CodexApprovalRequest) -> Void
     let onApproveApproval: (CodexApprovalRequest) -> Void
+    let onApproveForSession: ((CodexApprovalRequest) -> Void)?
     let onConfirmGitSyncAction: (TurnGitSyncAlertAction) -> Void
     let onDismissGitSyncAlert: () -> Void
     let onConfirmMacHandoff: () -> Void
@@ -32,6 +33,17 @@ private struct TurnViewAlertModifier: ViewModifier {
                 }
                 Button("Approve") {
                     onApproveApproval(request)
+                }
+                if let onApproveForSession,
+                   (request.method == "item/commandExecution/requestApproval"
+                    || request.method == "item/command_execution/request_approval") {
+                    Button("Always allow this pattern") {
+                        onApproveForSession(request)
+                    }
+                }
+                Button("Cancel", role: .cancel) {
+                    // A dismissed permission request still blocks the agent.
+                    onDeclineApproval(request)
                 }
             } message: { request in
                 Text(approvalAlertMessage(for: request))
@@ -144,6 +156,7 @@ extension View {
         macHandoffErrorMessage: Binding<String?>,
         onDeclineApproval: @escaping (CodexApprovalRequest) -> Void,
         onApproveApproval: @escaping (CodexApprovalRequest) -> Void,
+        onApproveForSession: ((CodexApprovalRequest) -> Void)? = nil,
         onConfirmGitSyncAction: @escaping (TurnGitSyncAlertAction) -> Void,
         onDismissGitSyncAlert: @escaping () -> Void,
         onConfirmMacHandoff: @escaping () -> Void
@@ -158,6 +171,7 @@ extension View {
                 macHandoffErrorMessage: macHandoffErrorMessage,
                 onDeclineApproval: onDeclineApproval,
                 onApproveApproval: onApproveApproval,
+                onApproveForSession: onApproveForSession,
                 onConfirmGitSyncAction: onConfirmGitSyncAction,
                 onDismissGitSyncAlert: onDismissGitSyncAlert,
                 onConfirmMacHandoff: onConfirmMacHandoff
