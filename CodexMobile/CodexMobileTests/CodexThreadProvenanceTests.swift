@@ -31,6 +31,23 @@ final class CodexThreadProvenanceTests: XCTestCase {
         XCTAssertEqual(decoded.threadSource, "pull_request_fix_automation")
     }
 
+    func testCanonicalProjectPresenceSurvivesNullAndAssignedRoundTrips() throws {
+        for json in [
+            #"{"id":"unassigned","projectId":null}"#,
+            #"{"id":"assigned","projectId":"project-1"}"#,
+        ] {
+            let decoded = try decodeThread(json)
+            XCTAssertTrue(decoded.hasCanonicalProjectId)
+
+            let encoded = try JSONEncoder().encode(decoded)
+            let roundTripped = try JSONDecoder().decode(CodexThread.self, from: encoded)
+            XCTAssertEqual(roundTripped.projectId, decoded.projectId)
+            XCTAssertTrue(roundTripped.hasCanonicalProjectId)
+        }
+
+        XCTAssertFalse(try decodeThread(#"{"id":"legacy"}"#).hasCanonicalProjectId)
+    }
+
     func testAutomationSourceOnlyMarksAutomationSessions() throws {
         XCTAssertEqual(CodexThread(id: "t6", threadSource: "pull_request_fix_automation").automationSource, .pullRequestFix)
         // Scheduled runs render as the clock glyph, so only the accessible spelling is text.

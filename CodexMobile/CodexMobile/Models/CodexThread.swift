@@ -104,6 +104,11 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
     var createdAt: Date?
     var updatedAt: Date?
     var cwd: String?
+    // app-server owns project membership independently from the working directory.
+    // Keep presence separate from value so an explicit null means Desktop's Recents,
+    // while an absent field still supports older runtimes through cwd heuristics.
+    var projectId: String?
+    var hasCanonicalProjectId: Bool
     // Checkout that owns `cwd` when the chat runs inside a Codex-managed worktree. The bridge
     // resolves it from the worktree's Git link so the sidebar can keep worktree chats inside the
     // project they were cut from instead of showing a second, look-alike project row.
@@ -139,6 +144,8 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
         createdAt: Date? = nil,
         updatedAt: Date? = nil,
         cwd: String? = nil,
+        projectId: String? = nil,
+        hasCanonicalProjectId: Bool = false,
         worktreeOriginPath: String? = nil,
         metadata: [String: JSONValue]? = nil,
         forkedFromThreadId: String? = nil,
@@ -165,6 +172,8 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.cwd = Self.normalizeProjectPath(cwd)
+        self.projectId = Self.normalizeIdentifier(projectId)
+        self.hasCanonicalProjectId = hasCanonicalProjectId || self.projectId != nil
         self.worktreeOriginPath = Self.normalizeProjectPath(worktreeOriginPath)
         self.metadata = metadata
         self.forkedFromThreadId = Self.normalizeIdentifier(forkedFromThreadId)
@@ -199,6 +208,9 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
         case cwd
         case cwdSnake = "current_working_directory"
         case cwdWorkingDirectory = "working_directory"
+        case projectId
+        case projectIdSnake = "project_id"
+        case hasCanonicalProjectId
         case worktreeOriginPath
         case worktreeOriginPathSnake = "worktree_origin_path"
         case metadata
@@ -249,6 +261,10 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
         metadata = try container.decodeIfPresent([String: JSONValue].self, forKey: .metadata)
         cwd = Self.decodeStringIfPresent(from: container, keys: [.cwd, .cwdSnake, .cwdWorkingDirectory])
             ?? Self.decodeProjectPath(from: metadata)
+        projectId = Self.decodeIdentifierIfPresent(from: container, keys: [.projectId, .projectIdSnake])
+        hasCanonicalProjectId = container.contains(.projectId)
+            || container.contains(.projectIdSnake)
+            || (try container.decodeIfPresent(Bool.self, forKey: .hasCanonicalProjectId) ?? false)
         worktreeOriginPath = Self.decodeStringIfPresent(
             from: container,
             keys: [.worktreeOriginPath, .worktreeOriginPathSnake]
@@ -337,6 +353,10 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
         try container.encodeIfPresent(createdAt, forKey: .createdAt)
         try container.encodeIfPresent(updatedAt, forKey: .updatedAt)
         try container.encodeIfPresent(Self.normalizeProjectPath(cwd), forKey: .cwd)
+        if hasCanonicalProjectId {
+            try container.encode(Self.normalizeIdentifier(projectId), forKey: .projectId)
+        }
+        try container.encode(hasCanonicalProjectId, forKey: .hasCanonicalProjectId)
         try container.encodeIfPresent(Self.normalizeProjectPath(worktreeOriginPath), forKey: .worktreeOriginPath)
         try container.encodeIfPresent(metadata, forKey: .metadata)
         try container.encodeIfPresent(Self.normalizeIdentifier(forkedFromThreadId), forKey: .forkedFromThreadId)
@@ -535,6 +555,12 @@ extension CodexThread {
         Self.normalizeProjectPath(cwd)
     }
 
+    // A canonical project id is authoritative when present. Older local projects
+    // may still have a null id, so retain path grouping for non-rootless cwd values.
+    var hasCanonicalProjectAssignment: Bool {
+        hasCanonicalProjectId && projectId != nil
+    }
+
     // Best-effort repo root for project-scoped bridge features like git actions.
     var gitWorkingDirectory: String? {
         if let normalizedProjectPath {
@@ -556,6 +582,9 @@ extension CodexThread {
 
     // Stable key for grouping threads by the project a chat belongs to.
     var projectGroupKey: String {
+        if hasCanonicalProjectAssignment, let projectId {
+            return "id:\(projectId)"
+        }
         projectGroupPath ?? Self.noProjectGroupKey
     }
 

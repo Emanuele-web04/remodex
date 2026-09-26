@@ -1386,7 +1386,7 @@ extension CodexService {
         }
         let requestedSignature = CodexThreadResumeRequestSignature(
             projectPath: CodexThreadStartProjectBinding.normalizedProjectPath(preferredProjectPath)
-                ?? thread(for: threadId)?.gitWorkingDirectory,
+                ?? currentAuthoritativeProjectPath(for: threadId),
             modelIdentifier: modelIdentifierOverride ?? (thread(for: threadId)?.runtimeProvider == .opencode
                 ? thread(for: threadId)?.model
                 : runtimeModelIdentifierForTurn(threadId: threadId)),

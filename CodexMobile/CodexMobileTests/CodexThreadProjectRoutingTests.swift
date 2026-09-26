@@ -9,6 +9,33 @@ import XCTest
 
 @MainActor
 final class CodexThreadProjectRoutingTests: XCTestCase {
+    func testOrdinaryResumeDoesNotSendCachedProjectPath() async throws {
+        let service = makeService()
+        service.threads = [CodexThread(id: "thread-1", cwd: "/stale/cached/path")]
+        service.isConnected = true
+        service.isInitialized = true
+        var resumeParams: RPCObject?
+        service.requestTransportOverride = { method, params in
+            XCTAssertEqual(method, "thread/resume")
+            resumeParams = params?.objectValue
+            return RPCMessage(
+                id: .string("resume"),
+                result: .object([
+                    "thread": .object([
+                        "id": .string("thread-1"),
+                        "cwd": .string("/desktop/project"),
+                    ]),
+                ]),
+                includeJSONRPC: false
+            )
+        }
+
+        _ = try await service.ensureThreadResumed(threadId: "thread-1", force: true)
+
+        XCTAssertNil(resumeParams?["cwd"])
+        XCTAssertEqual(service.thread(for: "thread-1")?.cwd, "/desktop/project")
+    }
+
     private static var retainedServices: [CodexService] = []
 
     func testStartThreadIfReadyWaitsForRuntimeInitializationDuringReconnect() async throws {

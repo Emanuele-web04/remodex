@@ -111,6 +111,10 @@ extension CodexService {
         if merged.createdAt == nil { merged.createdAt = existing.createdAt }
         if merged.updatedAt == nil { merged.updatedAt = existing.updatedAt }
         if merged.cwd == nil { merged.cwd = existing.normalizedProjectPath }
+        if !merged.hasCanonicalProjectId, existing.hasCanonicalProjectId {
+            merged.projectId = existing.projectId
+            merged.hasCanonicalProjectId = true
+        }
         merged.metadata = mergedThreadMetadata(
             serverMetadata: merged.metadata,
             localMetadata: existing.metadata
@@ -324,12 +328,9 @@ extension CodexService {
             return thread(for: threadId)
         }
 
-        let preferredProjectPath = thread(for: threadId)?.gitWorkingDirectory
-            ?? snapshotThread(threadId: threadId)?.gitWorkingDirectory
         let resumedThread = try await ensureThreadResumed(
             threadId: threadId,
-            force: true,
-            preferredProjectPath: preferredProjectPath
+            force: true
         )
         let resolvedThread = thread(for: threadId) ?? resumedThread
         if resolvedThread != nil {

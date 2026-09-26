@@ -42,6 +42,65 @@ final class SidebarThreadGroupingTests: XCTestCase {
         XCTAssertEqual(groups[0].threads.map(\.id), ["thread-a", "thread-b"])
     }
 
+    func testCanonicalUnassignedLegacyHomeStillNeedsProjectlessPathMigration() throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let thread = try JSONDecoder().decode(
+            CodexThread.self,
+            from: Data(#"{"id":"legacy-mobile-chat","cwd":"/Users/me","projectId":null}"#.utf8)
+        )
+
+        let chatGroups = SidebarThreadGrouping.makeGroups(
+            from: [thread],
+            scope: .chats,
+            now: now
+        )
+        let projectGroups = SidebarThreadGrouping.makeGroups(
+            from: [thread],
+            scope: .projects,
+            now: now
+        )
+
+        XCTAssertTrue(thread.hasCanonicalProjectId)
+        XCTAssertNil(thread.projectId)
+        XCTAssertTrue(chatGroups.isEmpty)
+        XCTAssertEqual(projectGroups.first?.threads.map(\.id), ["legacy-mobile-chat"])
+    }
+
+    func testCanonicalProjectOverridesGeneratedRootlessPathHeuristic() throws {
+        let thread = try JSONDecoder().decode(
+            CodexThread.self,
+            from: Data(#"{"id":"assigned-chat","cwd":"/Users/me/Documents/Codex/2026-05-17/chat","projectId":"project-1"}"#.utf8)
+        )
+
+        XCTAssertFalse(SidebarThreadGrouping.isRootlessChatThread(thread))
+    }
+
+    func testCanonicalUnassignedProjectKeepsNormalWorkingDirectory() throws {
+        let thread = try JSONDecoder().decode(
+            CodexThread.self,
+            from: Data(#"{"id":"project-chat","cwd":"/Users/me/work/app","projectId":null}"#.utf8)
+        )
+
+        XCTAssertFalse(SidebarThreadGrouping.isRootlessChatThread(thread))
+    }
+
+    func testCanonicalProjectIdGroupsDifferentRootsTogether() throws {
+        let first = try JSONDecoder().decode(
+            CodexThread.self,
+            from: Data(#"{"id":"first","cwd":"/Users/me/work/app","projectId":"project-1","updatedAt":1700000000}"#.utf8)
+        )
+        let second = try JSONDecoder().decode(
+            CodexThread.self,
+            from: Data(#"{"id":"second","cwd":"/Users/me/work/app-worktree","projectId":"project-1","updatedAt":1699999999}"#.utf8)
+        )
+
+        let groups = SidebarThreadGrouping.makeGroups(from: [first, second], scope: .projects)
+
+        XCTAssertEqual(groups.count, 1)
+        XCTAssertEqual(groups[0].id, "project:id:project-1")
+        XCTAssertEqual(groups[0].threads.map(\.id), ["first", "second"])
+    }
+
     func testMakeGroupsTreatsPseudoProjectBucketsAsChats() {
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         let threads = [

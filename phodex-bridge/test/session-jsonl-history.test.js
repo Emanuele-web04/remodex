@@ -8,9 +8,20 @@ const path = require("node:path");
 const test = require("node:test");
 const {
   parseSessionJsonlMetadata,
+  parseLatestSessionJsonlCwd,
   parseSessionJsonlTurns,
   readThreadTurnsListPageFromSessionJsonl,
 } = require("../src/session-jsonl-history");
+
+test("parseLatestSessionJsonlCwd prefers the newest turn context", () => {
+  const content = [
+    JSON.stringify({ type: "session_meta", payload: { cwd: "/old" } }),
+    JSON.stringify({ type: "turn_context", payload: { cwd: "/old" } }),
+    JSON.stringify({ type: "turn_context", payload: { cwd: "/new/project" } }),
+  ].join("\n");
+
+  assert.equal(parseLatestSessionJsonlCwd(content), "/new/project");
+});
 
 test("parseSessionJsonlMetadata reads desktop thread cwd", () => {
   const content = [
