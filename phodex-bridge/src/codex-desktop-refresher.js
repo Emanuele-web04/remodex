@@ -12,6 +12,7 @@ const { createThreadRolloutActivityWatcher } = require("./rollout-watch");
 
 const DEFAULT_BUNDLE_ID = "com.openai.codex";
 const DEFAULT_APP_PATH = "/Applications/Codex.app";
+const CHATGPT_APP_PATH = "/Applications/ChatGPT.app";
 const DEFAULT_DEBOUNCE_MS = 1200;
 const DEFAULT_FALLBACK_NEW_THREAD_MS = 2_000;
 const DEFAULT_MID_RUN_REFRESH_THROTTLE_MS = 3_000;
@@ -777,8 +778,21 @@ function readBridgeConfig({
     ),
     refreshCommand,
     codexBundleId: readFirstDefinedEnv(["REMODEX_CODEX_BUNDLE_ID"], DEFAULT_BUNDLE_ID, env),
-    codexAppPath: DEFAULT_APP_PATH,
+    codexAppPath: resolveCodexAppPath(platform, fsImpl),
   };
+}
+
+function resolveCodexAppPath(platform, fsImpl = fs) {
+  if (platform !== "darwin") {
+    return DEFAULT_APP_PATH;
+  }
+  if (fsImpl.existsSync(DEFAULT_APP_PATH)) {
+    return DEFAULT_APP_PATH;
+  }
+  if (fsImpl.existsSync(CHATGPT_APP_PATH)) {
+    return CHATGPT_APP_PATH;
+  }
+  return DEFAULT_APP_PATH;
 }
 
 function readPrivatePackageDefaults({ runtimeRoot, fsImpl }) {

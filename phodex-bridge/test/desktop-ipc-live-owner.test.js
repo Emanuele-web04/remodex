@@ -4404,6 +4404,70 @@ test("live owner releases idle threads on unsubscribe but keeps running ones", a
   assert.equal(owner.isThreadOwned("thread-unsub-running"), true);
 });
 
+test("live owner releases an idle Remodex writer for explicit Desktop handoff", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-handoff-");
+  const requests = [];
+  const owner = createDesktopIpcLiveOwner({
+    socketPath,
+    startRouterWhenMissing: true,
+    sendCodexRequest: async (method, params) => {
+      requests.push({ method, params });
+      return {};
+    },
+    sendRawCodexMessage() {},
+  });
+  t.after(() => {
+    owner.stopAll();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  owner.observeInbound(JSON.stringify({
+    method: "turn/start",
+    params: { threadId: "thread-handoff-idle", input: [] },
+  }));
+  assert.equal(owner.isThreadOwned("thread-handoff-idle"), true);
+
+  assert.equal(await owner.releaseThreadForDesktop("thread-handoff-idle"), true);
+  assert.deepEqual(requests.filter((request) => ["thread/archive", "thread/unarchive"].includes(request.method)), [
+    { method: "thread/archive", params: { threadId: "thread-handoff-idle" } },
+    { method: "thread/unarchive", params: { threadId: "thread-handoff-idle" } },
+  ]);
+  assert.equal(owner.isThreadOwned("thread-handoff-idle"), false);
+});
+
+test("live owner refuses Desktop handoff while its Remodex turn is active", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-handoff-running-");
+  const requests = [];
+  const owner = createDesktopIpcLiveOwner({
+    socketPath,
+    startRouterWhenMissing: true,
+    sendCodexRequest: async (method, params) => {
+      requests.push({ method, params });
+      return {};
+    },
+    sendRawCodexMessage() {},
+  });
+  t.after(() => {
+    owner.stopAll();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  owner.observeInbound(JSON.stringify({
+    method: "turn/start",
+    params: {
+      threadId: "thread-handoff-running",
+      input: [{ type: "text", text: "still running" }],
+    },
+  }));
+
+  await assert.rejects(
+    owner.releaseThreadForDesktop("thread-handoff-running"),
+    /active Remodex turn/
+  );
+  assert.equal(requests.some((request) => request.method === "thread/archive"), false);
+  assert.equal(owner.isThreadOwned("thread-handoff-running"), true);
+});
+
 test("live owner drops cached conversation state when yielding to a peer owner", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-yield-state-");
   const frames = [];

@@ -72,6 +72,7 @@ async function handleDesktopMethod(method, params, options = {}) {
   const relaunchWaitMs = options.relaunchWaitMs ?? DEFAULT_RELAUNCH_WAIT_MS;
   const threadMaterializeWaitMs = options.threadMaterializeWaitMs ?? DEFAULT_THREAD_MATERIALIZE_WAIT_MS;
   const threadMaterializePollMs = options.threadMaterializePollMs ?? DEFAULT_THREAD_MATERIALIZE_POLL_MS;
+  const releaseThreadForDesktop = options.releaseThreadForDesktop || null;
 
   switch (method) {
     case "desktop/continueOnDesktop":
@@ -95,6 +96,7 @@ async function handleDesktopMethod(method, params, options = {}) {
         relaunchWaitMs,
         threadMaterializeWaitMs,
         threadMaterializePollMs,
+        releaseThreadForDesktop,
       });
     case "desktop/continueOnMac":
       if (platform !== "darwin") {
@@ -117,6 +119,7 @@ async function handleDesktopMethod(method, params, options = {}) {
         relaunchWaitMs,
         threadMaterializeWaitMs,
         threadMaterializePollMs,
+        releaseThreadForDesktop,
       });
     case "desktop/wakeDisplay":
       return wakeDisplay({
@@ -133,7 +136,7 @@ async function handleDesktopMethod(method, params, options = {}) {
   }
 }
 
-// Waits for fresh phone-authored chats to materialize locally before deep-linking them on desktop.
+// Relinquishes any idle bridge-owned writer, then opens the requested chat in Desktop.
 async function continueOnDesktop(
   params,
   {
@@ -149,6 +152,7 @@ async function continueOnDesktop(
     relaunchWaitMs,
     threadMaterializeWaitMs,
     threadMaterializePollMs,
+    releaseThreadForDesktop,
   }
 ) {
   const threadId = resolveThreadId(params);
@@ -164,6 +168,7 @@ async function continueOnDesktop(
 
   if (platform === "win32") {
     try {
+      await releaseOwnedThreadForDesktop(threadId, releaseThreadForDesktop);
       if (desktopKnown) {
         await refreshWindowsCodex(targetUrl, {
           executor,
@@ -184,6 +189,9 @@ async function continueOnDesktop(
         await openWindowsDeepLink(targetUrl, { executor, env });
       }
     } catch (error) {
+      if (error?.errorCode) {
+        throw error;
+      }
       throw desktopError(
         "handoff_failed",
         "Could not open Codex on this PC.",
@@ -208,6 +216,7 @@ async function continueOnDesktop(
   // real device switch: close, reopen, then focus the requested thread.
   if (desktopKnown && !appRunning) {
     try {
+      await releaseOwnedThreadForDesktop(threadId, releaseThreadForDesktop);
       // Cold-launch the desktop app first, then deep-link the thread once the
       // router is ready. A single `open codex://threads/...` can land on the
       // default new-chat route when Codex.app is not fully booted yet.
@@ -224,6 +233,9 @@ async function continueOnDesktop(
         pollMs: threadMaterializePollMs,
       });
     } catch (error) {
+      if (error?.errorCode) {
+        throw error;
+      }
       throw desktopError(
         "handoff_failed",
         "Could not open Codex.app on this Mac.",
@@ -244,6 +256,7 @@ async function continueOnDesktop(
   // window before the final deep link is likely to work.
   if (!appRunning) {
     try {
+      await releaseOwnedThreadForDesktop(threadId, releaseThreadForDesktop);
       await openCodexApp({ bundleId, appPath, executor });
       await sleepFn(appBootWaitMs);
       await openWhenThreadReady(threadId, targetUrl, {
@@ -257,6 +270,9 @@ async function continueOnDesktop(
         pollMs: threadMaterializePollMs,
       });
     } catch (error) {
+      if (error?.errorCode) {
+        throw error;
+      }
       throw desktopError(
         "handoff_failed",
         "Could not open Codex.app on this Mac.",
@@ -282,6 +298,7 @@ async function continueOnDesktop(
       sleepFn,
       relaunchWaitMs,
       appBootWaitMs,
+      beforeOpen: () => releaseOwnedThreadForDesktop(threadId, releaseThreadForDesktop),
     });
     await openWhenThreadReady(threadId, targetUrl, {
       bundleId,
@@ -294,6 +311,9 @@ async function continueOnDesktop(
       pollMs: threadMaterializePollMs,
     });
   } catch (error) {
+    if (error?.errorCode) {
+      throw error;
+    }
     throw desktopError(
       "handoff_failed",
       "Could not force close and reopen Codex.app on this Mac.",
@@ -498,6 +518,7 @@ async function forceRelaunchCodexApp({
   sleepFn,
   relaunchWaitMs,
   appBootWaitMs,
+  beforeOpen,
 }) {
   const appName = path.basename(appPath, ".app");
 
@@ -512,9 +533,26 @@ async function forceRelaunchCodexApp({
   }
 
   await waitForAppExit(appPath, executor, isAppRunning);
+  await beforeOpen?.();
   await sleepFn(relaunchWaitMs);
   await openCodexApp({ bundleId, appPath, executor });
   await sleepFn(appBootWaitMs);
+}
+
+async function releaseOwnedThreadForDesktop(threadId, releaseThreadForDesktop) {
+  if (typeof releaseThreadForDesktop !== "function") {
+    return;
+  }
+
+  try {
+    await releaseThreadForDesktop(threadId);
+  } catch (error) {
+    throw desktopError(
+      "handoff_writer_release_failed",
+      "Could not release this task from Remodex before opening it in Codex Desktop.",
+      error
+    );
+  }
 }
 
 async function waitForAppExit(appPath, executor, isAppRunning) {
