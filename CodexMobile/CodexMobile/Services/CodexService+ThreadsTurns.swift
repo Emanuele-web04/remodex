@@ -114,7 +114,32 @@ extension CodexService {
         let activeLimit = limit ?? recentActiveThreadListLimit
 
         let activeThreads = try await fetchCoalescedServerThreads(limit: activeLimit)
-        reconcileLocalThreadsWithServer(activeThreads)
+        reconcileLocalThreadsWithServer(
+            activeThreads,
+            removeMissingServerThreads: false
+        )
+
+        if activeThreadId == nil {
+            activeThreadId = firstLiveThreadID()
+        }
+    }
+
+    // Reads every active catalog page so a Desktop deletion is authoritative even
+    // when the phone has more rows than its fast sidebar window.
+    func listAllThreads() async throws {
+        isLoadingThreads = true
+        defer {
+            isLoadingThreads = false
+            flushPendingRuntimeOptionRefreshIfPossible()
+        }
+
+        async let activeFetch = fetchServerThreads(limit: nil)
+        async let archivedFetch = fetchServerThreads(limit: nil, archived: true)
+        let (activeThreads, archivedThreads) = try await (activeFetch, archivedFetch)
+        reconcileCompleteThreadCatalog(
+            activeThreads: activeThreads,
+            archivedThreads: archivedThreads
+        )
 
         if activeThreadId == nil {
             activeThreadId = firstLiveThreadID()

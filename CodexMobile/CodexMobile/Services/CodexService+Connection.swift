@@ -611,7 +611,7 @@ extension CodexService {
                 return
             }
 
-            try? await self.listThreads()
+            try? await self.listAllThreads()
         }
     }
 

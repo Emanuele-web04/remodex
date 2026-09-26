@@ -156,7 +156,16 @@ extension CodexService {
             } else {
                 renamedThreadNameByThreadID = [:]
             }
-
+            if let savedPendingThreadRenames = defaults.data(
+                forKey: macScopedDefaultsKey(Self.pendingThreadRenamesDefaultsKey, macDeviceId: macDeviceId)
+            ), let decodedPendingThreadRenames = try? decoder.decode(
+                [String: String].self,
+                from: savedPendingThreadRenames
+            ) {
+                pendingThreadRenameByThreadID = decodedPendingThreadRenames
+            } else {
+                pendingThreadRenameByThreadID = [:]
+            }
             if let savedPinnedThreadIDs = defaults.data(
                 forKey: macScopedDefaultsKey(Self.pinnedThreadIDsDefaultsKey, macDeviceId: macDeviceId)
             ),
@@ -306,6 +315,8 @@ extension CodexService {
             planSessionSourceByThread.removeAll()
             forkedFromThreadIDByThreadID.removeAll()
             renamedThreadNameByThreadID.removeAll()
+            pendingThreadRenameByThreadID.removeAll()
+            serverConfirmedThreadIDs.removeAll()
             pinnedThreadIDs.removeAll()
             pinnedThreadSnapshotsByRootID.removeAll()
             snapshotOnlyPinnedThreadIDs.removeAll()
@@ -323,6 +334,7 @@ extension CodexService {
         migrateLegacyMacScopedDefaultsValue(for: Self.locallyDeletedThreadIDsKey)
         migrateLegacyMacScopedDefaultsValue(for: Self.forkedThreadOriginsDefaultsKey)
         migrateLegacyMacScopedDefaultsValue(for: Self.renamedThreadNamesDefaultsKey)
+        migrateLegacyMacScopedDefaultsValue(for: Self.pendingThreadRenamesDefaultsKey)
         migrateLegacyMacScopedDefaultsValue(for: Self.pinnedThreadIDsDefaultsKey)
         migrateLegacyMacScopedDefaultsValue(for: Self.pinnedThreadSnapshotsDefaultsKey)
         migrateLegacyMacScopedDefaultsValue(for: Self.associatedManagedWorktreePathsDefaultsKey)
@@ -371,6 +383,12 @@ extension CodexService {
         ) || migratedDefaults
         migratedDefaults = mergeMacScopedDefaultsDataDictionary(
             Self.renamedThreadNamesDefaultsKey,
+            from: sourceDeviceIds,
+            to: targetDeviceId,
+            as: [String: String].self
+        ) || migratedDefaults
+        migratedDefaults = mergeMacScopedDefaultsDataDictionary(
+            Self.pendingThreadRenamesDefaultsKey,
             from: sourceDeviceIds,
             to: targetDeviceId,
             as: [String: String].self
