@@ -2604,7 +2604,9 @@ function createDesktopIpcActionFollower({
     const turnStartParams = normalized && typeof normalized === "object" && !Array.isArray(normalized)
       ? normalized
       : route.turnStartParams;
-    const request = normalizeDesktopRequestPermissions(cloneJSON(turnStartParams));
+    const request = normalizeDesktopTurnStartInput(
+      normalizeDesktopRequestPermissions(cloneJSON(turnStartParams))
+    );
     if (!readString(request.clientUserMessageId)) {
       request.clientUserMessageId = route.senderRequestId;
     }
@@ -2627,6 +2629,33 @@ function createDesktopIpcActionFollower({
   function normalizeDesktopRequestPermissions(params) {
     const sandboxPolicy = normalizeSandboxPolicyCompatibility(params.sandboxPolicy);
     return sandboxPolicy ? { ...params, sandboxPolicy } : params;
+  }
+
+  // Desktop renders an optimistic user row before app-server persists the turn.
+  // Its current parser expects live text input entries to use `type: text` and
+  // dereferences text_elements while building the prompt navigation rail.
+  function normalizeDesktopTurnStartInput(params) {
+    if (!params || typeof params !== "object" || !Array.isArray(params.input)) {
+      return params;
+    }
+    return {
+      ...params,
+      input: params.input.map((entry) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+          return entry;
+        }
+        const type = normalizeToken(entry.type);
+        if (type !== "text" && type !== "inputtext") {
+          return entry;
+        }
+        return {
+          ...entry,
+          type: "text",
+          text: typeof entry.text === "string" ? entry.text : "",
+          text_elements: Array.isArray(entry.text_elements) ? entry.text_elements : [],
+        };
+      }),
+    };
   }
 
   function queueThreadChange(threadId, change) {

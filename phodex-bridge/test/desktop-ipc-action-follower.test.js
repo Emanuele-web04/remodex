@@ -2303,7 +2303,7 @@ test("desktop IPC follower routes phone turns to Desktop-owned threads", async (
     turnStart: {
       request: {
         threadId: "thread-desktop-owned",
-        input: [{ type: "input_text", text: "continue from phone" }],
+        input: [{ type: "text", text: "continue from phone", text_elements: [] }],
         cwd: "/repo",
         model: "gpt-test",
         effort: "low",
@@ -3948,7 +3948,7 @@ test("desktop IPC follower normalizes phone turn starts before Desktop follower 
   const turnStartFrame = serverFrames.find((frame) => frame.method === "thread-follower-start-turn");
   assert.deepEqual(turnStartFrame.params.turnStart.request, {
     threadId: "thread-normalize",
-    input: [{ type: "input_text", text: "continue" }],
+    input: [{ type: "text", text: "continue", text_elements: [] }],
     summary: "none",
     clientUserMessageId: "phone-turn-start-normalize",
   });
@@ -4553,6 +4553,11 @@ test("desktop IPC follower holds quick phone turns until the desktop snapshot ar
   await waitFor(() => serverFrames.find((frame) => frame.method === "thread-follower-start-turn"));
   const turnStartFrame = serverFrames.find((frame) => frame.method === "thread-follower-start-turn");
   assert.equal(turnStartFrame.params.conversationId, "thread-held");
+  assert.deepEqual(turnStartFrame.params.turnStart.request.input, [{
+    type: "text",
+    text: "continue quickly",
+    text_elements: [],
+  }]);
   await waitFor(() => outbound.find((message) => message.id === "phone-turn-start-held"));
   assert.deepEqual(outbound.find((message) => message.id === "phone-turn-start-held"), {
     id: "phone-turn-start-held",
