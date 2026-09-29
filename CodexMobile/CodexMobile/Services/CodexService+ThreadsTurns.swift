@@ -3520,7 +3520,9 @@ extension CodexService {
                 ?? turn["turnId"]?.stringValue ?? turn["turn_id"]?.stringValue) == latestTurnID
         }
         let latestTurnStatus = latestTurn.flatMap { normalizedInterruptTurnStatus(from: $0) }
-        let latestTurnCompletedAt = firstDateValue(in: latestTurn, keys: ["completedAt", "completed_at"])
+        let latestTurnCompletedAt = firstDateValue(
+            in: latestTurn, keys: ["completedAt", "completed_at", "completedAtMs", "completed_at_ms"]
+        )
 
         // Parallel turns can finish out of order. A newer terminal turn does not
         // prove that an older in-progress sibling is no longer interruptible.

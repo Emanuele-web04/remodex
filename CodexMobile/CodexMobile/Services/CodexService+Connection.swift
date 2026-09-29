@@ -767,7 +767,7 @@ extension CodexService {
     // Drops sync work tied to the old transport so reconnect starts from a clean baseline.
     private func clearConnectionSyncState() {
         streamRecoveryConnectionGeneration += 1
-        invalidateCompletionPushRegistration()
+        invalidateCompletionPushRegistration(preservingRemoteOwnership: true)
         isBootstrappingConnectionSync = false
         stopSyncLoop()
         postConnectSyncTask?.cancel()

@@ -242,16 +242,19 @@ extension CodexService {
             lastPushRegistrationSignature = signature
         } catch {
             if registrationGeneration == pushRegistrationGeneration {
-                completionPushSessionID = nil
+                // A failed refresh does not unregister the device at the relay.
+                // Keep acknowledged ownership until a response disables it or the pairing changes.
                 lastPushRegistrationSignature = nil
             }
             debugRuntimeLog("push registration sync failed: \(error.localizedDescription)")
         }
     }
 
-    func invalidateCompletionPushRegistration() {
+    func invalidateCompletionPushRegistration(preservingRemoteOwnership: Bool = false) {
         pushRegistrationGeneration += 1
-        completionPushSessionID = nil
+        if !preservingRemoteOwnership {
+            completionPushSessionID = nil
+        }
         lastPushRegistrationSignature = nil
     }
 
@@ -300,7 +303,8 @@ extension CodexService {
             ?? eventObject?["status"]
         guard let status else { return true }
         let rawStatus = status.stringValue ?? status.objectValue?["type"]?.stringValue ?? ""
-        return ["completed", "done", "finished"].contains(normalizeThreadStatusType(rawStatus))
+        return ["completed", "complete", "done", "finished", "succeeded", "success"]
+            .contains(normalizeThreadStatusType(rawStatus))
     }
 
     // Called before terminal handling clears running state. History and a bare

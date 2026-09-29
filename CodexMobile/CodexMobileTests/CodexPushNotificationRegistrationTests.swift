@@ -72,6 +72,9 @@ final class CodexPushNotificationRegistrationTests: XCTestCase {
             ("stopped", true, nil, "interrupted", 0),
             ("running", true, nil, "inProgress", 0),
             ("unknown", true, nil, "unknown", 0),
+            ("alias-complete", true, nil, "complete", 0),
+            ("alias-succeeded", true, nil, "succeeded", 0),
+            ("alias-success", true, nil, "success", 0),
             ("success", true, nil, "completed", 0),
             ("failure", true, nil, "failed", 0),
         ]
@@ -99,8 +102,8 @@ final class CodexPushNotificationRegistrationTests: XCTestCase {
         try? await Task.sleep(nanoseconds: 50_000_000)
         XCTAssertEqual(Set(center.addRequests.compactMap {
             $0.content.userInfo[CodexNotificationPayloadKeys.turnId] as? String
-        }), ["turn-success", "turn-failure"])
-        XCTAssertEqual(center.addRequests.count, 2)
+        }), ["turn-success", "turn-failure", "turn-alias-complete", "turn-alias-succeeded", "turn-alias-success"])
+        XCTAssertEqual(center.addRequests.count, 5)
     }
 
     func testIDLessHistoryCannotEndTheCurrentRun() async {
@@ -209,13 +212,24 @@ final class CodexPushNotificationRegistrationTests: XCTestCase {
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
         XCTAssertEqual(center.addRequests.count, 2)
+        await service.disconnect(preserveReconnectIntent: true)
+        service.notifyRunCompletionIfNeeded(threadId: "thread", turnId: "reconnecting", result: .completed)
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(center.addRequests.count, 2, "The relay still owns delivery during a same-session reconnect")
+        service.isConnected = true
+        service.isInitialized = true
+        service.requestTransportOverride = { _, _ in throw NSError(domain: "offline", code: 1) }
+        await service.syncManagedPushRegistrationIfNeeded(force: true)
+        service.notifyRunCompletionIfNeeded(threadId: "thread", turnId: "registration-retry", result: .completed)
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(center.addRequests.count, 2, "An unsuccessful refresh does not revoke an acknowledged remote registration")
         service.relaySessionId = "different-pairing"
         service.notifyRunCompletionIfNeeded(threadId: "thread", turnId: "new-pairing-turn", result: .completed)
         try? await Task.sleep(nanoseconds: 50_000_000)
         XCTAssertEqual(center.addRequests.count, 3)
     }
 
-    func testPushRegistrationIgnoresOldResponsesAndReleasesOwnershipOnFailure() async {
+    func testPushRegistrationIgnoresOldResponsesAndReleasesOwnershipWhenDisabled() async {
         let center = MockUserNotificationCenter(status: .authorized)
         let service = makeService(
             userNotificationCenter: center,
@@ -261,15 +275,26 @@ final class CodexPushNotificationRegistrationTests: XCTestCase {
             ]), includeJSONRPC: false)
         }
         await service.syncManagedPushRegistrationIfNeeded(force: true)
-        service.requestTransportOverride = { _, _ in throw NSError(domain: "offline", code: 1) }
+        service.requestTransportOverride = { _, _ in
+            RPCMessage(id: .string("disabled"), result: .object([
+                "ok": .bool(true), "completionPushEnabled": .bool(false),
+            ]), includeJSONRPC: false)
+        }
         await service.syncManagedPushRegistrationIfNeeded(force: true)
-        service.notifyRunCompletionIfNeeded(threadId: "thread", turnId: "after-error", result: .completed)
+        service.notifyRunCompletionIfNeeded(threadId: "thread", turnId: "after-disabled", result: .completed)
         try? await Task.sleep(nanoseconds: 50_000_000)
         XCTAssertEqual(center.addRequests.count, 2)
     }
 
     func testSnapshotCompletionAlertsRequireRecentTimestampForTrackedTurn() async {
-        for completionAge in [0, 86_400, nil] as [Int?] {
+        let timestamps: [(key: String, age: Int?, units: Int)] = [
+            ("completedAt", 0, 1), ("completedAt", 86_400, 1), ("completedAt", nil, 1),
+            ("completed_at", 0, 1),
+            ("completedAtMs", 0, 1_000), ("completedAtMs", 86_400, 1_000),
+            ("completed_at_ms", 0, 1_000), ("completed_at_ms", 86_400, 1_000),
+        ]
+        for timestamp in timestamps {
+            let completionAge = timestamp.age
             let center = MockUserNotificationCenter(status: .authorized)
             let service = makeService(
                 userNotificationCenter: center,
@@ -286,7 +311,7 @@ final class CodexPushNotificationRegistrationTests: XCTestCase {
                 "id": .string("turn-recovered"), "status": .string("completed"),
             ]
             if let completionAge {
-                turn["completedAt"] = .integer(Int(Date().timeIntervalSince1970) - completionAge)
+                turn[timestamp.key] = .integer((Int(Date().timeIntervalSince1970) - completionAge) * timestamp.units)
             }
             service.requestTransportOverride = { method, _ in
                 XCTAssertEqual(method, "thread/turns/list")
