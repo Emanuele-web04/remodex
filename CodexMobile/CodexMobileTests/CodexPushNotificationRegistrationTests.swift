@@ -49,7 +49,147 @@ final class CodexPushNotificationRegistrationTests: XCTestCase {
         )
     }
 
-    func testMissedTerminalEventRecoveredFromSnapshotSchedulesCompletionOnce() async {
+    func testOnlyFreshTrackedTerminalEventsScheduleCompletionAlerts() async {
+        let center = MockUserNotificationCenter(status: .authorized)
+        let service = makeService(
+            userNotificationCenter: center,
+            remoteNotificationRegistrar: MockRemoteNotificationRegistrar()
+        )
+        service.applicationStateProvider = { .inactive }
+        for status in ["idle", "notLoaded", "active", "stopped", "unknown"] {
+            service.handleNotification(method: "thread/status/changed", params: .object([
+                "threadId": .string("status-\(status)"), "status": .object(["type": .string(status)]),
+            ]))
+        }
+
+        let cases: [(id: String, start: Bool, marker: String?, status: String, age: Int)] = [
+            ("untracked", false, nil, "completed", 0),
+            ("replayed", true, "remodexReplayedEvent", "completed", 0),
+            ("bootstrap", true, "remodexRolloutBootstrapReplay", "completed", 0),
+            ("catchup", true, "remodexRolloutTerminalCatchUp", "completed", 0),
+            ("stale", true, nil, "completed", 86_400),
+            ("wrapped-stale", true, nil, "completed", 86_400),
+            ("stopped", true, nil, "interrupted", 0),
+            ("running", true, nil, "inProgress", 0),
+            ("unknown", true, nil, "unknown", 0),
+            ("alias-complete", true, nil, "complete", 0),
+            ("alias-succeeded", true, nil, "succeeded", 0),
+            ("alias-success", true, nil, "success", 0),
+            ("success", true, nil, "completed", 0),
+            ("failure", true, nil, "failed", 0),
+        ]
+        for scenario in cases {
+            let threadID = "thread-\(scenario.id)"
+            let turnID = "turn-\(scenario.id)"
+            if scenario.start {
+                service.handleNotification(method: "turn/started", params: .object([
+                    "threadId": .string(threadID), "turnId": .string(turnID),
+                ]))
+            }
+            var params: [String: JSONValue] = [
+                "threadId": .string(threadID), "turnId": .string(turnID),
+                "turn": .object([
+                    "id": .string(turnID), "status": .string(scenario.status),
+                    "completedAt": .integer(Int(Date().timeIntervalSince1970) - scenario.age),
+                ]),
+            ]
+            if let marker = scenario.marker { params[marker] = .bool(true) }
+            if scenario.id == "wrapped-stale", let turn = params.removeValue(forKey: "turn") {
+                params["event"] = .object(["turn": turn])
+            }
+            service.handleNotification(method: "turn/completed", params: .object(params))
+        }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(Set(center.addRequests.compactMap {
+            $0.content.userInfo[CodexNotificationPayloadKeys.turnId] as? String
+        }), ["turn-success", "turn-failure", "turn-alias-complete", "turn-alias-succeeded", "turn-alias-success"])
+        XCTAssertEqual(center.addRequests.count, 5)
+    }
+
+    func testIDLessHistoryCannotEndTheCurrentRun() async {
+        let center = MockUserNotificationCenter(status: .authorized)
+        let service = makeService(
+            userNotificationCenter: center,
+            remoteNotificationRegistrar: MockRemoteNotificationRegistrar()
+        )
+        service.applicationStateProvider = { .inactive }
+        service.handleNotification(method: "turn/started", params: .object([
+            "threadId": .string("live-thread"), "turnId": .string("live-turn"),
+        ]))
+        for marker in ["remodexReplayedEvent", "remodexRolloutBootstrapReplay", "remodexRolloutTerminalCatchUp"] {
+            for method in ["turn/completed", "error"] {
+                service.handleNotification(method: method, params: .object([
+                    "threadId": .string("live-thread"), marker: .bool(true),
+                ]))
+                XCTAssertEqual(service.activeTurnID(for: "live-thread"), "live-turn")
+                XCTAssertTrue(service.threadHasActiveOrRunningTurn("live-thread"))
+            }
+        }
+        service.handleNotification(method: "turn/completed", params: .object([
+            "threadId": .string("live-thread"), "turnId": .string("live-turn"),
+            "status": .string("completed"),
+        ]))
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(center.addRequests.count, 1)
+    }
+
+    func testCompletionReceiptsSurviveRelaunchAndKeepDistinctRuns() async {
+        let suiteName = "CodexCompletionReceipts.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let center = MockUserNotificationCenter(status: .authorized)
+        let first = makeService(
+            userNotificationCenter: center,
+            remoteNotificationRegistrar: MockRemoteNotificationRegistrar(),
+            defaults: defaults
+        )
+        first.applicationStateProvider = { .inactive }
+        first.notifyRunCompletionIfNeeded(threadId: "thread", turnId: "turn-a", result: .completed)
+        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        let relaunched = makeService(
+            userNotificationCenter: center,
+            remoteNotificationRegistrar: MockRemoteNotificationRegistrar(),
+            defaults: defaults
+        )
+        relaunched.applicationStateProvider = { .inactive }
+        relaunched.notifyRunCompletionIfNeeded(threadId: "thread", turnId: "turn-a", result: .completed)
+        relaunched.notifyRunCompletionIfNeeded(threadId: "thread", turnId: "turn-a", result: .failed)
+        relaunched.notifyRunCompletionIfNeeded(threadId: "thread", turnId: nil, result: .completed)
+        relaunched.notifyRunCompletionIfNeeded(threadId: "thread", turnId: "turn-b", result: .completed)
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(center.addRequests.compactMap {
+            $0.content.userInfo[CodexNotificationPayloadKeys.turnId] as? String
+        }, ["turn-a", "turn-b"])
+    }
+
+    func testIDLessStartsStillNotifyWhenTheRunFinishes() async {
+        let center = MockUserNotificationCenter(status: .authorized)
+        let service = makeService(
+            userNotificationCenter: center,
+            remoteNotificationRegistrar: MockRemoteNotificationRegistrar()
+        )
+        service.applicationStateProvider = { .inactive }
+        for canonicalID in [nil, "canonical-turn"] as [String?] {
+            service.handleNotification(method: "turn/started", params: .object([
+                "threadId": .string("idless-thread"),
+            ]))
+            var params: [String: JSONValue] = [
+                "threadId": .string("idless-thread"), "status": .string("completed"),
+            ]
+            if let canonicalID { params["turnId"] = .string(canonicalID) }
+            service.handleNotification(method: "turn/completed", params: .object(params))
+        }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        let turnIDs = center.addRequests.compactMap {
+            $0.content.userInfo[CodexNotificationPayloadKeys.turnId] as? String
+        }
+        XCTAssertEqual(turnIDs.count, 2)
+        XCTAssertFalse(turnIDs.contains(""))
+        XCTAssertEqual(turnIDs.last, "canonical-turn")
+    }
+
+    func testRemoteCompletionOwnershipRequiresConfirmedCurrentPairing() async {
         let center = MockUserNotificationCenter(status: .authorized)
         let service = makeService(
             userNotificationCenter: center,
@@ -58,29 +198,137 @@ final class CodexPushNotificationRegistrationTests: XCTestCase {
         service.applicationStateProvider = { .inactive }
         service.isConnected = true
         service.isInitialized = true
-        service.supportsTurnPagination = true
-        service.threads = [CodexThread(id: "thread-recovered", title: "Recovered work")]
-        service.markThreadAsRunning("thread-recovered")
-        service.setActiveTurnID("turn-recovered", for: "thread-recovered")
-        service.requestTransportOverride = { method, _ in
-            XCTAssertEqual(method, "thread/turns/list")
-            return RPCMessage(
-                id: .string(UUID().uuidString),
-                result: .object([
-                    "data": .array([.object([
-                        "id": .string("turn-recovered"),
-                        "status": .string("completed"),
-                    ])]),
-                ]),
-                includeJSONRPC: false
-            )
+        service.relaySessionId = "paired-session"
+        service.remoteNotificationDeviceToken = "aabbcc"
+        await service.refreshNotificationAuthorizationStatus()
+        for capability in [JSONValue.null, .bool(false), .bool(true)] {
+            service.requestTransportOverride = { _, _ in
+                RPCMessage(id: .string("register"), result: .object([
+                    "ok": .bool(true), "completionPushEnabled": capability,
+                ]), includeJSONRPC: false)
+            }
+            await service.syncManagedPushRegistrationIfNeeded(force: true)
+            service.notifyRunCompletionIfNeeded(threadId: "thread", turnId: "\(capability)", result: .completed)
+            try? await Task.sleep(nanoseconds: 50_000_000)
         }
+        XCTAssertEqual(center.addRequests.count, 2)
+        await service.disconnect(preserveReconnectIntent: true)
+        service.notifyRunCompletionIfNeeded(threadId: "thread", turnId: "reconnecting", result: .completed)
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(center.addRequests.count, 2, "The relay still owns delivery during a same-session reconnect")
+        service.isConnected = true
+        service.isInitialized = true
+        service.requestTransportOverride = { _, _ in throw NSError(domain: "offline", code: 1) }
+        await service.syncManagedPushRegistrationIfNeeded(force: true)
+        service.notifyRunCompletionIfNeeded(threadId: "thread", turnId: "registration-retry", result: .completed)
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(center.addRequests.count, 2, "An unsuccessful refresh does not revoke an acknowledged remote registration")
+        service.relaySessionId = "different-pairing"
+        service.notifyRunCompletionIfNeeded(threadId: "thread", turnId: "new-pairing-turn", result: .completed)
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(center.addRequests.count, 3)
+    }
 
-        let didRefresh = await service.refreshInFlightTurnState(threadId: "thread-recovered")
-        XCTAssertTrue(didRefresh)
+    func testPushRegistrationIgnoresOldResponsesAndReleasesOwnershipWhenDisabled() async {
+        let center = MockUserNotificationCenter(status: .authorized)
+        let service = makeService(
+            userNotificationCenter: center,
+            remoteNotificationRegistrar: MockRemoteNotificationRegistrar()
+        )
+        service.applicationStateProvider = { .inactive }
+        service.isConnected = true
+        service.isInitialized = true
+        service.relaySessionId = "paired-session"
+        service.remoteNotificationDeviceToken = "aabbcc"
+        await service.refreshNotificationAuthorizationStatus()
+        var pendingResponse: CheckedContinuation<RPCMessage, Error>?
+        let registrationStarted = expectation(description: "First registration is waiting for a response")
+        service.requestTransportOverride = { _, _ in
+            try await withCheckedThrowingContinuation {
+                pendingResponse = $0
+                registrationStarted.fulfill()
+            }
+        }
+        let oldRegistration = Task { await service.syncManagedPushRegistrationIfNeeded(force: true) }
+        await fulfillment(of: [registrationStarted], timeout: 1)
+        guard let pendingResponse else {
+            oldRegistration.cancel()
+            return XCTFail("The first registration never reached the transport")
+        }
+        service.requestTransportOverride = { _, _ in
+            RPCMessage(id: .string("newer"), result: .object([
+                "ok": .bool(true), "completionPushEnabled": .bool(false),
+            ]), includeJSONRPC: false)
+        }
+        await service.syncManagedPushRegistrationIfNeeded(force: true)
+        pendingResponse.resume(returning: RPCMessage(id: .string("older"), result: .object([
+            "ok": .bool(true), "completionPushEnabled": .bool(true),
+        ]), includeJSONRPC: false))
+        await oldRegistration.value
+        service.notifyRunCompletionIfNeeded(threadId: "thread", turnId: "after-race", result: .completed)
         try? await Task.sleep(nanoseconds: 50_000_000)
         XCTAssertEqual(center.addRequests.count, 1)
-        XCTAssertEqual(center.addRequests.first?.content.userInfo[CodexNotificationPayloadKeys.turnId] as? String, "turn-recovered")
+
+        service.requestTransportOverride = { _, _ in
+            RPCMessage(id: .string("enabled"), result: .object([
+                "ok": .bool(true), "completionPushEnabled": .bool(true),
+            ]), includeJSONRPC: false)
+        }
+        await service.syncManagedPushRegistrationIfNeeded(force: true)
+        service.requestTransportOverride = { _, _ in
+            RPCMessage(id: .string("disabled"), result: .object([
+                "ok": .bool(true), "completionPushEnabled": .bool(false),
+            ]), includeJSONRPC: false)
+        }
+        await service.syncManagedPushRegistrationIfNeeded(force: true)
+        service.notifyRunCompletionIfNeeded(threadId: "thread", turnId: "after-disabled", result: .completed)
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(center.addRequests.count, 2)
+    }
+
+    func testSnapshotCompletionAlertsRequireRecentTimestampForTrackedTurn() async {
+        let timestamps: [(key: String, age: Int?, units: Int)] = [
+            ("completedAt", 0, 1), ("completedAt", 86_400, 1), ("completedAt", nil, 1),
+            ("completed_at", 0, 1),
+            ("completedAtMs", 0, 1_000), ("completedAtMs", 86_400, 1_000),
+            ("completed_at_ms", 0, 1_000), ("completed_at_ms", 86_400, 1_000),
+        ]
+        for timestamp in timestamps {
+            let completionAge = timestamp.age
+            let center = MockUserNotificationCenter(status: .authorized)
+            let service = makeService(
+                userNotificationCenter: center,
+                remoteNotificationRegistrar: MockRemoteNotificationRegistrar()
+            )
+            service.applicationStateProvider = { .inactive }
+            service.isConnected = true
+            service.isInitialized = true
+            service.supportsTurnPagination = true
+            service.threads = [CodexThread(id: "thread-recovered", title: "Recovered work")]
+            service.markThreadAsRunning("thread-recovered")
+            service.setActiveTurnID("turn-recovered", for: "thread-recovered")
+            var turn: [String: JSONValue] = [
+                "id": .string("turn-recovered"), "status": .string("completed"),
+            ]
+            if let completionAge {
+                turn[timestamp.key] = .integer((Int(Date().timeIntervalSince1970) - completionAge) * timestamp.units)
+            }
+            service.requestTransportOverride = { method, _ in
+                XCTAssertEqual(method, "thread/turns/list")
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object(["data": .array([.object(turn)])]),
+                    includeJSONRPC: false
+                )
+            }
+
+            let didRefresh = await service.refreshInFlightTurnState(threadId: "thread-recovered")
+            XCTAssertTrue(didRefresh)
+            _ = await service.refreshInFlightTurnState(threadId: "thread-recovered")
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            XCTAssertEqual(center.addRequests.count, completionAge == 0 ? 1 : 0)
+            XCTAssertFalse(service.threadHasActiveOrRunningTurn("thread-recovered"))
+        }
     }
 
     func testHandleRemoteNotificationDeviceTokenSyncsManagedPushRegistration() async {
@@ -429,11 +677,12 @@ final class CodexPushNotificationRegistrationTests: XCTestCase {
 
     private func makeService(
         userNotificationCenter: CodexUserNotificationCentering,
-        remoteNotificationRegistrar: CodexRemoteNotificationRegistering
+        remoteNotificationRegistrar: CodexRemoteNotificationRegistering,
+        defaults providedDefaults: UserDefaults? = nil
     ) -> CodexService {
         let suiteName = "CodexPushNotificationRegistrationTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName) ?? .standard
-        defaults.removePersistentDomain(forName: suiteName)
+        let defaults = providedDefaults ?? UserDefaults(suiteName: suiteName) ?? .standard
+        if providedDefaults == nil { defaults.removePersistentDomain(forName: suiteName) }
         let service = CodexService(
             defaults: defaults,
             userNotificationCenter: userNotificationCenter,

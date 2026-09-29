@@ -44,7 +44,11 @@ function createNotificationsHandler({ pushServiceClient, logPrefix = "[remodex]"
 
   async function handleNotificationsMethod(method, params) {
     if (!pushServiceClient?.hasConfiguredBaseUrl) {
-      return { ok: false, skipped: true };
+      return {
+        ok: false,
+        skipped: true,
+        completionPushEnabled: false,
+      };
     }
 
     const deviceToken = readString(params.deviceToken);
@@ -57,16 +61,23 @@ function createNotificationsHandler({ pushServiceClient, logPrefix = "[remodex]"
       );
     }
 
-    await pushServiceClient.registerDevice({
+    const registration = await pushServiceClient.registerDevice({
       deviceToken,
       alertsEnabled,
       apnsEnvironment,
     });
+    const ok = registration?.ok === true;
+    const skipped = registration?.skipped === true;
 
     return {
-      ok: true,
+      ok,
+      skipped,
       alertsEnabled,
       apnsEnvironment,
+      completionPushEnabled: ok
+        && !skipped
+        && alertsEnabled
+        && registration?.pushEnabled === true,
     };
   }
 

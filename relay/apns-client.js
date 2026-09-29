@@ -8,6 +8,7 @@ const crypto = require("crypto");
 const http2 = require("http2");
 
 const APNS_TOKEN_TTL_SECONDS = 50 * 60;
+const APNS_NOTIFICATION_TTL_SECONDS = 5 * 60;
 
 function createAPNsClient({
   teamId = "",
@@ -29,6 +30,7 @@ function createAPNsClient({
     title,
     body,
     payload = {},
+    collapseId,
   } = {}) {
     if (!isConfigured()) {
       throw apnsError("apns_not_configured", "APNs credentials are not configured.", 503);
@@ -52,6 +54,10 @@ function createAPNsClient({
         "apns-topic": bundleId,
         "apns-push-type": "alert",
         "apns-priority": "10",
+        "apns-expiration": String(
+          Math.floor(now() / 1000) + APNS_NOTIFICATION_TTL_SECONDS
+        ),
+        ...(collapseId ? { "apns-collapse-id": collapseId } : {}),
         "content-type": "application/json",
       }, JSON.stringify({
         aps: {

@@ -6,6 +6,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -32,7 +33,7 @@ test("push service stores device registration and sends one completion alert", a
     }),
   });
 
-  await service.registerDevice({
+  const registration = await service.registerDevice({
     sessionId: "session-1",
     notificationSecret: "secret-1",
     deviceToken: "aa bb cc",
@@ -61,6 +62,31 @@ test("push service stores device registration and sends one completion alert", a
   assert.equal(sent[0].deviceToken, "aabbcc");
   assert.equal(sent[0].apnsEnvironment, "development");
   assert.equal(sent[0].payload.threadId, "thread-1");
+  assert.equal(
+    sent[0].collapseId,
+    crypto.createHash("sha256").update("done-1").digest("hex")
+  );
+  assert.deepEqual(registration, { ok: true, pushEnabled: true });
+});
+
+test("push registration reports unavailable APNs when alerts are enabled", async () => {
+  const service = createPushSessionService({
+    apnsClient: {
+      isConfigured: () => false,
+      async sendNotification() {},
+    },
+    canRegisterSession: () => true,
+    stateStore: createFileBackedPushStateStore(),
+  });
+
+  const registration = await service.registerDevice({
+    sessionId: "session-unconfigured",
+    notificationSecret: "secret-unconfigured",
+    deviceToken: "aabbcc",
+    alertsEnabled: true,
+  });
+
+  assert.deepEqual(registration, { ok: true, pushEnabled: false });
 });
 
 test("push service rejects registration when the relay session is not active", async () => {
@@ -70,6 +96,7 @@ test("push service rejects registration when the relay session is not active", a
       async sendNotification() {},
     },
     canRegisterSession: () => false,
+    stateStore: createFileBackedPushStateStore(),
   });
 
   await assert.rejects(
@@ -90,6 +117,7 @@ test("push service rejects mismatched notification secrets", async () => {
       async sendNotification() {},
     },
     canRegisterSession: () => true,
+    stateStore: createFileBackedPushStateStore(),
   });
 
   await service.registerDevice({
@@ -119,6 +147,7 @@ test("push service rejects completion sends once the live relay session is gone"
     },
     canRegisterSession: () => true,
     canNotifyCompletion: () => sessionIsLive,
+    stateStore: createFileBackedPushStateStore(),
   });
 
   await service.registerDevice({
@@ -237,4 +266,48 @@ test("push service keeps working when state persistence fails", async () => {
 
   assert.equal(sent.length, 1);
   assert.equal(sent[0].deviceToken, "aabbcc");
+});
+
+test("push service coalesces concurrent duplicates and allows retry after failure", async () => {
+  let releaseFirstSend;
+  let attempts = 0;
+  const service = createPushSessionService({
+    apnsClient: {
+      isConfigured: () => true,
+      async sendNotification() {
+        attempts += 1;
+        if (attempts === 1) {
+          await new Promise((resolve) => {
+            releaseFirstSend = resolve;
+          });
+          throw new Error("temporary APNs failure");
+        }
+      },
+    },
+    canRegisterSession: () => true,
+    stateStore: createFileBackedPushStateStore(),
+  });
+  await service.registerDevice({
+    sessionId: "session-concurrent",
+    notificationSecret: "secret-concurrent",
+    deviceToken: "aabbcc",
+    alertsEnabled: true,
+  });
+  const completion = {
+    sessionId: "session-concurrent",
+    notificationSecret: "secret-concurrent",
+    threadId: "thread-concurrent",
+    turnId: "turn-concurrent",
+    dedupeKey: "dedupe-concurrent",
+  };
+
+  const first = service.notifyCompletion(completion);
+  const duplicate = service.notifyCompletion(completion);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(attempts, 1);
+  releaseFirstSend();
+  await assert.rejects(Promise.all([first, duplicate]), /temporary APNs failure/);
+
+  await service.notifyCompletion(completion);
+  assert.equal(attempts, 2);
 });

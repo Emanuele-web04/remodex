@@ -1563,6 +1563,110 @@ test("bridge recovers a growing rollout behind a connected stale Desktop stream"
   assert.equal(mirror.getActiveTurnId(threadId), null);
 });
 
+test("bridge-generated lifecycle notifications reach completion tracking", async (t) => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-bridge-push-"));
+  const relayServer = new WebSocket.Server({ port: 0 });
+  let relaySocket = null;
+  let bridge = null;
+  let emitBridgeNotification = null;
+  let fakeCodex = null;
+  const pushRequests = [];
+  const originalFetch = globalThis.fetch;
+  t.after(() => {
+    bridge?.stop();
+    relaySocket?.close();
+    relayServer.close();
+    globalThis.fetch = originalFetch;
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+  globalThis.fetch = async (url, options) => {
+    pushRequests.push({ url, body: JSON.parse(options.body) });
+    return {
+      ok: true,
+      status: 200,
+      async text() {
+        return JSON.stringify({ ok: true });
+      },
+    };
+  };
+  await new Promise((resolve) => relayServer.once("listening", resolve));
+  relayServer.on("connection", (socket) => {
+    relaySocket = socket;
+  });
+  const { startBridge } = loadBridgeWithTestDoubles({
+    createCodexTransportImpl: () => {
+      fakeCodex = createFakeCodexTransport({ threadReadResult: { thread: {
+        id: "thread-ambiguous-push",
+        turns: [
+          { id: "previous-turn", status: "completed" },
+          { id: "next-turn", status: "completed" },
+        ],
+      } } });
+      return fakeCodex;
+    },
+    rolloutLiveMirrorModule: {
+      createRolloutLiveMirrorController({ sendApplicationResponse }) {
+        emitBridgeNotification = (message) => {
+          sendApplicationResponse(JSON.stringify(message));
+        };
+        return {
+          getActiveTurnId() { return null; },
+          observeInbound() {},
+          stopAll() {},
+        };
+      },
+    },
+  });
+  bridge = startBridge({
+    printPairingQr: false,
+    config: bridgeTestConfig(relayServer, {
+      pushServiceUrl: "https://push.example.test",
+      pushCompletionStatePath: null,
+      desktopIpcSocketPath: path.join(tempDir, "missing-ipc.sock"),
+    }),
+  });
+  await waitFor(() => relaySocket?.readyState === WebSocket.OPEN && emitBridgeNotification);
+  emitBridgeNotification({
+    method: "turn/started",
+    params: { threadId: "thread-bridge-push", turnId: "turn-bridge-push" },
+  });
+  emitBridgeNotification({
+    method: "turn/completed",
+    params: {
+      threadId: "thread-bridge-push",
+      turnId: "turn-bridge-push",
+      status: "completed",
+    },
+  });
+
+  await waitFor(() => pushRequests.length === 1);
+  assert.equal(
+    pushRequests[0].url,
+    "https://push.example.test/v1/push/session/notify-completion"
+  );
+  assert.equal(pushRequests[0].body.threadId, "thread-bridge-push");
+  assert.equal(pushRequests[0].body.turnId, "turn-bridge-push");
+
+  const emitRuntimeTurn = (method, turnId) => fakeCodex.emitMessage({
+    method, params: {
+      threadId: "thread-ambiguous-push",
+      ...(turnId ? { turnId } : {}),
+      ...(method === "turn/completed" ? { status: "completed" } : {}),
+    },
+  });
+  emitRuntimeTurn("turn/started");
+  emitRuntimeTurn("turn/completed");
+  await waitFor(() => pushRequests.length === 2);
+  emitRuntimeTurn("turn/started");
+  emitRuntimeTurn("turn/started", "previous-turn");
+  emitRuntimeTurn("turn/completed", "previous-turn");
+  emitRuntimeTurn("turn/completed", "next-turn");
+  await waitFor(() => pushRequests.length === 3);
+  assert.deepEqual(pushRequests.slice(1).map(({ body }) => body.turnId), [null, "next-turn"]);
+  assert.deepEqual(fakeCodex.sent.filter(({ method }) => method === "thread/read")
+    .map(({ params }) => params), [{ threadId: "thread-ambiguous-push", includeTurns: true }]);
+});
+
 // Loads bridge.js with plaintext test transports while leaving the production module untouched.
 function loadBridgeWithTestDoubles({
   createCodexTransportImpl,

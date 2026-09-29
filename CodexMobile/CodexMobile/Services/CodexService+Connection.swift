@@ -264,7 +264,7 @@ extension CodexService {
             secureMacFingerprint = nil
         }
         pendingNotificationOpenThreadID = nil
-        lastPushRegistrationSignature = nil
+        invalidateCompletionPushRegistration()
         clearTransientConnectionPrompts()
     }
 
@@ -286,7 +286,7 @@ extension CodexService {
         secureConnectionState = .liveSessionUnresolved
         secureMacFingerprint = codexSecureFingerprint(for: trustedMac.macIdentityPublicKey)
         pendingNotificationOpenThreadID = nil
-        lastPushRegistrationSignature = nil
+        invalidateCompletionPushRegistration()
         clearTransientConnectionPrompts()
     }
 
@@ -767,6 +767,7 @@ extension CodexService {
     // Drops sync work tied to the old transport so reconnect starts from a clean baseline.
     private func clearConnectionSyncState() {
         streamRecoveryConnectionGeneration += 1
+        invalidateCompletionPushRegistration(preservingRemoteOwnership: true)
         isBootstrappingConnectionSync = false
         stopSyncLoop()
         postConnectSyncTask?.cancel()

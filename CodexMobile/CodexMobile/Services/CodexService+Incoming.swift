@@ -836,12 +836,18 @@ extension CodexService {
 
     private func handleTurnCompleted(_ paramsObject: IncomingParamsObject?) {
         let completedTurnID = extractTurnIDForTurnLifecycleEvent(from: paramsObject)
+        // An ID-less historical terminal cannot identify which past run ended.
+        // Never borrow the current live run's identity to apply that history.
+        if completedTurnID == nil, isHistoricalCompletionEvent(paramsObject) { return }
         let turnFailureMessage = parseTurnFailureMessage(from: paramsObject)
         let isBackgroundDiscoveryTurn = isBackgroundDiscoveryBridgeEvent(paramsObject)
 
         if let threadId = resolveThreadID(from: paramsObject, turnIdHint: completedTurnID) {
             if turnFailureMessage != nil,
                reconcileRepeatedStreamFailure(threadId: threadId, turnId: completedTurnID) { return }
+            let notificationTurnID = trackedCompletionNotificationTurnID(
+                threadId: threadId, turnId: completedTurnID, paramsObject: paramsObject
+            )
             let shouldRemainLifecycleOnly = isBackgroundDiscoveryTurn && threadId != activeThreadId
             if let completedTurnID {
                 promoteProvisionalIDLessTurnIfNeeded(
@@ -897,11 +903,15 @@ extension CodexService {
                     }
                 }
                 markReadyIfUnread(threadId: threadId)
-                notifyRunCompletionIfNeeded(threadId: threadId, turnId: resolvedTurnID, result: .completed)
+                if let notificationTurnID, isSuccessfulCompletionNotification(paramsObject) {
+                    notifyRunCompletionIfNeeded(threadId: threadId, turnId: notificationTurnID, result: .completed)
+                }
             } else if completesCurrentThreadRun, terminalState == .failed {
                 discardTurnStartWorkspaceCheckpointCopyIfNeeded(turnId: resolvedTurnID)
                 markFailedIfUnread(threadId: threadId)
-                notifyRunCompletionIfNeeded(threadId: threadId, turnId: resolvedTurnID, result: .failed)
+                if let notificationTurnID {
+                    notifyRunCompletionIfNeeded(threadId: threadId, turnId: notificationTurnID, result: .failed)
+                }
             } else {
                 // A late completion for an older overlapping turn must not
                 // capture B's still-changing workspace as A's final diff.
@@ -962,6 +972,7 @@ extension CodexService {
     }
 
     private func handleErrorNotification(_ paramsObject: IncomingParamsObject?) {
+        if extractTurnID(from: paramsObject) == nil, isHistoricalCompletionEvent(paramsObject) { return }
         if shouldRetryTurnError(from: paramsObject) {
             return
         }
@@ -984,6 +995,9 @@ extension CodexService {
             let resolvedTurnID = turnId ?? activeTurnIdByThread[threadId]
             guard !reconcileRepeatedStreamFailure(threadId: threadId, turnId: resolvedTurnID) else { return }
             guard turnTerminalState(for: resolvedTurnID, threadId: threadId) != .stopped else { return }
+            let notificationTurnID = trackedCompletionNotificationTurnID(
+                threadId: threadId, turnId: resolvedTurnID, paramsObject: paramsObject
+            )
             promoteDisplacedActiveTurnIfNeeded(threadId: threadId, completedTurnId: resolvedTurnID)
             let currentActiveTurnID = activeTurnIdByThread[threadId]
             let belongsToOlderFinishedRun = currentActiveTurnID == nil && resolvedTurnID != nil
@@ -1011,7 +1025,9 @@ extension CodexService {
             discardTurnStartWorkspaceCheckpointCopyIfNeeded(turnId: resolvedTurnID)
             if completesCurrentThreadRun {
                 markFailedIfUnread(threadId: threadId)
-                notifyRunCompletionIfNeeded(threadId: threadId, turnId: resolvedTurnID, result: .failed)
+                if let notificationTurnID {
+                    notifyRunCompletionIfNeeded(threadId: threadId, turnId: notificationTurnID, result: .failed)
+                }
             }
         } else {
             lastErrorMessage = shouldSuppressErrorMessage ? nil : userFacingErrorMessage
@@ -1106,13 +1122,6 @@ extension CodexService {
                     state: terminalState
                 )
                 noteTurnFinished(threadId: threadId, turnId: activeTurnIdForThread)
-                if let completionResult = runCompletionResult(for: terminalState) {
-                    notifyRunCompletionIfNeeded(
-                        threadId: threadId,
-                        turnId: activeTurnIdForThread,
-                        result: completionResult
-                    )
-                }
             }
             markTurnCompleted(threadId: threadId, turnId: activeTurnIdForThread)
             clearRunningState(for: threadId)
@@ -1182,18 +1191,6 @@ extension CodexService {
             return .failed
         }
         return .completed
-    }
-
-    // Maps terminal runtime states onto the smaller notification vocabulary.
-    private func runCompletionResult(for state: CodexTurnTerminalState) -> CodexRunCompletionResult? {
-        switch state {
-        case .completed:
-            .completed
-        case .failed:
-            .failed
-        case .stopped:
-            nil
-        }
     }
 
     private func parseTurnFailureMessage(from paramsObject: IncomingParamsObject?) -> String? {

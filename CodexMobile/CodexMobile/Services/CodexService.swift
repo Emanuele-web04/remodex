@@ -793,12 +793,13 @@ final class CodexService {
     var localNetworkAuthorizationStatus: LocalNetworkAuthorizationStatus = .unknown
     var backgroundTurnGraceTaskID: UIBackgroundTaskIdentifier = .invalid
     var hasConfiguredNotifications = false
-    var runCompletionNotificationDedupedAt: [String: Date] = [:]
     var structuredUserInputNotificationDedupedAt: [String: Date] = [:]
     var notificationCenterDelegateProxy: CodexNotificationCenterDelegateProxy?
     var notificationObserverTokens: [NSObjectProtocol] = []
     var remoteNotificationDeviceToken: String?
     var lastPushRegistrationSignature: String?
+    var completionPushSessionID: String?
+    var pushRegistrationGeneration = 0
     var shouldAutoReconnectOnForeground = false
     // Test hook so connection handling can model `.inactive` without waiting for real app lifecycle changes.
     @ObservationIgnored var applicationStateProvider: () -> UIApplication.State = { UIApplication.shared.applicationState }
@@ -883,6 +884,7 @@ final class CodexService {
     static let turnTerminalStatesDefaultsKey = "codex.turnTerminalStates"
     static let threadHistoryPaginationStateDefaultsKey = "codex.threadHistoryPaginationState"
     static let notificationsPromptedDefaultsKey = "codex.notifications.prompted"
+    static let handledRunCompletionsDefaultsKey = "codex.notifications.handledRunCompletions"
     static let keepMacAwakeWhileBridgeRunsDefaultsKey = "codex.keepMacAwakeWhileBridgeRuns"
 
     init(

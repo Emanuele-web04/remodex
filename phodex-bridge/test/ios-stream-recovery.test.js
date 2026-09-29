@@ -16,8 +16,10 @@ test("iOS stream recovery checks terminal identity and sends a continuation at m
   const turns = fs.readFileSync(path.join(mobile, "Services/CodexService+ThreadsTurns.swift"), "utf8");
   const snapshot = turns.slice(turns.indexOf("    func turnStateSnapshot("), turns.indexOf("    private func knownParallelTurnIDs("));
   const statuses = turns.slice(turns.indexOf("    func normalizedInterruptTurnStatus("), turns.indexOf("    // Retries with snake_case params for strict or legacy server parsers."));
+  const account = fs.readFileSync(path.join(mobile, "Services/CodexService+Account.swift"), "utf8");
+  const dates = account.slice(account.indexOf("    func firstDateValue("), account.indexOf("\n}\n\nprivate extension CodexGPTLoginState"));
   const extracted = path.join(directory, "TurnSnapshot.swift");
-  fs.writeFileSync(extracted, `import Foundation\nextension CodexService {\n${snapshot}\n${statuses}\n}`);
+  fs.writeFileSync(extracted, `import Foundation\ntypealias IncomingParamsObject = [String: JSONValue]\nextension CodexService {\n${snapshot}\n${statuses}\n${dates}\n}`);
   execFileSync("xcrun", ["swiftc", "-default-isolation", "MainActor", "-module-cache-path",
     path.join(directory, "cache"), "-parse-as-library",
     path.join(mobile, "Models/JSONValue.swift"),

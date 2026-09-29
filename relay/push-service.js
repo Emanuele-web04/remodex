@@ -30,6 +30,7 @@ function createPushSessionService({
   const persistedState = stateStore.read();
   const sessions = new Map(persistedState.sessions || []);
   const deliveredDedupeKeys = new Map(persistedState.deliveredDedupeKeys || []);
+  const inFlightNotifications = new Map();
   pruneStaleState();
 
   async function registerDevice({
@@ -75,7 +76,10 @@ function createPushSessionService({
       updatedAt: now(),
     });
     persistState("registerDevice");
-    return { ok: true };
+    return {
+      ok: true,
+      pushEnabled: apnsClient.isConfigured(),
+    };
   }
 
   async function notifyCompletion({
@@ -127,20 +131,54 @@ function createPushSessionService({
       return { ok: true, skipped: true };
     }
 
+    const inFlight = inFlightNotifications.get(normalizedDedupeKey);
+    if (inFlight) {
+      return inFlight;
+    }
+
+    const delivery = deliverCompletionNotification({
+      session,
+      threadId: normalizedThreadId,
+      turnId: readString(turnId),
+      result: normalizedResult,
+      title,
+      body,
+      dedupeKey: normalizedDedupeKey,
+    });
+    inFlightNotifications.set(normalizedDedupeKey, delivery);
+    try {
+      return await delivery;
+    } finally {
+      if (inFlightNotifications.get(normalizedDedupeKey) === delivery) {
+        inFlightNotifications.delete(normalizedDedupeKey);
+      }
+    }
+  }
+
+  async function deliverCompletionNotification({
+    session,
+    threadId,
+    turnId,
+    result,
+    title,
+    body,
+    dedupeKey,
+  }) {
     await apnsClient.sendNotification({
       deviceToken: session.deviceToken,
       apnsEnvironment: session.apnsEnvironment,
       title: normalizePreviewText(title) || "New Thread",
-      body: normalizePreviewText(body) || fallbackBodyForResult(normalizedResult),
+      body: normalizePreviewText(body) || fallbackBodyForResult(result),
+      collapseId: hashDedupeIdentity(dedupeKey),
       payload: {
         source: "codex.runCompletion",
-        threadId: normalizedThreadId,
-        turnId: readString(turnId) || "",
-        result: normalizedResult,
+        threadId,
+        turnId,
+        result,
       },
     });
 
-    deliveredDedupeKeys.set(normalizedDedupeKey, now());
+    deliveredDedupeKeys.set(dedupeKey, now());
     persistState("notifyCompletion");
     return { ok: true };
   }
@@ -313,6 +351,10 @@ function normalizePreviewText(value) {
 
 function fallbackBodyForResult(result) {
   return result === "failed" ? "Run failed" : "Response ready";
+}
+
+function hashDedupeIdentity(dedupeKey) {
+  return crypto.createHash("sha256").update(dedupeKey).digest("hex");
 }
 
 function resolvePushStateFilePath(env = process.env) {

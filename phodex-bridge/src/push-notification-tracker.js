@@ -7,6 +7,7 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const { randomUUID } = require("crypto");
 
 const {
   createPushNotificationCompletionDedupe,
@@ -16,9 +17,9 @@ const DEFAULT_GOAL_PUSH_STATE_PATH = path.join(os.homedir(), ".remodex", "goal-p
 
 const DEFAULT_PREVIEW_MAX_CHARS = 160;
 const MAX_THREAD_TITLE_ENTRIES = 200;
-const MAX_TURN_STATE_ENTRIES = 500;
-const MAX_THREAD_ID_BY_TURN_ENTRIES = 500;
+const MAX_LIVE_RUN_ENTRIES = 500;
 const MAX_GOAL_STATUS_ENTRIES = 500;
+const MAX_COMPLETION_AGE_MS = 5 * 60 * 1000;
 
 // Goal states worth waking the phone for: terminal or needs-user-attention.
 const GOAL_PUSH_BODIES = new Map([
@@ -34,74 +35,133 @@ function createPushNotificationTracker({
   previewMaxChars = DEFAULT_PREVIEW_MAX_CHARS,
   logPrefix = "[remodex]",
   now = () => Date.now(),
+  completionStatePath,
   goalPushStatePath = DEFAULT_GOAL_PUSH_STATE_PATH,
+  readThread,
 } = {}) {
   const threadTitleById = new Map();
-  const threadIdByTurnId = new Map();
-  const turnStateByKey = new Map();
-  // Persisted across bridge restarts so goal transitions that happened while the
-  // bridge was down still notify on the first post-restart snapshot.
+  const liveRunsByIdentity = new Map();
+  const runIdentitiesByThreadId = new Map();
+  const runIdentitiesByTurnId = new Map();
+  const threadsWithAnonymousCompletions = new Set();
+  const historicalTurnKeys = new Set();
+  const observedGoalThreadIds = new Set();
+  const goalPushInFlightByThreadId = new Map();
+  // Persisted status is a baseline, never a reason to wake the phone on restart.
   const goalStatusByThreadId = loadGoalPushState(goalPushStatePath, logPrefix);
-  const completionDedupe = createPushNotificationCompletionDedupe({ now });
+  const completionDedupe = createPushNotificationCompletionDedupe({
+    statePath: completionStatePath,
+    logPrefix,
+  });
 
   // ─── ENTRY POINT ─────────────────────────────────────────────
 
   function handleOutbound(rawMessage, parsedMessage = null) {
     const message = parseOutboundMessage(rawMessage, parsedMessage);
-    if (!message) {
+    if (!message || shouldIgnoreHistoricalMessage(message)) {
       return;
     }
-
+    rememberThreadTitle(message);
     if (message.method === "thread/goal/updated") {
       void handleGoalUpdated(message);
       return;
     }
 
     if (message.method === "thread/goal/cleared") {
+      observedGoalThreadIds.delete(message.threadId);
       if (message.threadId && goalStatusByThreadId.delete(message.threadId)) {
         saveGoalPushState(goalPushStatePath, goalStatusByThreadId, logPrefix);
       }
       return;
     }
 
-    rememberMessageContext(message);
-    clearFallbackSuppressionForNewRun(message);
+    if (message.turnId && historicalTurnKeys.has(completionReceiptKey(message))) return;
+    // Delivery can finish before a delayed canonical ID arrives. Never use HTTP
+    // timing to decide which of two observed anonymous runs owns that ID.
+    const anonymousRun = message.turnId && !findExactLiveRun(message)
+      ? uniqueAnonymousRun(message.threadId)
+      : null;
+    if (anonymousRun?.requiresIdentityConfirmation) {
+      const isFailure = message.method === "turn/failed" || isFailureEnvelope(message.method, message.eventObject);
+      if (message.method !== "turn/started" && message.method !== "turn/completed" && !isFailure) return;
+      if (isFailure && shouldIgnoreRetriableFailure(message.params, message.eventObject)) return;
+      if (!anonymousRun.superseded || message.method === "turn/started"
+        || anonymousRun.identityConfirmation) {
+        void readLatestTurnId(anonymousRun).then((turnId) => {
+          if (turnId !== message.turnId
+            || liveRunsByIdentity.get(anonymousRun.identity) !== anonymousRun
+            || (anonymousRun.turnId && anonymousRun.turnId !== turnId)) return;
+          if (findExactLiveRun(message)) {
+            handleRunMessage(message);
+            return;
+          }
+          if (anonymousRun.superseded) {
+            // A subsequent identified start is independent of the old receipt.
+            if (message.method !== "turn/started"
+              || uniqueLiveRun(message.threadId) !== anonymousRun) return;
+            addLiveRun(createLiveRun(message.threadId, turnId));
+          } else {
+            promoteRun(anonymousRun, turnId);
+          }
+          handleRunMessage(message);
+        });
+      }
+      return;
+    }
+    handleRunMessage(message);
+  }
+
+  function handleRunMessage(message) {
+    if (message.method === "turn/started") {
+      observeRunStart(message);
+      return;
+    }
 
     if (isAssistantDeltaMethod(message.method)) {
-      recordAssistantDelta(message.threadId, message.turnId, message.params, message.eventObject);
+      recordAssistantDelta(message);
       return;
     }
 
     if (isAssistantCompletedMethod(message.method, message.params, message.eventObject)) {
-      recordAssistantCompletion(message.threadId, message.turnId, message.params, message.eventObject);
+      recordAssistantCompletion(message);
       return;
     }
 
     routeTerminalMessage(message);
   }
 
-  // Keeps the top-level handler focused on orchestration while helpers own terminal edge cases.
-  function routeTerminalMessage({ method, params, eventObject, threadId, turnId }) {
+  function routeTerminalMessage(message) {
+    const { method, params, eventObject } = message;
     if (method === "turn/failed" || isFailureEnvelope(method, eventObject)) {
       if (shouldIgnoreRetriableFailure(params, eventObject)) {
         return;
       }
-
-      recordFailure(threadId, turnId, params, eventObject);
-      void notifyCompletion(threadId, turnId, params, eventObject, { forcedResult: "failed" });
+      const run = findLiveRun(message);
+      if (!run) {
+        return;
+      }
+      recordFailure(run, params, eventObject);
+      void notifyCompletion(run, "failed", params, eventObject);
       return;
     }
 
-    if (isTerminalThreadStatusMethod(method)) {
-      void notifyCompletion(threadId, turnId, params, eventObject, {
-        forcedResult: resolveThreadStatusResult(params, eventObject),
-      });
+    if (method !== "turn/completed") {
       return;
     }
 
-    if (method === "turn/completed") {
-      void notifyCompletion(threadId, turnId, params, eventObject);
+    const run = findLiveRun(message);
+    if (!run) {
+      return;
     }
+    const result = resolveCompletionResult(params, eventObject);
+    if (!result) {
+      retireRun(run);
+      return;
+    }
+    if (result === "failed") {
+      recordFailure(run, params, eventObject);
+    }
+    void notifyCompletion(run, result, params, eventObject);
   }
 
   // Pushes goal lifecycle transitions into terminal/attention states so hours-long
@@ -123,12 +183,19 @@ function createPushNotificationTracker({
     if (!goalStatusByThreadId.has(resolvedThreadId) && goalStatusByThreadId.size >= MAX_GOAL_STATUS_ENTRIES) {
       const oldest = goalStatusByThreadId.keys().next().value;
       goalStatusByThreadId.delete(oldest);
+      observedGoalThreadIds.delete(oldest);
     }
-    const isFirstObservation = previousSnapshot == null;
+    const isFirstObservation = !observedGoalThreadIds.has(resolvedThreadId);
+    observedGoalThreadIds.add(resolvedThreadId);
     const isDuplicate = previousSnapshot?.status === nextSnapshot.status
       && previousSnapshot?.updatedAt === nextSnapshot.updatedAt;
     const body = GOAL_PUSH_BODIES.get(status);
-    if (isFirstObservation || isDuplicate || !body || !pushServiceClient?.hasConfiguredBaseUrl) {
+    if (isFirstObservation || previousSnapshot?.status === status || !body || !pushServiceClient?.hasConfiguredBaseUrl) {
+      if (previousSnapshot?.status === status
+        && goalPushInFlightByThreadId.get(resolvedThreadId) === goalStatusByThreadId.get(resolvedThreadId)
+        && goalPushInFlightByThreadId.has(resolvedThreadId)) {
+        return;
+      }
       if (!isDuplicate) {
         goalStatusByThreadId.set(resolvedThreadId, nextSnapshot);
         saveGoalPushState(goalPushStatePath, goalStatusByThreadId, logPrefix);
@@ -137,6 +204,10 @@ function createPushNotificationTracker({
     }
 
     const title = normalizePreviewText(threadTitleById.get(resolvedThreadId)) || "New Thread";
+    // Reserve the transition while HTTP is pending; timestamp-only updates must
+    // not enqueue another notification for the same goal state.
+    goalStatusByThreadId.set(resolvedThreadId, nextSnapshot);
+    goalPushInFlightByThreadId.set(resolvedThreadId, nextSnapshot);
     // The goal objective intentionally stays out of push payloads and logs.
     try {
       await pushServiceClient.notifyCompletion({
@@ -148,26 +219,22 @@ function createPushNotificationTracker({
         // updatedAt keeps repeated legitimate transitions (blocked -> active -> blocked) notifiable.
         dedupeKey: [sessionId || "", resolvedThreadId, "goal", status, goal?.updatedAt ?? ""].join("|"),
       });
-      // Commit the dedupe cursor only after delivery succeeds so a repeated
-      // app-server snapshot can retry a transient push outage.
-      goalStatusByThreadId.set(resolvedThreadId, nextSnapshot);
       saveGoalPushState(goalPushStatePath, goalStatusByThreadId, logPrefix);
     } catch (error) {
+      // Restore eligibility on failure, without overwriting a newer transition.
+      if (goalStatusByThreadId.get(resolvedThreadId) === nextSnapshot) {
+        goalStatusByThreadId.set(resolvedThreadId, previousSnapshot);
+        saveGoalPushState(goalPushStatePath, goalStatusByThreadId, logPrefix);
+      }
       console.error(`${logPrefix} goal push notify failed: ${error.message}`);
+    } finally {
+      if (goalPushInFlightByThreadId.get(resolvedThreadId) === nextSnapshot) {
+        goalPushInFlightByThreadId.delete(resolvedThreadId);
+      }
     }
   }
 
-  // Remembers thread/turn linkage before the terminal event arrives on a different payload shape.
-  function rememberMessageContext({ threadId, turnId, params, eventObject }) {
-    if (threadId && turnId) {
-      if (!threadIdByTurnId.has(turnId) && threadIdByTurnId.size >= MAX_THREAD_ID_BY_TURN_ENTRIES) {
-        const oldest = threadIdByTurnId.keys().next().value;
-        threadIdByTurnId.delete(oldest);
-      }
-      threadIdByTurnId.set(turnId, threadId);
-      ensureTurnState(threadId, turnId);
-    }
-
+  function rememberThreadTitle({ threadId, params, eventObject }) {
     if (!threadId) {
       return;
     }
@@ -182,174 +249,293 @@ function createPushNotificationTracker({
     }
   }
 
-  // A new run on the same thread must not inherit duplicate-suppression from the previous run.
-  function clearFallbackSuppressionForNewRun({ method, threadId, params, eventObject }) {
-    if (!threadId) {
+  function observeRunStart(message) {
+    const { threadId, turnId, params, eventObject } = message;
+    if (!threadId || !canStartLiveRun(params, eventObject)) {
       return;
     }
 
-    if (method === "turn/started" || isActiveThreadStatus(method, params, eventObject)) {
-      completionDedupe.clearForNewRun(threadId);
+    if (turnId) {
+      const existing = findExactLiveRun(message);
+      if (existing) {
+        return;
+      }
+      const anonymousRun = uniqueAnonymousRun(threadId);
+      if (anonymousRun && uniqueLiveRun(threadId) === anonymousRun) {
+        promoteRun(anonymousRun, turnId);
+        return;
+      }
+    } else {
+      const anonymousRun = uniqueAnonymousRun(threadId);
+      if (anonymousRun && anonymousRun.terminalObservedAt == null) {
+        return;
+      }
     }
+
+    addLiveRun(createLiveRun(threadId, turnId));
   }
 
-  // Buckets turnless completions so repeated terminal events dedupe briefly instead of forever.
-  async function notifyCompletion(threadId, turnId, params, eventObject, { forcedResult = null } = {}) {
-    const resolvedThreadId = threadId || (turnId ? threadIdByTurnId.get(turnId) : null);
-    if (!pushServiceClient?.hasConfiguredBaseUrl || !resolvedThreadId) {
+  async function notifyCompletion(run, result, params, eventObject) {
+    run.terminalObservedAt ??= now();
+    if (!run.turnId) {
+      threadsWithAnonymousCompletions.delete(run.threadId);
+      threadsWithAnonymousCompletions.add(run.threadId);
+      while (threadsWithAnonymousCompletions.size > MAX_LIVE_RUN_ENTRIES) {
+        threadsWithAnonymousCompletions.delete(threadsWithAnonymousCompletions.values().next().value);
+      }
+    }
+    const completedAt = readCompletionTimestamp(params, eventObject);
+    if (now() - run.terminalObservedAt > MAX_COMPLETION_AGE_MS
+      || (completedAt !== null && Math.abs(now() - completedAt) > MAX_COMPLETION_AGE_MS)) {
+      retireRun(run);
+      return;
+    }
+    if (!pushServiceClient?.hasConfiguredBaseUrl) {
+      retireRun(run);
       return;
     }
 
-    const result = forcedResult || resolveCompletionResult(params, eventObject);
-    if (!result) {
-      cleanupTurnState(resolvedThreadId, turnId);
+    // Canonical IDs can arrive while a send is awaiting HTTP. Freeze its delivery
+    // identity so promotion cannot start a second request for the same run.
+    const receiptKey = run.notificationReceiptKey ?? completionReceiptKey(run);
+    run.notificationReceiptKey = receiptKey;
+    if (completionDedupe.hasSuccessfulNotification(receiptKey)) {
+      retireRun(run);
+      return;
+    }
+    if (!completionDedupe.beginNotification(receiptKey)) {
       return;
     }
 
-    if (completionDedupe.shouldSuppressThreadStatusFallback({
-      threadId: resolvedThreadId,
-      turnId,
-      result,
-    })) {
-      cleanupTurnState(resolvedThreadId, turnId);
-      return;
-    }
-
-    const dedupeKey = completionDedupeKey({
-      sessionId,
-      threadId: resolvedThreadId,
-      turnId,
-      result,
-      now,
-    });
-    if (completionDedupe.hasActiveDedupeKey(dedupeKey)) {
-      cleanupTurnState(resolvedThreadId, turnId);
-      return;
-    }
-
-    const state = getTurnState(resolvedThreadId, turnId);
-    const title = normalizePreviewText(threadTitleById.get(resolvedThreadId)) || "New Thread";
+    const title = normalizePreviewText(threadTitleById.get(run.threadId)) || "New Thread";
     const body = buildNotificationBody({
       result,
-      state,
+      state: run,
       params,
       eventObject,
       previewMaxChars,
     });
 
     try {
-      completionDedupe.beginNotification({
-        dedupeKey,
-        threadId: resolvedThreadId,
-        turnId,
-        result,
-      });
-      await pushServiceClient.notifyCompletion({
-        threadId: resolvedThreadId,
-        turnId,
+      const delivery = await pushServiceClient.notifyCompletion({
+        threadId: run.threadId,
+        turnId: run.turnId,
         result,
         title,
         body,
-        dedupeKey,
+        // Relay delivery stays session-scoped; the local receipt must survive
+        // resolveBridgeRelaySession rotating that session on every launch.
+        dedupeKey: JSON.stringify([sessionId || "", receiptKey]),
       });
-      completionDedupe.commitNotification({
-        dedupeKey,
-        threadId: resolvedThreadId,
-        turnId,
-        result,
-      });
+      if (delivery?.ok !== true) {
+        throw new Error("Push service did not accept the completion notification.");
+      }
+      completionDedupe.commitNotification(receiptKey);
+      const canonicalKey = completionReceiptKey(run);
+      if (canonicalKey !== receiptKey) {
+        completionDedupe.commitNotification(canonicalKey);
+      }
+      retireRun(run);
     } catch (error) {
-      completionDedupe.abortNotification({
-        dedupeKey,
-        threadId: resolvedThreadId,
-        turnId,
-        result,
-      });
+      completionDedupe.abortNotification(receiptKey);
       console.error(`${logPrefix} push notify failed: ${error.message}`);
-    } finally {
-      cleanupTurnState(resolvedThreadId, turnId);
     }
   }
 
-  function recordAssistantDelta(threadId, turnId, params, eventObject) {
-    const resolvedTurnId = turnId || resolveTurnId("assistant", params, eventObject);
-    const resolvedThreadId = threadId || (resolvedTurnId ? threadIdByTurnId.get(resolvedTurnId) : null);
-    if (!resolvedThreadId || !resolvedTurnId) {
+  function recordAssistantDelta(message) {
+    const run = findLiveRun(message);
+    if (!run) {
       return;
     }
 
-    const delta = extractAssistantDeltaText(params, eventObject);
+    const delta = extractAssistantDeltaText(message.params, message.eventObject);
     if (!delta) {
       return;
     }
-
-    const state = ensureTurnState(resolvedThreadId, resolvedTurnId);
-    state.latestAssistantPreview = truncatePreview(`${state.latestAssistantPreview || ""}${delta}`, previewMaxChars);
+    run.latestAssistantPreview = truncatePreview(
+      `${run.latestAssistantPreview}${delta}`,
+      previewMaxChars
+    );
   }
 
-  function recordAssistantCompletion(threadId, turnId, params, eventObject) {
-    const resolvedTurnId = turnId || resolveTurnId("assistant", params, eventObject);
-    const resolvedThreadId = threadId || (resolvedTurnId ? threadIdByTurnId.get(resolvedTurnId) : null);
-    if (!resolvedThreadId || !resolvedTurnId) {
+  function recordAssistantCompletion(message) {
+    const run = findLiveRun(message);
+    if (!run) {
       return;
     }
 
-    const completedText = extractAssistantCompletedText(params, eventObject);
+    const completedText = extractAssistantCompletedText(message.params, message.eventObject);
     if (!completedText) {
       return;
     }
-
-    const state = ensureTurnState(resolvedThreadId, resolvedTurnId);
-    state.latestAssistantPreview = truncatePreview(completedText, previewMaxChars);
+    run.latestAssistantPreview = truncatePreview(completedText, previewMaxChars);
   }
 
-  function recordFailure(threadId, turnId, params, eventObject) {
-    const resolvedTurnId = turnId || resolveTurnId("failure", params, eventObject);
-    const resolvedThreadId = threadId || (resolvedTurnId ? threadIdByTurnId.get(resolvedTurnId) : null);
-    if (!resolvedThreadId || !resolvedTurnId) {
-      return;
-    }
-
+  function recordFailure(run, params, eventObject) {
     const failureMessage = extractFailureMessage(params, eventObject);
-    const state = ensureTurnState(resolvedThreadId, resolvedTurnId);
     if (failureMessage) {
-      state.latestFailurePreview = truncatePreview(failureMessage, previewMaxChars);
+      run.latestFailurePreview = truncatePreview(failureMessage, previewMaxChars);
     }
   }
 
-  function ensureTurnState(threadId, turnId) {
-    const key = turnStateKey(threadId, turnId);
-    if (!turnStateByKey.has(key)) {
-      if (turnStateByKey.size >= MAX_TURN_STATE_ENTRIES) {
-        const oldest = turnStateByKey.keys().next().value;
-        turnStateByKey.delete(oldest);
+  function createLiveRun(threadId, turnId) {
+    return {
+      identity: randomUUID(),
+      threadId,
+      turnId: turnId || null,
+      latestAssistantPreview: "",
+      latestFailurePreview: "",
+    };
+  }
+
+  function addLiveRun(run) {
+    while (liveRunsByIdentity.size >= MAX_LIVE_RUN_ENTRIES) {
+      retireRun(liveRunsByIdentity.values().next().value);
+    }
+    const previousAnonymousRuns = runsForThread(run.threadId)
+      .filter((previous) => !previous.turnId && previous.terminalObservedAt != null);
+    run.requiresIdentityConfirmation = !run.turnId
+      && threadsWithAnonymousCompletions.has(run.threadId);
+    for (const previous of previousAnonymousRuns) {
+      previous.requiresIdentityConfirmation = true;
+      previous.superseded = true;
+    }
+    liveRunsByIdentity.set(run.identity, run);
+    addIndexEntry(runIdentitiesByThreadId, run.threadId, run.identity);
+    addIndexEntry(runIdentitiesByTurnId, run.turnId, run.identity);
+  }
+
+  function promoteRun(run, turnId) {
+    if (!run || run.turnId || !turnId) {
+      return run;
+    }
+    run.turnId = turnId;
+    addIndexEntry(runIdentitiesByTurnId, turnId, run.identity);
+    return run;
+  }
+
+  function readLatestTurnId(run) {
+    if (run.identityConfirmation) return run.identityConfirmation;
+    if (!pushServiceClient?.hasConfiguredBaseUrl || typeof readThread !== "function") {
+      return Promise.resolve(null);
+    }
+    const confirmation = (async () => {
+      try {
+        const snapshot = await readThread(run.threadId);
+        const thread = snapshot?.thread;
+        if (thread?.id !== run.threadId || !Array.isArray(thread.turns)) return null;
+        // Remember authoritative terminal history so a later re-announcement
+        // cannot re-arm an older anonymous completion after the new run ends.
+        for (const turn of thread.turns.slice(-MAX_LIVE_RUN_ENTRIES, -1)) {
+          const turnId = readString(turn?.id);
+          if (!turnId || canStartLiveRun({ turn })
+            || findExactLiveRun({ threadId: run.threadId, turnId })) continue;
+          const key = completionReceiptKey({ threadId: run.threadId, turnId });
+          historicalTurnKeys.delete(key);
+          historicalTurnKeys.add(key);
+        }
+        while (historicalTurnKeys.size > MAX_LIVE_RUN_ENTRIES) {
+          historicalTurnKeys.delete(historicalTurnKeys.values().next().value);
+        }
+        // thread/read returns turns oldest first. Only the newest turn can
+        // identify the latest observed run; older IDs remain historical.
+        const latestTurn = thread.turns.at(-1);
+        return readString(latestTurn?.id) || null;
+      } catch {
+        // A later live event can retry the read. Unavailable history is not
+        // evidence that an unmatched terminal belongs to the current run.
+        return null;
       }
-      turnStateByKey.set(key, {
-        latestAssistantPreview: "",
-        latestFailurePreview: "",
-      });
-    }
-
-    return turnStateByKey.get(key);
+    })();
+    run.identityConfirmation = confirmation;
+    void confirmation.finally(() => {
+      if (run.identityConfirmation === confirmation) run.identityConfirmation = null;
+    });
+    return confirmation;
   }
 
-  function getTurnState(threadId, turnId) {
+  function findLiveRun(message) {
+    const { threadId, turnId } = message;
+    const exactRun = findExactLiveRun(message);
+    if (exactRun) {
+      return exactRun;
+    }
     if (!threadId) {
       return null;
     }
-    return turnStateByKey.get(turnStateKey(threadId, turnId)) || null;
+    if (turnId) {
+      const anonymousRun = uniqueAnonymousRun(threadId);
+      return uniqueLiveRun(threadId) === anonymousRun
+        ? promoteRun(anonymousRun, turnId)
+        : null;
+    }
+    return uniqueLiveRun(threadId);
   }
 
-  function cleanupTurnState(threadId, turnId) {
-    if (!threadId) {
+  function findExactLiveRun({ threadId, turnId }) {
+    return findIndexedRun(runIdentitiesByTurnId, turnId, threadId);
+  }
+
+  function findIndexedRun(index, value, threadId = null) {
+    const identities = value ? index.get(value) : null;
+    if (!identities) {
+      return null;
+    }
+    const matches = [...identities]
+      .map((identity) => liveRunsByIdentity.get(identity))
+      .filter((run) => run && (!threadId || run.threadId === threadId));
+    return matches.length === 1 ? matches[0] : null;
+  }
+
+  function uniqueLiveRun(threadId) {
+    const runs = runsForThreadLookup(threadId);
+    return runs.length === 1 ? runs[0] : null;
+  }
+
+  function uniqueAnonymousRun(threadId) {
+    const anonymousRuns = runsForThreadLookup(threadId).filter((run) => !run.turnId);
+    return anonymousRuns.length === 1 ? anonymousRuns[0] : null;
+  }
+
+  function runsForThreadLookup(threadId) {
+    const runs = runsForThread(threadId);
+    const activeRuns = runs.filter((run) => run.terminalObservedAt == null);
+    return activeRuns.length > 0 ? activeRuns : runs;
+  }
+
+  function runsForThread(threadId) {
+    const identities = runIdentitiesByThreadId.get(threadId) || [];
+    return [...identities]
+      .map((identity) => liveRunsByIdentity.get(identity))
+      .filter(Boolean);
+  }
+
+  function retireRun(run) {
+    if (!run || !liveRunsByIdentity.delete(run.identity)) {
       return;
     }
+    removeIndexEntry(runIdentitiesByThreadId, run.threadId, run.identity);
+    removeIndexEntry(runIdentitiesByTurnId, run.turnId, run.identity);
+  }
 
-    const resolvedTurnId = turnId || null;
-    if (resolvedTurnId) {
-      threadIdByTurnId.delete(resolvedTurnId);
+  function addIndexEntry(index, key, identity) {
+    if (!key) {
+      return;
     }
-    turnStateByKey.delete(turnStateKey(threadId, resolvedTurnId));
+    const identities = index.get(key) || new Set();
+    identities.add(identity);
+    index.set(key, identities);
+  }
+
+  function removeIndexEntry(index, key, identity) {
+    const identities = key ? index.get(key) : null;
+    if (!identities) {
+      return;
+    }
+    identities.delete(identity);
+    if (identities.size === 0) {
+      index.delete(key);
+    }
   }
 
   return {
@@ -425,6 +611,23 @@ function parseOutboundMessage(rawMessage, parsedMessage = null) {
     threadId: resolveThreadId(method, params, eventObject),
     turnId: resolveTurnId(method, params, eventObject),
   };
+}
+
+function shouldIgnoreHistoricalMessage({ method, params, eventObject }) {
+  if (hasTrueFlag(params, eventObject, "remodexReplayedEvent")) {
+    return true;
+  }
+  if (hasTrueFlag(params, eventObject, "remodexRolloutTerminalCatchUp")) {
+    return true;
+  }
+  return hasTrueFlag(params, eventObject, "remodexRolloutBootstrapReplay")
+    && method !== "turn/started";
+}
+
+function hasTrueFlag(params, eventObject, key) {
+  return parseBooleanFlag(params?.[key]) === true
+    || parseBooleanFlag(eventObject?.[key]) === true
+    || parseBooleanFlag(params?.event?.[key]) === true;
 }
 
 function envelopeEventObject(params) {
@@ -622,107 +825,82 @@ function extractFailureMessage(params, eventObject) {
 }
 
 function resolveCompletionResult(params, eventObject) {
-  const rawStatus = readString(
-    params?.turn?.status
-      || params?.status
-      || eventObject?.turn?.status
-      || eventObject?.status
-  ) || "completed";
+  const rawStatus = readTurnStatus(params, eventObject);
+  if (!rawStatus) {
+    return extractFailureMessage(params, eventObject) ? "failed" : "completed";
+  }
 
-  const normalizedStatus = rawStatus.toLowerCase();
+  const normalizedStatus = normalizeToken(rawStatus);
   if (normalizedStatus.includes("fail") || normalizedStatus.includes("error")) {
     return "failed";
   }
-  if (normalizedStatus.includes("interrupt") || normalizedStatus.includes("stop")) {
-    return null;
-  }
-
-  return "completed";
-}
-
-function completionDedupeKey({ sessionId, threadId, turnId, result, now }) {
-  if (turnId) {
-    return [sessionId || "", threadId, turnId, result].join("|");
-  }
-
-  const timeBucket = Math.floor(now() / 30_000);
-  return [sessionId || "", threadId, "no-turn", result, `bucket-${timeBucket}`].join("|");
-}
-
-// Mirrors the iOS terminal-state mapping so managed pushes fire on the same end states.
-function resolveThreadStatusResult(params, eventObject) {
-  const statusObject = objectValue(params?.status)
-    || objectValue(eventObject?.status)
-    || objectValue(params?.event?.status);
-  const rawStatus = readString(
-    statusObject?.type
-      || statusObject?.statusType
-      || statusObject?.status_type
-      || params?.status
-      || eventObject?.status
-      || params?.event?.status
-  );
-  const normalizedStatus = normalizeStatusToken(rawStatus);
-  if (!normalizedStatus) {
-    return null;
-  }
-
-  if (
-    normalizedStatus.includes("cancel")
-    || normalizedStatus.includes("abort")
-    || normalizedStatus.includes("interrupt")
-    || normalizedStatus.includes("stopped")
-  ) {
-    return null;
-  }
-
-  if (normalizedStatus.includes("fail") || normalizedStatus.includes("error")) {
-    return "failed";
-  }
-
-  if (
-    normalizedStatus === "idle"
-    || normalizedStatus === "notloaded"
-    || normalizedStatus === "completed"
-    || normalizedStatus === "done"
-    || normalizedStatus === "finished"
-  ) {
+  if (["completed", "complete", "done", "finished", "succeeded", "success"].includes(
+    normalizedStatus
+  )) {
     return "completed";
   }
-
   return null;
 }
 
-function isTerminalThreadStatusMethod(method) {
-  return method === "thread/status/changed"
-    || method === "thread/status"
-    || method === "codex/event/thread_status_changed";
+function canStartLiveRun(params, eventObject) {
+  const status = normalizeToken(readTurnStatus(params, eventObject));
+  return !status || ![
+    "completed",
+    "complete",
+    "done",
+    "finished",
+    "succeeded",
+    "success",
+    "failed",
+    "failure",
+    "error",
+    "stopped",
+    "interrupted",
+    "cancelled",
+    "canceled",
+    "aborted",
+  ].includes(status);
 }
 
-function isActiveThreadStatus(method, params, eventObject) {
-  if (!isTerminalThreadStatusMethod(method)) {
-    return false;
-  }
-
+function readTurnStatus(params, eventObject) {
   const statusObject = objectValue(params?.status)
     || objectValue(eventObject?.status)
     || objectValue(params?.event?.status);
-  const rawStatus = readString(
-    statusObject?.type
+  return readString(
+    params?.turn?.status
+      || eventObject?.turn?.status
+      || statusObject?.type
       || statusObject?.statusType
       || statusObject?.status_type
       || params?.status
       || eventObject?.status
       || params?.event?.status
   );
-  const normalizedStatus = normalizeStatusToken(rawStatus);
+}
 
-  return normalizedStatus === "active"
-    || normalizedStatus === "running"
-    || normalizedStatus === "processing"
-    || normalizedStatus === "inprogress"
-    || normalizedStatus === "started"
-    || normalizedStatus === "pending";
+function completionReceiptKey(run) {
+  const stableTurnIdentity = run.turnId
+    ? `turn:${run.turnId}`
+    : `generated:${run.identity}`;
+  return JSON.stringify([run.threadId, stableTurnIdentity]);
+}
+
+function readCompletionTimestamp(params, eventObject) {
+  const sources = [params?.turn, params, eventObject?.turn, eventObject];
+  for (const source of sources) {
+    for (const key of ["completedAt", "completed_at", "completedAtMs", "completed_at_ms"]) {
+      const value = source?.[key];
+      if (value == null || value === "") continue;
+      if (typeof value !== "number" && typeof value !== "string") continue;
+      const numeric = Number(value);
+      if (Number.isFinite(numeric)) {
+        return numeric > 10_000_000_000 ? numeric : numeric * 1000;
+      }
+      const parsed = Date.parse(value);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+  }
+  return null;
 }
 
 function shouldIgnoreRetriableFailure(params, eventObject) {
@@ -770,12 +948,6 @@ function normalizePreviewText(value) {
   }
 
   return value.replace(/\s+/g, " ").trim();
-}
-
-function normalizeStatusToken(value) {
-  return typeof value === "string"
-    ? value.toLowerCase().replace(/[_-\s]+/g, "")
-    : "";
 }
 
 function objectValue(value) {
@@ -826,10 +998,6 @@ function safeParseJSON(value) {
   } catch {
     return null;
   }
-}
-
-function turnStateKey(threadId, turnId) {
-  return `${threadId}|${turnId || "no-turn"}`;
 }
 
 module.exports = {
