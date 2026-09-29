@@ -18,13 +18,7 @@ struct RemodexDisplayIslandSnapshot: Equatable {
 
 @MainActor
 final class RemodexDisplayIslandCoordinator {
-    private struct Outcome: Equatable {
-        let threadId: String
-        let title: String
-        let createdAt: Date
-    }
-
-    private static let maxDisplayedConversations = 3
+    private static let maxDisplayedConversations = CodexRunCompletionEvent.maxRetainedPerResult
     private static let syncDelayNanoseconds: UInt64 = 350_000_000
     private static let completedLifetime: TimeInterval = 5 * 60
     private static let failedLifetime: TimeInterval = 15 * 60
@@ -41,25 +35,11 @@ final class RemodexDisplayIslandCoordinator {
     private var scheduledSyncTask: Task<Void, Never>?
     private var timedSyncTask: Task<Void, Never>?
 
-    private var completedOutcomes: [Outcome] = []
-    private var failedOutcomes: [Outcome] = []
-    private var lastRunningThreadIDs: Set<String> = []
-    private var lastTerminalStatesByThread: [String: CodexTurnTerminalState] = [:]
     private var runningStartedAtByThread: [String: Date] = [:]
     private var runningLastSeenAtByThread: [String: Date] = [:]
 
-    func rememberCompletion(from banner: CodexThreadCompletionBanner?, codex: CodexService) {
-        guard let banner else {
-            return
-        }
-
-        rememberCompletion(threadId: banner.threadId, title: banner.title, codex: codex)
-    }
-
-    func clearOutcome(for threadId: String, terminalState: CodexTurnTerminalState?) {
-        completedOutcomes.removeAll { $0.threadId == threadId }
-        failedOutcomes.removeAll { $0.threadId == threadId }
-        lastTerminalStatesByThread[threadId] = terminalState
+    func clearOutcome(for threadId: String, codex: CodexService) {
+        codex.recentRunCompletionEventsByThread.removeValue(forKey: threadId)
     }
 
     func sync(codex: CodexService, immediately: Bool = false) {
@@ -114,12 +94,6 @@ final class RemodexDisplayIslandCoordinator {
         let currentRunningIDs = currentRunningThreadIDs(codex: codex)
         let visibleThreadIDs = visibleThreadIDs(codex: codex)
         let activeThreadIDs = currentActiveThreadIDs(codex: codex)
-        // The active chat is already visible in-app, so only off-screen outcomes should become Island badges.
-        let outcomeEligibleThreadIDs = visibleThreadIDs
-            .subtracting(currentRunningIDs)
-            .subtracting(activeThreadIDs)
-        let completedIDs = lastRunningThreadIDs
-            .intersection(outcomeEligibleThreadIDs)
         let terminalStates = codex.latestTurnTerminalStateByThread
 
         for threadId in currentRunningIDs where runningStartedAtByThread[threadId] == nil {
@@ -135,73 +109,20 @@ final class RemodexDisplayIslandCoordinator {
             now: now
         )
 
-        pruneOutcomes(
-            codex: codex,
-            currentRunningIDs: currentRunningIDs,
-            activeThreadIDs: activeThreadIDs,
-            visibleThreadIDs: visibleThreadIDs,
-            now: now
-        )
-
-        for threadId in completedIDs {
-            let terminalState = codex.latestTurnTerminalState(for: threadId)
-            switch terminalState {
-            case .completed:
-                rememberCompletion(threadId: threadId, codex: codex, now: now)
-            case .failed:
-                rememberFailure(threadId: threadId, codex: codex, now: now)
-            case .stopped, nil:
-                continue
-            }
-        }
-
-        let visibleTerminalStates = terminalStates.filter { threadId, _ in
-            outcomeEligibleThreadIDs.contains(threadId)
-        }
-        for (threadId, terminalState) in visibleTerminalStates {
-            guard lastTerminalStatesByThread[threadId] != terminalState else {
-                continue
-            }
-
-            switch terminalState {
-            case .completed:
-                rememberCompletion(threadId: threadId, codex: codex, now: now)
-            case .failed:
-                rememberFailure(threadId: threadId, codex: codex, now: now)
-            case .stopped:
-                clearOutcome(for: threadId, terminalState: terminalState)
-            }
-        }
-
-        lastRunningThreadIDs = currentRunningIDs.intersection(visibleThreadIDs)
-        lastTerminalStatesByThread = terminalStates.filter { threadId, _ in
-            visibleThreadIDs.contains(threadId) && !currentRunningIDs.contains(threadId)
+        // A terminal state or banner may come from history. Only the shared,
+        // admitted completion events can produce a new Live Activity outcome.
+        codex.recentRunCompletionEventsByThread = codex.recentRunCompletionEventsByThread.filter { threadId, event in
+            let expectedState: CodexTurnTerminalState = event.result == .completed ? .completed : .failed
+            return visibleThreadIDs.contains(threadId)
+                && !currentRunningIDs.contains(threadId)
+                && !activeThreadIDs.contains(threadId)
+                && (terminalStates[threadId] == nil || terminalStates[threadId] == expectedState)
+                && now.timeIntervalSince(event.receivedAt) < outcomeLifetime(for: event.result)
         }
     }
 
-    private func pruneOutcomes(
-        codex: CodexService,
-        currentRunningIDs: Set<String>,
-        activeThreadIDs: Set<String>,
-        visibleThreadIDs: Set<String>,
-        now: Date
-    ) {
-        completedOutcomes.removeAll { outcome in
-            !visibleThreadIDs.contains(outcome.threadId)
-                || currentRunningIDs.contains(outcome.threadId)
-                || activeThreadIDs.contains(outcome.threadId)
-                || codex.latestTurnTerminalState(for: outcome.threadId) == .failed
-                || codex.latestTurnTerminalState(for: outcome.threadId) == .stopped
-                || now.timeIntervalSince(outcome.createdAt) >= Self.completedLifetime
-        }
-        failedOutcomes.removeAll { outcome in
-            !visibleThreadIDs.contains(outcome.threadId)
-                || currentRunningIDs.contains(outcome.threadId)
-                || activeThreadIDs.contains(outcome.threadId)
-                || codex.latestTurnTerminalState(for: outcome.threadId) == .completed
-                || codex.latestTurnTerminalState(for: outcome.threadId) == .stopped
-                || now.timeIntervalSince(outcome.createdAt) >= Self.failedLifetime
-        }
+    private func outcomeLifetime(for result: CodexRunCompletionResult) -> TimeInterval {
+        result == .completed ? Self.completedLifetime : Self.failedLifetime
     }
 
     private func pruneRunningStarts(
@@ -253,57 +174,25 @@ final class RemodexDisplayIslandCoordinator {
             }
             .sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
 
-        let completedConversations = completedOutcomes.compactMap { outcome in
-            conversation(threadId: outcome.threadId, fallbackTitle: outcome.title, state: .ready, codex: codex)
+        let recentCompletions = codex.recentRunCompletionEventsByThread.sorted {
+            if $0.value.receivedAt != $1.value.receivedAt {
+                return $0.value.receivedAt > $1.value.receivedAt
+            }
+            return $0.key < $1.key
         }
-        let failedConversations = failedOutcomes.compactMap { outcome in
-            conversation(threadId: outcome.threadId, fallbackTitle: outcome.title, state: .failed, codex: codex)
+        let completedConversations = recentCompletions.filter { $0.value.result == .completed }.compactMap { threadId, _ in
+            conversation(threadId: threadId, state: .ready, codex: codex)
+        }
+        let failedConversations = recentCompletions.filter { $0.value.result == .failed }.compactMap { threadId, _ in
+            conversation(threadId: threadId, state: .failed, codex: codex)
         }
 
         return RemodexDisplayIslandSnapshot(
             runningConversations: Array(runningConversations.prefix(Self.maxDisplayedConversations)),
             completedConversations: Array(completedConversations.prefix(Self.maxDisplayedConversations)),
             failedConversations: Array(failedConversations.prefix(Self.maxDisplayedConversations)),
-            nextExpirationDate: nextExpirationDate(now: now, currentRunningIDs: currentRunningIDs)
+            nextExpirationDate: nextExpirationDate(codex: codex, now: now, currentRunningIDs: currentRunningIDs)
         )
-    }
-
-    private func rememberCompletion(
-        threadId: String,
-        title: String? = nil,
-        codex: CodexService,
-        now: Date = Date()
-    ) {
-        let resolvedTitle = title
-            ?? codex.threads.first(where: { $0.id == threadId })?.displayTitle
-            ?? CodexThread.defaultDisplayTitle
-        let outcome = Outcome(threadId: threadId, title: resolvedTitle, createdAt: now)
-
-        failedOutcomes.removeAll { $0.threadId == outcome.threadId }
-        completedOutcomes.removeAll { $0.threadId == outcome.threadId }
-        completedOutcomes.insert(outcome, at: 0)
-        if completedOutcomes.count > Self.maxDisplayedConversations {
-            completedOutcomes = Array(completedOutcomes.prefix(Self.maxDisplayedConversations))
-        }
-    }
-
-    private func rememberFailure(
-        threadId: String,
-        title: String? = nil,
-        codex: CodexService,
-        now: Date = Date()
-    ) {
-        let resolvedTitle = title
-            ?? codex.threads.first(where: { $0.id == threadId })?.displayTitle
-            ?? CodexThread.defaultDisplayTitle
-        let outcome = Outcome(threadId: threadId, title: resolvedTitle, createdAt: now)
-
-        completedOutcomes.removeAll { $0.threadId == outcome.threadId }
-        failedOutcomes.removeAll { $0.threadId == outcome.threadId }
-        failedOutcomes.insert(outcome, at: 0)
-        if failedOutcomes.count > Self.maxDisplayedConversations {
-            failedOutcomes = Array(failedOutcomes.prefix(Self.maxDisplayedConversations))
-        }
     }
 
     private func currentRunningThreadIDs(codex: CodexService) -> Set<String> {
@@ -339,13 +228,12 @@ final class RemodexDisplayIslandCoordinator {
 
     private func conversation(
         threadId: String,
-        fallbackTitle: String? = nil,
         state: RemodexDisplayIslandConversationState,
         runningStartedAt: Date? = nil,
         codex: CodexService
     ) -> RemodexDisplayIslandConversation? {
         let thread = codex.threads.first { $0.id == threadId }
-        let rawTitle = thread?.displayTitle ?? fallbackTitle ?? CodexThread.defaultDisplayTitle
+        let rawTitle = thread?.displayTitle ?? CodexThread.defaultDisplayTitle
         let title = rawTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         let detail = detail(for: thread)
 
@@ -367,13 +255,9 @@ final class RemodexDisplayIslandCoordinator {
         return lastPathComponent.isEmpty ? "Remodex" : lastPathComponent
     }
 
-    private func nextExpirationDate(now: Date, currentRunningIDs: Set<String>) -> Date? {
-        let completedExpiration = completedOutcomes
-            .map { $0.createdAt.addingTimeInterval(Self.completedLifetime) }
-            .filter { $0 > now }
-            .min()
-        let failedExpiration = failedOutcomes
-            .map { $0.createdAt.addingTimeInterval(Self.failedLifetime) }
+    private func nextExpirationDate(codex: CodexService, now: Date, currentRunningIDs: Set<String>) -> Date? {
+        let outcomeExpiration = codex.recentRunCompletionEventsByThread.values
+            .map { $0.receivedAt.addingTimeInterval(outcomeLifetime(for: $0.result)) }
             .filter { $0 > now }
             .min()
         // Running rows expire too, so a stuck run re-syncs (and drops) at its cap
@@ -383,7 +267,7 @@ final class RemodexDisplayIslandCoordinator {
             .filter { $0 > now }
             .min()
 
-        return [completedExpiration, failedExpiration, runningExpiration]
+        return [outcomeExpiration, runningExpiration]
             .compactMap { $0 }
             .min()
     }

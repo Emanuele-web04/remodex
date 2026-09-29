@@ -49,7 +49,7 @@ final class CodexPushNotificationRegistrationTests: XCTestCase {
         )
     }
 
-    func testOnlyFreshTrackedTerminalEventsScheduleCompletionAlerts() async {
+    func testOnlyFreshTrackedTerminalEventsProduceAlertsAndIslandOutcomes() async {
         let center = MockUserNotificationCenter(status: .authorized)
         let service = makeService(
             userNotificationCenter: center,
@@ -81,6 +81,7 @@ final class CodexPushNotificationRegistrationTests: XCTestCase {
         for scenario in cases {
             let threadID = "thread-\(scenario.id)"
             let turnID = "turn-\(scenario.id)"
+            service.threads.append(CodexThread(id: threadID, title: scenario.id))
             if scenario.start {
                 service.handleNotification(method: "turn/started", params: .object([
                     "threadId": .string(threadID), "turnId": .string(turnID),
@@ -104,6 +105,101 @@ final class CodexPushNotificationRegistrationTests: XCTestCase {
             $0.content.userInfo[CodexNotificationPayloadKeys.turnId] as? String
         }), ["turn-success", "turn-failure", "turn-alias-complete", "turn-alias-succeeded", "turn-alias-success"])
         XCTAssertEqual(center.addRequests.count, 5)
+        let snapshot = RemodexDisplayIslandCoordinator().makeReconciledSnapshot(codex: service, now: Date())
+        XCTAssertEqual(Set(snapshot.completedConversations.map(\.id)), ["thread-success", "thread-alias-succeeded", "thread-alias-success"])
+        XCTAssertEqual(snapshot.failedConversations.map(\.id), ["thread-failure"])
+    }
+
+    func testIslandOutcomesExpireOnceAndNewRunsCanStillFinishWithoutAlertPermission() {
+        for result in [CodexRunCompletionResult.completed, .failed] {
+            let service = makeService(
+                userNotificationCenter: MockUserNotificationCenter(status: .denied),
+                remoteNotificationRegistrar: MockRemoteNotificationRegistrar()
+            )
+            service.isAppInForeground = true
+            service.applicationStateProvider = { .active }
+            service.threads = [CodexThread(id: "thread", title: "Off-screen chat")]
+            let coordinator = RemodexDisplayIslandCoordinator()
+            let startedAt = Date()
+            service.notifyRunCompletionIfNeeded(threadId: "thread", turnId: "first", result: result)
+            let finishedAt = Date()
+            let first = coordinator.makeReconciledSnapshot(codex: service, now: finishedAt)
+            XCTAssertEqual((first.completedConversations + first.failedConversations).map(\.id), ["thread"])
+            let lifetime: TimeInterval = result == .completed ? 300 : 900
+            guard let expiration = first.nextExpirationDate else {
+                XCTFail("An admitted outcome must have an expiration")
+                return
+            }
+            XCTAssertGreaterThanOrEqual(expiration, startedAt.addingTimeInterval(lifetime))
+            XCTAssertLessThanOrEqual(expiration, finishedAt.addingTimeInterval(lifetime))
+
+            // Duplicate admission and view reconstruction cannot restart the expiry clock.
+            service.notifyRunCompletionIfNeeded(threadId: "thread", turnId: "first", result: result)
+            let rebuilt = RemodexDisplayIslandCoordinator()
+            XCTAssertEqual(rebuilt.makeReconciledSnapshot(codex: service, now: finishedAt.addingTimeInterval(60)).nextExpirationDate,
+                           expiration)
+            XCTAssertTrue(rebuilt.makeReconciledSnapshot(codex: service, now: finishedAt.addingTimeInterval(lifetime + 1)).isEmpty)
+            service.notifyRunCompletionIfNeeded(threadId: "thread", turnId: "first", result: result)
+            XCTAssertTrue(rebuilt.makeReconciledSnapshot(codex: service, now: Date()).isEmpty)
+
+            service.notifyRunCompletionIfNeeded(threadId: "thread", turnId: "second", result: result)
+            XCTAssertFalse(rebuilt.makeReconciledSnapshot(codex: service, now: Date()).isEmpty)
+            rebuilt.clearOutcome(for: "thread", codex: service)
+            XCTAssertTrue(RemodexDisplayIslandCoordinator().makeReconciledSnapshot(codex: service, now: Date()).isEmpty)
+
+            service.notifyRunCompletionIfNeeded(threadId: "thread", turnId: "third", result: result)
+            service.markThreadAsRunning("thread")
+            service.clearRunningState(for: "thread")
+            XCTAssertTrue(rebuilt.makeReconciledSnapshot(codex: service, now: Date()).isEmpty)
+
+            service.notifyRunCompletionIfNeeded(threadId: "thread", turnId: "fourth", result: result)
+            service.markThreadAsViewed("thread")
+            XCTAssertTrue(rebuilt.makeReconciledSnapshot(codex: service, now: Date()).isEmpty)
+            service.notifyRunCompletionIfNeeded(threadId: "thread", turnId: "fifth", result: result)
+            service.loadMacScopedDefaultsState(for: "other-mac")
+            XCTAssertTrue(rebuilt.makeReconciledSnapshot(codex: service, now: Date()).isEmpty)
+        }
+    }
+
+    func testIslandCoalescesCompletionsWithoutRevivingDisplacedOutcomes() {
+        let service = makeService(
+            userNotificationCenter: MockUserNotificationCenter(status: .denied),
+            remoteNotificationRegistrar: MockRemoteNotificationRegistrar()
+        )
+        service.isAppInForeground = true
+        service.applicationStateProvider = { .active }
+        let coordinator = RemodexDisplayIslandCoordinator()
+        for result in [CodexRunCompletionResult.completed, .failed] {
+            for index in 1...4 {
+                let threadID = "\(result.rawValue)-\(index)"
+                service.threads.append(CodexThread(id: threadID, title: threadID))
+                service.notifyRunCompletionIfNeeded(threadId: threadID, turnId: "turn", result: result)
+            }
+        }
+        let snapshot = coordinator.makeReconciledSnapshot(codex: service, now: Date())
+        XCTAssertEqual(Set(snapshot.completedConversations.map(\.id)), ["completed-2", "completed-3", "completed-4"])
+        XCTAssertEqual(Set(snapshot.failedConversations.map(\.id)), ["failed-2", "failed-3", "failed-4"])
+        for row in snapshot.completedConversations + snapshot.failedConversations {
+            coordinator.clearOutcome(for: row.id, codex: service)
+        }
+        XCTAssertTrue(coordinator.makeReconciledSnapshot(codex: service, now: Date()).isEmpty)
+    }
+
+    func testIslandDropsContradictedOutcomesWithoutAnnouncingTheCorrection() {
+        for result in [CodexRunCompletionResult.completed, .failed] {
+            for correctedState in [result == .completed ? CodexTurnTerminalState.failed : .completed, .stopped] {
+                let service = makeService(
+                    userNotificationCenter: MockUserNotificationCenter(status: .denied),
+                    remoteNotificationRegistrar: MockRemoteNotificationRegistrar()
+                )
+                service.threads = [CodexThread(id: "thread", title: "Off-screen chat")]
+                let coordinator = RemodexDisplayIslandCoordinator()
+                service.notifyRunCompletionIfNeeded(threadId: "thread", turnId: "turn", result: result)
+                XCTAssertFalse(coordinator.makeReconciledSnapshot(codex: service, now: Date()).isEmpty)
+                service.recordTurnTerminalState(threadId: "thread", turnId: "turn", state: correctedState)
+                XCTAssertTrue(coordinator.makeReconciledSnapshot(codex: service, now: Date()).isEmpty)
+            }
+        }
     }
 
     func testIDLessHistoryCannotEndTheCurrentRun() async {
@@ -196,6 +292,7 @@ final class CodexPushNotificationRegistrationTests: XCTestCase {
             remoteNotificationRegistrar: MockRemoteNotificationRegistrar()
         )
         service.applicationStateProvider = { .inactive }
+        service.threads = [CodexThread(id: "thread", title: "Off-screen chat")]
         service.isConnected = true
         service.isInitialized = true
         service.relaySessionId = "paired-session"
@@ -210,6 +307,9 @@ final class CodexPushNotificationRegistrationTests: XCTestCase {
             await service.syncManagedPushRegistrationIfNeeded(force: true)
             service.notifyRunCompletionIfNeeded(threadId: "thread", turnId: "\(capability)", result: .completed)
             try? await Task.sleep(nanoseconds: 50_000_000)
+            let coordinator = RemodexDisplayIslandCoordinator()
+            XCTAssertEqual(coordinator.makeReconciledSnapshot(codex: service, now: Date()).completedConversations.map(\.id), ["thread"])
+            coordinator.clearOutcome(for: "thread", codex: service)
         }
         XCTAssertEqual(center.addRequests.count, 2)
         await service.disconnect(preserveReconnectIntent: true)
@@ -328,6 +428,8 @@ final class CodexPushNotificationRegistrationTests: XCTestCase {
             try? await Task.sleep(nanoseconds: 50_000_000)
             XCTAssertEqual(center.addRequests.count, completionAge == 0 ? 1 : 0)
             XCTAssertFalse(service.threadHasActiveOrRunningTurn("thread-recovered"))
+            let snapshot = RemodexDisplayIslandCoordinator().makeReconciledSnapshot(codex: service, now: Date())
+            XCTAssertEqual(snapshot.completedConversations.map(\.id), completionAge == 0 ? ["thread-recovered"] : [])
         }
     }
 

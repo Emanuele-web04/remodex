@@ -1602,7 +1602,7 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertFalse(service.threads.contains { $0.id == threadID })
     }
 
-    func testDisplayIslandDoesNotMarkDisconnectedRunReadyWithoutTerminalState() {
+    func testDisplayIslandDoesNotReviveDisconnectedRunFromHistoricalTerminalStates() {
         let service = makeService()
         let coordinator = RemodexDisplayIslandCoordinator()
         let threadID = "thread-\(UUID().uuidString)"
@@ -1625,12 +1625,17 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertTrue(disconnectedSnapshot.completedConversations.isEmpty)
         XCTAssertTrue(disconnectedSnapshot.failedConversations.isEmpty)
 
-        service.latestTurnTerminalStateByThread[threadID] = .completed
-        let completedSnapshot = coordinator.makeReconciledSnapshot(
-            codex: service,
-            now: startedAt.addingTimeInterval(2)
-        )
-        XCTAssertEqual(completedSnapshot.completedConversations.map(\.id), [threadID])
+        for state in [CodexTurnTerminalState.completed, .failed] {
+            service.latestTurnTerminalStateByThread[threadID] = state
+            let historicalSnapshot = coordinator.makeReconciledSnapshot(
+                codex: service,
+                now: startedAt.addingTimeInterval(2)
+            )
+            XCTAssertTrue(historicalSnapshot.isEmpty)
+            XCTAssertTrue(RemodexDisplayIslandCoordinator().makeReconciledSnapshot(
+                codex: service, now: startedAt.addingTimeInterval(3)
+            ).isEmpty)
+        }
     }
 
     func testDisplayIslandDoesNotMarkActiveRunReadyAfterCompletion() {
@@ -1642,13 +1647,12 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
             CodexThread(id: threadID, title: "Active chat", cwd: "/tmp/remodex"),
         ]
         service.activeThreadId = threadID
-        service.runningThreadIDs.insert(threadID)
+        sendTurnStarted(service: service, threadID: threadID, turnID: "active-turn")
 
         let runningSnapshot = coordinator.makeReconciledSnapshot(codex: service, now: startedAt)
         XCTAssertEqual(runningSnapshot.runningConversations.map(\.id), [threadID])
 
-        service.runningThreadIDs.remove(threadID)
-        service.latestTurnTerminalStateByThread[threadID] = .completed
+        sendTurnCompletedSuccess(service: service, threadID: threadID, turnID: "active-turn")
         let activeCompletedSnapshot = coordinator.makeReconciledSnapshot(
             codex: service,
             now: startedAt.addingTimeInterval(1)
