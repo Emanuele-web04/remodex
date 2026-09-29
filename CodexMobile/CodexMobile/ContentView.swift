@@ -244,8 +244,9 @@ struct ContentView: View {
     private var rootContentWithLifecycleObservers: some View {
         rootContentWithConnectionObservers
             .onChange(of: codex.threadCompletionBanner) { _, banner in
-                displayIslandCoordinator.rememberCompletion(from: banner, codex: codex)
                 scheduleThreadCompletionBannerDismiss(for: banner)
+            }
+            .onChange(of: codex.recentRunCompletionEventsByThread) { _, _ in
                 syncDisplayIsland()
             }
             .onChange(of: codex.runningThreadIDs) { _, _ in
@@ -2060,7 +2061,7 @@ struct ContentView: View {
     private func clearDisplayIslandOutcome(for threadId: String) {
         displayIslandCoordinator.clearOutcome(
             for: threadId,
-            terminalState: codex.latestTurnTerminalState(for: threadId)
+            codex: codex
         )
     }
 

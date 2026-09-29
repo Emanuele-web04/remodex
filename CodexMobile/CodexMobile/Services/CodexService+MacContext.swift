@@ -206,6 +206,7 @@ extension CodexService {
                 terminalStateByTurnID = [:]
             }
             latestTurnTerminalStateByThread = [:]
+            recentRunCompletionEventsByThread = [:]
 
             if let savedThreadHistoryPaginationState = defaults.data(
                 forKey: macScopedDefaultsKey(Self.threadHistoryPaginationStateDefaultsKey, macDeviceId: macDeviceId)
@@ -294,6 +295,7 @@ extension CodexService {
             latestRepoAffectingMessageSignalByThread.removeAll()
             currentOutput = ""
             latestTurnTerminalStateByThread.removeAll()
+            recentRunCompletionEventsByThread.removeAll()
             terminalStateByTurnID.removeAll()
             olderThreadHistoryCursorByThreadID.removeAll()
             exhaustedOlderThreadHistoryCursorByThreadID.removeAll()

@@ -845,6 +845,7 @@ extension CodexService {
     func markThreadAsViewed(_ threadId: String) {
         clearRunningThreadWatch(threadId)
         clearOutcomeBadge(for: threadId)
+        recentRunCompletionEventsByThread.removeValue(forKey: threadId)
         if threadCompletionBanner?.threadId == threadId {
             threadCompletionBanner = nil
         }
@@ -863,6 +864,9 @@ extension CodexService {
             return
         }
         runningThreadIDs.insert(threadId)
+        if recentRunCompletionEventsByThread[threadId] != nil {
+            recentRunCompletionEventsByThread.removeValue(forKey: threadId)
+        }
         threadsPendingCompletionHaptic.insert(threadId)
         latestTurnTerminalStateByThread.removeValue(forKey: threadId)
         clearOutcomeBadge(for: threadId)

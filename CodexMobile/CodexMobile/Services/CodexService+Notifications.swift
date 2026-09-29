@@ -271,6 +271,24 @@ extension CodexService {
         guard claimRunCompletionNotification(threadId: threadId, turnId: turnId, persistenceKey: persistenceKey) else {
             return
         }
+        // Live Activities share admission/dedupe with alerts, but remain available
+        // in the foreground and when APNs owns system notification delivery.
+        var events = recentRunCompletionEventsByThread
+        if activeThreadId != threadId {
+            events[threadId] = CodexRunCompletionEvent(
+                turnId: turnId, result: result, receivedAt: Date()
+            )
+        } else {
+            events.removeValue(forKey: threadId)
+        }
+        // Keep the existing three-per-outcome limit: dismissing a newer badge
+        // must not uncover an older completion that had already been displaced.
+        let retainedThreadIDs = Set(events.filter { $0.value.result == result }
+            .sorted { $0.value.receivedAt > $1.value.receivedAt }
+            .prefix(CodexRunCompletionEvent.maxRetainedPerResult).map(\.key))
+        recentRunCompletionEventsByThread = events.filter {
+            $0.value.result != result || retainedThreadIDs.contains($0.key)
+        }
         // Foreground and remotely delivered completions are handled too. Replaying
         // them after an app switch must never turn them into a new local alert.
         guard !usesRemoteCompletionNotifications,

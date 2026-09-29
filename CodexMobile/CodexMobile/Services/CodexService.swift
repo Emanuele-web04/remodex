@@ -260,6 +260,13 @@ enum CodexRunCompletionResult: String, Equatable, Sendable {
     case failed
 }
 
+struct CodexRunCompletionEvent: Equatable, Sendable {
+    static let maxRetainedPerResult = 3
+    let turnId: String
+    let result: CodexRunCompletionResult
+    let receivedAt: Date
+}
+
 enum CodexNotificationPayloadKeys {
     static let source = "source"
     static let threadId = "threadId"
@@ -598,6 +605,8 @@ final class CodexService {
     var lastPresentedAvailableBridgePackageVersion: String?
     // Mirrors the sidebar ready-dot with a tappable in-app banner when another chat finishes.
     var threadCompletionBanner: CodexThreadCompletionBanner?
+    // Transient, admitted completions for Live Activities; never restored from history.
+    var recentRunCompletionEventsByThread: [String: CodexRunCompletionEvent] = [:]
     // Explains why a push-opened chat could not be restored and offers a recovery path.
     var missingNotificationThreadPrompt: CodexMissingNotificationThreadPrompt?
     // Owns the scarce App Store review prompt budget for successful in-app runs.
