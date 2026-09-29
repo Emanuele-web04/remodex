@@ -771,6 +771,8 @@ function startBridge({
     sessionId,
     pushServiceClient,
     previewMaxChars: config.pushPreviewMaxChars,
+    completionStatePath: config.pushCompletionStatePath,
+    readThread: (threadId) => sendCodexRequest("thread/read", buildCompleteThreadReadParams(threadId)),
   });
   const readBridgePackageVersionStatus = createBridgePackageVersionStatusReader();
 
@@ -952,8 +954,7 @@ function startBridge({
       } else if (message.method === "thread/unarchived") {
         refreshOpenCodeThreadCatalog();
       }
-      pushNotificationTracker.handleOutbound(JSON.stringify(message), message);
-      sendApplicationResponse(JSON.stringify(message));
+      sendApplicationResponse(JSON.stringify(message), message);
     },
   });
   const voiceHandler = createVoiceHandler({
@@ -1241,7 +1242,6 @@ function startBridge({
     desktopRefresher.handleOutbound(message, parsedMessage);
     desktopIpcLiveOwner?.observeOutbound(message, parsedMessage);
     observeAppServerActivity(parsedMessage);
-    pushNotificationTracker.handleOutbound(message, parsedMessage);
     rememberThreadFromMessage("codex", message, parsedMessage);
     queueApplicationMessageWithOpenCodeList(message, parsedMessage);
   });
@@ -1507,15 +1507,17 @@ function startBridge({
   }
 
   // Encrypts bridge-generated responses instead of letting the relay see plaintext.
-  function sendApplicationResponse(rawMessage) {
-    queueApplicationMessageWithOpenCodeList(rawMessage);
+  function sendApplicationResponse(rawMessage, parsedMessage = null) {
+    queueApplicationMessageWithOpenCodeList(rawMessage, parsedMessage);
   }
 
   function queueApplicationMessageWithOpenCodeList(rawMessage, parsedMessage = null) {
-    const responseId = parsedMessage?.id ?? safeParseJSON(rawMessage)?.id;
+    const outboundMessage = parsedMessage || parseBridgeMessage(rawMessage);
+    pushNotificationTracker.handleOutbound(rawMessage, outboundMessage);
+    const responseId = outboundMessage?.id;
     const requestKey = responseId == null ? "" : String(responseId);
     const listRequest = pendingOpenCodeThreadListRequests.get(requestKey);
-    const sanitizedMessage = sanitizeRelayBoundCodexMessage(rawMessage, parsedMessage);
+    const sanitizedMessage = sanitizeRelayBoundCodexMessage(rawMessage, outboundMessage);
     if (!listRequest || !sanitizedMessage) {
       secureTransport.queueOutboundApplicationMessage(sanitizedMessage, sendRelayWireMessage);
       return;

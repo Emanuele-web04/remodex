@@ -1,112 +1,32 @@
 // FILE: push-notification-completion-dedupe.test.js
-// Purpose: Verifies the small helper that bounds completion dedupe state and thread-status suppression.
+// Purpose: Verifies the production bound and persistence of completion receipts.
 // Layer: Unit test
 // Exports: node:test suite
-// Depends on: node:test, node:assert/strict, ../src/push-notification-completion-dedupe
+// Depends on: node:test, node:assert/strict, node:fs, node:os, node:path
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 
 const {
   createPushNotificationCompletionDedupe,
 } = require("../src/push-notification-completion-dedupe");
 
-test("completion dedupe suppresses thread-status fallback until a new run starts", () => {
-  let currentTime = 0;
-  const dedupe = createPushNotificationCompletionDedupe({
-    now: () => currentTime,
-  });
+test("successful completion identities persist across restarts within a fixed bound", (t) => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-completion-dedupe-"));
+  const statePath = path.join(tempDir, "state.json");
+  t.after(() => fs.rmSync(tempDir, { recursive: true, force: true }));
+  const first = createPushNotificationCompletionDedupe({ statePath });
 
-  dedupe.beginNotification({
-    dedupeKey: "done-a",
-    threadId: "thread-1",
-    turnId: "turn-a",
-    result: "completed",
-  });
-  dedupe.commitNotification({
-    dedupeKey: "done-a",
-    threadId: "thread-1",
-    turnId: "turn-a",
-    result: "completed",
-  });
+  for (let index = 0; index <= 1_000; index += 1) {
+    first.commitNotification(`completion-${index}`);
+  }
+  assert.equal(first.hasSuccessfulNotification("completion-0"), false);
 
-  currentTime = 1_000;
-  assert.equal(
-    dedupe.shouldSuppressThreadStatusFallback({
-      threadId: "thread-1",
-      result: "completed",
-    }),
-    true
-  );
-
-  dedupe.clearForNewRun("thread-1");
-  assert.equal(
-    dedupe.shouldSuppressThreadStatusFallback({
-      threadId: "thread-1",
-      result: "completed",
-    }),
-    false
-  );
-});
-
-test("completion dedupe removes pending suppression if the send fails", () => {
-  const dedupe = createPushNotificationCompletionDedupe();
-
-  dedupe.beginNotification({
-    dedupeKey: "done-b",
-    threadId: "thread-2",
-    turnId: "turn-b",
-    result: "failed",
-  });
-
-  assert.equal(
-    dedupe.shouldSuppressThreadStatusFallback({
-      threadId: "thread-2",
-      result: "failed",
-    }),
-    true
-  );
-
-  dedupe.abortNotification({
-    dedupeKey: "done-b",
-    threadId: "thread-2",
-    turnId: "turn-b",
-    result: "failed",
-  });
-
-  assert.equal(
-    dedupe.shouldSuppressThreadStatusFallback({
-      threadId: "thread-2",
-      result: "failed",
-    }),
-    false
-  );
-});
-
-test("completion dedupe expires sent keys so state stays bounded", () => {
-  let currentTime = 0;
-  const dedupe = createPushNotificationCompletionDedupe({
-    now: () => currentTime,
-  });
-
-  dedupe.beginNotification({
-    dedupeKey: "done-c",
-    threadId: "thread-3",
-    turnId: "turn-c",
-    result: "completed",
-  });
-  dedupe.commitNotification({
-    dedupeKey: "done-c",
-    threadId: "thread-3",
-    turnId: "turn-c",
-    result: "completed",
-  });
-
-  assert.equal(dedupe.hasActiveDedupeKey("done-c"), true);
-  assert.equal(dedupe.debugState().sentDedupeKeys, 1);
-
-  currentTime = 24 * 60 * 60 * 1000 + 1;
-
-  assert.equal(dedupe.hasActiveDedupeKey("done-c"), false);
-  assert.equal(dedupe.debugState().sentDedupeKeys, 0);
+  const restarted = createPushNotificationCompletionDedupe({ statePath });
+  assert.equal(restarted.hasSuccessfulNotification("completion-0"), false);
+  assert.equal(restarted.hasSuccessfulNotification("completion-1"), true);
+  assert.equal(restarted.hasSuccessfulNotification("completion-1000"), true);
 });

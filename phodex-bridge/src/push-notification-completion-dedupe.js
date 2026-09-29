@@ -1,141 +1,108 @@
 // FILE: push-notification-completion-dedupe.js
-// Purpose: Owns duplicate-suppression state for completion pushes emitted by the bridge.
+// Purpose: Persists bounded successful completion identities and guards in-flight sends.
 // Layer: Bridge helper
 // Exports: createPushNotificationCompletionDedupe
-// Depends on: none
+// Depends on: fs, os, path
 
-const DEFAULT_SENT_DEDUPE_TTL_MS = 24 * 60 * 60 * 1000;
-const DEFAULT_STATUS_FALLBACK_TTL_MS = 5_000;
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+
+const DEFAULT_COMPLETION_STATE_PATH = path.join(
+  os.homedir(),
+  ".remodex",
+  "completion-push-state.json"
+);
+const MAX_COMPLETION_ENTRIES = 1_000;
 
 function createPushNotificationCompletionDedupe({
-  now = () => Date.now(),
-  sentDedupeTTLms = DEFAULT_SENT_DEDUPE_TTL_MS,
-  statusFallbackTTLms = DEFAULT_STATUS_FALLBACK_TTL_MS,
+  statePath = DEFAULT_COMPLETION_STATE_PATH,
+  logPrefix = "[remodex]",
 } = {}) {
-  const sentDedupeKeys = new Map();
-  const pendingDedupeKeys = new Set();
-  const recentTurnScopedCompletionsByThread = new Map();
+  const successfulKeys = loadSuccessfulKeys(statePath, logPrefix);
+  const inFlightKeys = new Set();
 
-  function clearForNewRun(threadId) {
-    if (!readString(threadId)) {
-      return;
-    }
-
-    recentTurnScopedCompletionsByThread.delete(threadId);
+  function hasSuccessfulNotification(dedupeKey) {
+    return successfulKeys.has(readString(dedupeKey));
   }
 
-  // Thread-level terminal events are only a fallback when we have not already sent a turn-scoped completion.
-  function shouldSuppressThreadStatusFallback({ threadId, turnId, result } = {}) {
-    if (readString(turnId)) {
+  function beginNotification(dedupeKey) {
+    const key = readString(dedupeKey);
+    if (!key || successfulKeys.has(key) || inFlightKeys.has(key)) {
       return false;
     }
-
-    pruneRecentTurnScopedCompletions();
-    const previous = recentTurnScopedCompletionsByThread.get(readString(threadId));
-    return previous?.result === result;
+    inFlightKeys.add(key);
+    return true;
   }
 
-  function hasActiveDedupeKey(dedupeKey) {
-    const normalizedKey = readString(dedupeKey);
-    if (!normalizedKey) {
-      return false;
-    }
-
-    pruneSentDedupeKeys();
-    return sentDedupeKeys.has(normalizedKey) || pendingDedupeKeys.has(normalizedKey);
-  }
-
-  function beginNotification({ dedupeKey, threadId, turnId, result } = {}) {
-    const normalizedKey = readString(dedupeKey);
-    if (!normalizedKey) {
+  function commitNotification(dedupeKey) {
+    const key = readString(dedupeKey);
+    if (!key) {
       return;
     }
-
-    pendingDedupeKeys.add(normalizedKey);
-    if (readString(turnId)) {
-      rememberTurnScopedCompletion(threadId, result);
+    inFlightKeys.delete(key);
+    successfulKeys.delete(key);
+    successfulKeys.add(key);
+    while (successfulKeys.size > MAX_COMPLETION_ENTRIES) {
+      successfulKeys.delete(successfulKeys.values().next().value);
     }
+    saveSuccessfulKeys(statePath, successfulKeys, logPrefix);
   }
 
-  function commitNotification({ dedupeKey, threadId, turnId, result } = {}) {
-    const normalizedKey = readString(dedupeKey);
-    if (normalizedKey) {
-      sentDedupeKeys.set(normalizedKey, now());
-      pendingDedupeKeys.delete(normalizedKey);
-    }
-
-    if (readString(turnId)) {
-      rememberTurnScopedCompletion(threadId, result);
-    }
-  }
-
-  function abortNotification({ dedupeKey, threadId, turnId, result } = {}) {
-    const normalizedKey = readString(dedupeKey);
-    if (normalizedKey) {
-      pendingDedupeKeys.delete(normalizedKey);
-    }
-
-    const normalizedThreadId = readString(threadId);
-    if (!readString(turnId) || !normalizedThreadId) {
-      return;
-    }
-
-    const previous = recentTurnScopedCompletionsByThread.get(normalizedThreadId);
-    if (previous?.result === result) {
-      recentTurnScopedCompletionsByThread.delete(normalizedThreadId);
-    }
-  }
-
-  // Exposed for focused tests so we can prove dedupe state stays bounded.
-  function debugState() {
-    pruneSentDedupeKeys();
-    pruneRecentTurnScopedCompletions();
-    return {
-      sentDedupeKeys: sentDedupeKeys.size,
-      pendingDedupeKeys: pendingDedupeKeys.size,
-      recentThreadFallbacks: recentTurnScopedCompletionsByThread.size,
-    };
-  }
-
-  function rememberTurnScopedCompletion(threadId, result) {
-    const normalizedThreadId = readString(threadId);
-    if (!normalizedThreadId) {
-      return;
-    }
-
-    recentTurnScopedCompletionsByThread.set(normalizedThreadId, {
-      result,
-      timestamp: now(),
-    });
-  }
-
-  function pruneSentDedupeKeys() {
-    const cutoff = now() - sentDedupeTTLms;
-    for (const [dedupeKey, timestamp] of sentDedupeKeys.entries()) {
-      if (timestamp < cutoff) {
-        sentDedupeKeys.delete(dedupeKey);
-      }
-    }
-  }
-
-  function pruneRecentTurnScopedCompletions() {
-    const cutoff = now() - statusFallbackTTLms;
-    for (const [threadId, entry] of recentTurnScopedCompletionsByThread.entries()) {
-      if (entry.timestamp < cutoff) {
-        recentTurnScopedCompletionsByThread.delete(threadId);
-      }
-    }
+  function abortNotification(dedupeKey) {
+    inFlightKeys.delete(readString(dedupeKey));
   }
 
   return {
     abortNotification,
     beginNotification,
-    clearForNewRun,
     commitNotification,
-    debugState,
-    hasActiveDedupeKey,
-    shouldSuppressThreadStatusFallback,
+    hasSuccessfulNotification,
   };
+}
+
+function loadSuccessfulKeys(filePath, logPrefix) {
+  if (!filePath) {
+    return new Set();
+  }
+
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    const entries = Array.isArray(parsed?.successfulCompletionKeys)
+      ? parsed.successfulCompletionKeys.map(readString).filter(Boolean)
+      : [];
+    return new Set(entries.slice(-MAX_COMPLETION_ENTRIES));
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      console.error(`${logPrefix} failed to load completion push state: ${error.message}`);
+    }
+    return new Set();
+  }
+}
+
+function saveSuccessfulKeys(filePath, successfulKeys, logPrefix) {
+  if (!filePath) {
+    return;
+  }
+
+  try {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    const temporaryPath = `${filePath}.tmp`;
+    fs.writeFileSync(temporaryPath, JSON.stringify({
+      successfulCompletionKeys: [...successfulKeys],
+    }), {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    fs.renameSync(temporaryPath, filePath);
+    try {
+      fs.chmodSync(filePath, 0o600);
+    } catch {
+      // Best effort on filesystems without POSIX modes.
+    }
+  } catch (error) {
+    console.error(`${logPrefix} failed to save completion push state: ${error.message}`);
+  }
 }
 
 function readString(value) {

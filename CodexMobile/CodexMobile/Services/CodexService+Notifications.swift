@@ -200,6 +200,7 @@ extension CodexService {
         let normalizedToken = remoteNotificationDeviceToken?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard let normalizedToken, !normalizedToken.isEmpty else {
+            completionPushSessionID = nil
             return
         }
 
@@ -224,19 +225,53 @@ extension CodexService {
             "appEnvironment": .string(pushAPNsEnvironment.rawValue),
         ])
 
+        let registrationSessionID = normalizedRelaySessionId
+        pushRegistrationGeneration += 1
+        let registrationGeneration = pushRegistrationGeneration
         do {
-            _ = try await sendRequest(method: "notifications/push/register", params: params)
+            let response = try await sendRequest(method: "notifications/push/register", params: params)
+            guard registrationGeneration == pushRegistrationGeneration,
+                  isConnected, isInitialized,
+                  normalizedRelaySessionId == registrationSessionID,
+                  remoteNotificationDeviceToken?.trimmingCharacters(in: .whitespacesAndNewlines) == normalizedToken else {
+                return
+            }
+            completionPushSessionID = response.result?.objectValue?["completionPushEnabled"]?.boolValue == true
+                && response.result?.objectValue?["ok"]?.boolValue == true
+                && alertsEnabled && canScheduleRunCompletionNotifications ? registrationSessionID : nil
             lastPushRegistrationSignature = signature
         } catch {
+            if registrationGeneration == pushRegistrationGeneration {
+                completionPushSessionID = nil
+                lastPushRegistrationSignature = nil
+            }
             debugRuntimeLog("push registration sync failed: \(error.localizedDescription)")
         }
+    }
+
+    func invalidateCompletionPushRegistration() {
+        pushRegistrationGeneration += 1
+        completionPushSessionID = nil
+        lastPushRegistrationSignature = nil
     }
 
     // Schedules a local alert while the app is backgrounded or transitioning
     // away from the screen. iOS may suspend the app after its finite grace window;
     // reliable delivery after suspension requires configured APNs push.
     func notifyRunCompletionIfNeeded(threadId: String, turnId: String?, result: CodexRunCompletionResult) {
-        guard !isAppInForeground || applicationStateProvider() != .active else {
+        // Check replay scope synchronously: it has ended by the time the Task runs.
+        guard !isApplyingReplayedBridgeEvent,
+              let turnId = normalizedIdentifier(turnId) else {
+            return
+        }
+        let persistenceKey = macScopedDefaultsKey(Self.handledRunCompletionsDefaultsKey)
+        guard claimRunCompletionNotification(threadId: threadId, turnId: turnId, persistenceKey: persistenceKey) else {
+            return
+        }
+        // Foreground and remotely delivered completions are handled too. Replaying
+        // them after an app switch must never turn them into a new local alert.
+        guard !usesRemoteCompletionNotifications,
+              !isAppInForeground || applicationStateProvider() != .active else {
             return
         }
 
@@ -244,9 +279,77 @@ extension CodexService {
             await self?.scheduleRunCompletionNotificationIfNeeded(
                 threadId: threadId,
                 turnId: turnId,
-                result: result
+                result: result,
+                persistenceKey: persistenceKey
             )
         }
+    }
+
+    var usesRemoteCompletionNotifications: Bool {
+        guard let sessionID = normalizedRelaySessionId else { return false }
+        return completionPushSessionID == sessionID
+    }
+
+    // Some older runtimes omit status on turn/completed; an explicit unknown or
+    // still-running status must not be advertised as a successful completion.
+    func isSuccessfulCompletionNotification(_ paramsObject: IncomingParamsObject?) -> Bool {
+        let eventObject = envelopeEventObject(from: paramsObject)
+        let status = paramsObject?["turn"]?.objectValue?["status"]
+            ?? paramsObject?["status"]
+            ?? eventObject?["turn"]?.objectValue?["status"]
+            ?? eventObject?["status"]
+        guard let status else { return true }
+        let rawStatus = status.stringValue ?? status.objectValue?["type"]?.stringValue ?? ""
+        return ["completed", "done", "finished"].contains(normalizeThreadStatusType(rawStatus))
+    }
+
+    // Called before terminal handling clears running state. History and a bare
+    // idle status are not evidence that a run we were following just finished.
+    func trackedCompletionNotificationTurnID(
+        threadId: String,
+        turnId: String?,
+        paramsObject: IncomingParamsObject?
+    ) -> String? {
+        guard !isHistoricalCompletionEvent(paramsObject) else { return nil }
+        let eventObject = envelopeEventObject(from: paramsObject)
+        let timestampSources = [
+            paramsObject?["turn"]?.objectValue, paramsObject,
+            eventObject?["turn"]?.objectValue, eventObject,
+        ]
+        let completedAt = timestampSources.lazy.compactMap {
+            self.firstDateValue(in: $0, keys: ["completedAt", "completed_at", "completedAtMs", "completed_at_ms"])
+        }.first
+        guard isFreshCompletionNotification(completedAt: completedAt) else { return nil }
+        if let turnId,
+           supersededTurnIDsByIDLessRunByThread[threadId]?.contains(turnId) == true { return nil }
+
+        if let activeID = activeTurnIdByThread[threadId] {
+            return turnId == nil || turnId == activeID ? activeID : nil
+        }
+        if let provisionalID = provisionalIDLessTurnIDByThread[threadId],
+           threadHasActiveOrRunningTurn(threadId) {
+            return turnId ?? provisionalID
+        }
+        if pendingReconnectRunContinuityThreadIDs.contains(threadId),
+           let startedID = lastRunStartTurnIDByThread[threadId],
+           turnId == nil || turnId == startedID {
+            return startedID
+        }
+        return nil
+    }
+
+    func isHistoricalCompletionEvent(_ paramsObject: IncomingParamsObject?) -> Bool {
+        isApplyingReplayedBridgeEvent
+            || isReplayedBridgeEvent(paramsObject)
+            || isRolloutBootstrapBridgeEvent(paramsObject)
+            || paramsObject?["remodexRolloutTerminalCatchUp"]?.boolValue == true
+    }
+
+    // A recovered terminal snapshot may be accurate but too old to wake the user.
+    // Legacy live runtimes omit timestamps; their tracked lifecycle remains the gate.
+    func isFreshCompletionNotification(completedAt: Date?) -> Bool {
+        guard let completedAt else { return true }
+        return abs(Date().timeIntervalSince(completedAt)) <= 5 * 60
     }
 
     // Prompts can arrive mid-turn without any terminal event, so surface them with a local alert
@@ -428,32 +531,20 @@ private extension CodexService {
         notificationObserverTokens = [didRegisterObserver, didFailObserver]
     }
 
-    // Keeps local alerts deduped because some runtimes emit both turn/completed and thread/status terminal signals.
+    // Admission and durable dedupe happen synchronously before scheduling this task.
     func scheduleRunCompletionNotificationIfNeeded(
         threadId: String,
-        turnId: String?,
-        result: CodexRunCompletionResult
+        turnId: String,
+        result: CodexRunCompletionResult,
+        persistenceKey: String
     ) async {
         await refreshNotificationAuthorizationStatus()
-        guard canScheduleRunCompletionNotifications else {
+        guard canScheduleRunCompletionNotifications,
+              !usesRemoteCompletionNotifications,
+              persistenceKey == macScopedDefaultsKey(Self.handledRunCompletionsDefaultsKey) else {
             return
         }
-
-        let now = Date()
-        pruneRunCompletionNotificationDedupe(now: now)
-        let dedupeKey = runCompletionNotificationDedupeKey(
-            threadId: threadId,
-            turnId: turnId,
-            result: result,
-            now: now
-        )
-
-        if let previousTimestamp = runCompletionNotificationDedupedAt[dedupeKey],
-           now.timeIntervalSince(previousTimestamp) <= 60 {
-            return
-        }
-
-        runCompletionNotificationDedupedAt[dedupeKey] = now
+        let dedupeKey = "\(persistenceKey)|\(threadId)|\(turnId)"
 
         let title = thread(for: threadId)?.displayTitle ?? CodexThread.defaultDisplayTitle
         let body: String = {
@@ -473,7 +564,7 @@ private extension CodexService {
         content.userInfo = [
             CodexNotificationPayloadKeys.source: CodexNotificationSource.runCompletion,
             CodexNotificationPayloadKeys.threadId: threadId,
-            CodexNotificationPayloadKeys.turnId: turnId ?? "",
+            CodexNotificationPayloadKeys.turnId: turnId,
             CodexNotificationPayloadKeys.result: result.rawValue,
             CodexNotificationPayloadKeys.presentWhenActive: true,
         ]
@@ -567,18 +658,22 @@ private extension CodexService {
 #endif
     }
 
-    func runCompletionNotificationDedupeKey(
+    // Bounded per-Mac receipts survive relaunch. A result change or elapsed time
+    // does not make the same turn eligible for another completion notification.
+    func claimRunCompletionNotification(
         threadId: String,
-        turnId: String?,
-        result: CodexRunCompletionResult,
-        now: Date
-    ) -> String {
-        if let turnId, !turnId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return "\(threadId)|\(turnId)|\(result.rawValue)"
+        turnId: String,
+        persistenceKey: String
+    ) -> Bool {
+        let key = "\(threadId)|\(turnId)"
+        var receipts = defaults.dictionary(forKey: persistenceKey) as? [String: Double] ?? [:]
+        guard receipts[key] == nil else { return false }
+        receipts[key] = Date().timeIntervalSince1970
+        if receipts.count > 512 {
+            receipts = Dictionary(uniqueKeysWithValues: receipts.sorted { $0.value > $1.value }.prefix(512).map { ($0.key, $0.value) })
         }
-
-        let timeBucket = Int(now.timeIntervalSince1970 / 30)
-        return "\(threadId)|\(result.rawValue)|\(timeBucket)"
+        defaults.set(receipts, forKey: persistenceKey)
+        return true
     }
 
     func runCompletionNotificationIdentifier(for dedupeKey: String) -> String {
@@ -587,12 +682,6 @@ private extension CodexService {
             allowed.contains(scalar) ? Character(scalar) : "_"
         })
         return "codex.runCompletion.\(sanitized)"
-    }
-
-    func pruneRunCompletionNotificationDedupe(now: Date) {
-        runCompletionNotificationDedupedAt = runCompletionNotificationDedupedAt.filter { _, timestamp in
-            now.timeIntervalSince(timestamp) <= 60
-        }
     }
 
     func structuredUserInputNotificationDedupeKey(

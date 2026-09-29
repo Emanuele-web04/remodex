@@ -15,18 +15,19 @@ test("APNs authorization tokens use a 64-byte JOSE ES256 signature", async () =>
   const { privateKey } = crypto.generateKeyPairSync("ec", {
     namedCurve: "prime256v1",
   });
-  let capturedAuthorizationHeader = null;
+  let capturedHeaders = null;
 
   const client = createAPNsClient({
     teamId: "TEAM123456",
     keyId: "KEY1234567",
     bundleId: "com.example.remodex",
     privateKey: privateKey.export({ type: "pkcs8", format: "pem" }),
+    now: () => 1_700_000_000_000,
     http2Connect() {
       return {
         on() {},
         request(headers) {
-          capturedAuthorizationHeader = headers.authorization;
+          capturedHeaders = headers;
           const request = new EventEmitter();
           request.setEncoding = () => {};
           request.end = () => {
@@ -48,13 +49,16 @@ test("APNs authorization tokens use a 64-byte JOSE ES256 signature", async () =>
     apnsEnvironment: "development",
     title: "Ready",
     body: "Response ready",
+    collapseId: "a".repeat(64),
   });
 
-  const token = String(capturedAuthorizationHeader || "").replace(/^bearer\s+/i, "");
+  const token = String(capturedHeaders?.authorization || "").replace(/^bearer\s+/i, "");
   const [, , encodedSignature] = token.split(".");
   const signature = decodeBase64URL(encodedSignature);
 
   assert.equal(signature.length, 64);
+  assert.equal(capturedHeaders["apns-expiration"], "1700000300");
+  assert.equal(capturedHeaders["apns-collapse-id"], "a".repeat(64));
 });
 
 test("a session-level error rejects sendNotification instead of crashing the process", async () => {
