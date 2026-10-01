@@ -186,6 +186,12 @@ enum SidebarThreadGrouping {
         _ thread: CodexThread,
         projectlessRootPaths: [String] = []
     ) -> Bool {
+        // A non-null app-server assignment always wins. Null remains compatible
+        // with older local projects whose membership is represented by cwd.
+        if thread.hasCanonicalProjectAssignment {
+            return false
+        }
+
         thread.normalizedProjectPath == nil
             || isUnderProjectlessRoot(thread.normalizedProjectPath, roots: projectlessRootPaths)
             || isGeneratedCodexProjectlessPath(thread.normalizedProjectPath)

@@ -201,6 +201,44 @@ function readSessionJsonlMetadataFromFile(filePath, {
   }
 }
 
+function readLatestSessionJsonlCwdFromFile(filePath, {
+  fsModule = fs,
+  maxTailBytes = DEFAULT_SESSION_JSONL_MAX_TAIL_BYTES,
+} = {}) {
+  if (!filePath) return "";
+  if (!supportsBoundedSessionJsonlReads(fsModule)) {
+    return parseLatestSessionJsonlCwd(fsModule.readFileSync(filePath, "utf8"));
+  }
+  const stat = fsModule.statSync(filePath);
+  const snapshotSize = Math.max(0, Number(stat?.size) || 0);
+  if (snapshotSize === 0) return "";
+  const tailBytes = Math.min(snapshotSize, Math.max(1, maxTailBytes));
+  const fileHandle = fsModule.openSync(filePath, "r");
+  try {
+    const buffer = readSessionJsonlRange(fileHandle, snapshotSize - tailBytes, tailBytes, fsModule);
+    const aligned = alignSessionJsonlTailBuffer(buffer, snapshotSize - tailBytes);
+    return parseLatestSessionJsonlCwd(aligned?.buffer.toString("utf8") || buffer.toString("utf8"));
+  } finally {
+    fsModule.closeSync(fileHandle);
+  }
+}
+
+function parseLatestSessionJsonlCwd(content) {
+  let cwd = "";
+  for (const line of String(content || "").split("\n")) {
+    try {
+      const entry = JSON.parse(line);
+      if (entry?.type !== "session_meta" && entry?.type !== "turn_context") continue;
+      const payload = objectValue(entry.payload);
+      cwd = normalizeString(payload?.cwd)
+        || normalizeString(payload?.current_working_directory)
+        || normalizeString(payload?.working_directory)
+        || cwd;
+    } catch {}
+  }
+  return cwd;
+}
+
 // Every exit path of readSessionJsonlMetadataFromFile returns this shape so callers
 // can read provenance without knowing which branch produced the result.
 function emptySessionJsonlMetadata() {
@@ -1523,8 +1561,10 @@ function normalizeString(value) {
 module.exports = {
   JSONL_OLDER_HANDOFF_CURSOR,
   parseSessionJsonlMetadata,
+  parseLatestSessionJsonlCwd,
   parseSessionJsonlTurns,
   readRecentSessionJsonlTurns,
   readSessionJsonlMetadataFromFile,
+  readLatestSessionJsonlCwdFromFile,
   readThreadTurnsListPageFromSessionJsonl,
 };

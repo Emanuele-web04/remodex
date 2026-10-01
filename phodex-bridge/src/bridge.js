@@ -78,6 +78,7 @@ const {
 } = require("./thread-activity-projector");
 const { createThreadActivityStore } = require("./thread-activity-store");
 const { createThreadListProvenanceEnricher } = require("./thread-list-provenance");
+const { normalizeThreadProjectClassification } = require("./thread-project-classification");
 const { createWorktreeOriginEnricher } = require("./worktree-origin");
 const { forEachThreadRowInResponse } = require("./thread-row-enrichment");
 const { version: bridgePackageVersion = "" } = require("../package.json");
@@ -92,6 +93,7 @@ const {
   JSONL_OLDER_HANDOFF_CURSOR,
   parseSessionJsonlTurns,
   readRecentSessionJsonlTurns,
+  readLatestSessionJsonlCwdFromFile,
   readSessionJsonlMetadataFromFile,
   readThreadTurnsListPageFromSessionJsonl,
 } = require("./session-jsonl-history");
@@ -1976,6 +1978,9 @@ function startBridge({
         }
         threadRuntimeSettingsStore.attachToThread(thread);
         threadListProvenanceEnricher.attachToThread(thread);
+        normalizeThreadProjectClassification(thread, {
+          latestCwd: readLatestSessionJsonlCwdFromFile(thread.path || thread.rolloutPath),
+        });
         worktreeOriginEnricher.attachToThread(thread);
         if (trackedRequest.method !== "thread/list") {
           desktopIpcActionFollower?.observeThreadMetadata(thread);
