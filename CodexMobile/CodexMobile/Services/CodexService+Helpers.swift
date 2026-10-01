@@ -51,6 +51,7 @@ extension CodexService {
         applyRemoteRuntimeSettings(from: incomingThread)
         if treatAsServerState {
             restoredThreadSnapshotIDs.remove(incomingThread.id)
+            serverConfirmedThreadIDs.insert(incomingThread.id)
         }
         let existingThread = self.thread(for: incomingThread.id)
         var resolvedThread = mergedThread(
@@ -227,6 +228,16 @@ extension CodexService {
         }
 
         return normalizedPersistedThreadName(renamedThreadNameByThreadID[normalizedThreadId])
+    }
+
+    func persistPendingThreadRenames() {
+        let defaultsKey = macScopedDefaultsKey(Self.pendingThreadRenamesDefaultsKey)
+        guard !pendingThreadRenameByThreadID.isEmpty,
+              let encoded = try? encoder.encode(pendingThreadRenameByThreadID) else {
+            defaults.removeObject(forKey: defaultsKey)
+            return
+        }
+        defaults.set(encoded, forKey: defaultsKey)
     }
 
     // Reapplies local rename intent after server refreshes so stale list payloads cannot reset titles.

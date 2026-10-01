@@ -179,10 +179,12 @@ extension CodexService {
         }
 
         do {
-            // Poll recent metadata only; listThreads() uses the same cap during reconnect/refresh.
             let activeThreads = try await fetchCoalescedServerThreads(limit: recentActiveThreadListLimit)
 
-            reconcileLocalThreadsWithServer(activeThreads)
+            reconcileLocalThreadsWithServer(
+                activeThreads,
+                removeMissingServerThreads: false
+            )
             debugSyncLog("sync thread/list active=\(activeThreads.count) local=\(threads.count)")
         } catch {
             // A capped thread/list timing out while the socket still accepts writes is the
@@ -219,9 +221,36 @@ extension CodexService {
         }
     }
 
-    func reconcileLocalThreadsWithServer(_ serverThreads: [CodexThread]) {
-        let localByID = Dictionary(uniqueKeysWithValues: threads.map { ($0.id, $0) })
+    func reconcileLocalThreadsWithServer(
+        _ serverThreads: [CodexThread],
+        removeMissingServerThreads: Bool = false,
+        archivedServerThreadIDs: Set<String> = []
+    ) {
         let serverThreadIDs = Set(serverThreads.map(\.id))
+        if removeMissingServerThreads {
+            let remotelyDeletedThreadIDs = threads.compactMap { thread -> String? in
+                guard thread.syncState == .live,
+                      (serverConfirmedThreadIDs.contains(thread.id)
+                          || restoredThreadSnapshotIDs.contains(thread.id)),
+                      !serverThreadIDs.contains(thread.id),
+                      !locallyDeletedThreadIDs.contains(thread.id),
+                      !locallyArchivedThreadIDs.contains(thread.id) else {
+                    return nil
+                }
+                return thread.id
+            }
+            for threadID in remotelyDeletedThreadIDs {
+                if archivedServerThreadIDs.contains(threadID) {
+                    setThreadArchivedLocally(threadID, isArchived: true)
+                    removeLocallyArchivedThreadID(threadID)
+                } else {
+                    removeThreadLocally(threadID, persistAsDeleted: false)
+                }
+            }
+        }
+        serverConfirmedThreadIDs.formUnion(serverThreadIDs)
+
+        let localByID = Dictionary(uniqueKeysWithValues: threads.map { ($0.id, $0) })
         let persistedArchivedIDs = locallyArchivedThreadIDs
         let persistedDeletedIDs = locallyDeletedThreadIDs
 
@@ -238,10 +267,11 @@ extension CodexService {
             }
 
             var liveThread = serverThread
+            reconcilePersistedThreadRename(with: liveThread)
 
             if let localThread = localByID[liveThread.id] {
                 liveThread = mergedThread(liveThread, with: localThread, treatAsServerState: true)
-                liveThread.syncState = localThread.syncState
+                liveThread.syncState = persistedArchivedIDs.contains(liveThread.id) ? .archivedLocal : .live
             } else if persistedArchivedIDs.contains(liveThread.id) {
                 liveThread.syncState = .archivedLocal
             } else {
@@ -320,6 +350,17 @@ extension CodexService {
                 _ = await self?.routePendingNotificationOpenIfPossible(refreshIfNeeded: false)
             }
         }
+    }
+
+    func reconcileCompleteThreadCatalog(
+        activeThreads: [CodexThread],
+        archivedThreads: [CodexThread]
+    ) {
+        reconcileLocalThreadsWithServer(
+            activeThreads,
+            removeMissingServerThreads: true,
+            archivedServerThreadIDs: Set(archivedThreads.map(\.id))
+        )
     }
 
     func handleMissingThread(_ threadId: String) {
@@ -506,6 +547,8 @@ extension CodexService {
     }
 
     private func sendThreadNameSetRPC(threadId: String, name: String) {
+        pendingThreadRenameByThreadID[threadId] = name
+        persistPendingThreadRenames()
         guard isConnected, webSocketConnection != nil || webSocketTask != nil else { return }
         Task { @MainActor [weak self] in
             guard let self else { return }
@@ -517,11 +560,42 @@ extension CodexService {
                         "name": .string(name),
                     ])
                 )
+                if self.pendingThreadRenameByThreadID[threadId] == name {
+                    self.pendingThreadRenameByThreadID.removeValue(forKey: threadId)
+                    self.persistPendingThreadRenames()
+                    self.persistThreadRename(nil, for: threadId)
+                    self.requestImmediateSync()
+                }
                 self.debugSyncLog("thread/name/set RPC success: \(threadId)")
             } catch {
                 self.debugSyncLog("thread/name/set RPC failed (non-fatal): \(error.localizedDescription)")
             }
         }
+    }
+
+    func applyRemoteThreadDeletion(threadId: String) {
+        // Child threads remain independent server conversations when their parent
+        // is deleted, so remove only the id app-server declared deleted.
+        removeThreadLocally(threadId, persistAsDeleted: false, persistMessages: false)
+        persistCurrentMacMessages()
+        if activeThreadId == nil {
+            activeThreadId = firstLiveThreadID()
+        }
+        debugSyncLog("thread deleted remotely: \(threadId)")
+    }
+
+    private func reconcilePersistedThreadRename(with serverThread: CodexThread) {
+        guard persistedThreadRename(for: serverThread.id) != nil else {
+            return
+        }
+        if let pendingName = pendingThreadRenameByThreadID[serverThread.id] {
+            guard serverThread.name?.trimmingCharacters(in: .whitespacesAndNewlines) == pendingName else {
+                return
+            }
+            pendingThreadRenameByThreadID.removeValue(forKey: serverThread.id)
+            persistPendingThreadRenames()
+        }
+        persistThreadRename(nil, for: serverThread.id)
     }
 
     // Removes every thread in a sidebar group without issuing per-thread RPC mutations.
@@ -652,6 +726,10 @@ extension CodexService {
         clearThreadServiceTierOverride(for: threadId)
 
         threads.removeAll { $0.id == threadId }
+        serverConfirmedThreadIDs.remove(threadId)
+        restoredThreadSnapshotIDs.remove(threadId)
+        pendingThreadRenameByThreadID.removeValue(forKey: threadId)
+        persistPendingThreadRenames()
 
         clearRunningState(for: threadId)
         removeThreadTimelineState(for: threadId)

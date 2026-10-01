@@ -231,7 +231,7 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
         let startedAt = Date()
         debugSidebarLog("refreshThreads start threadCount=\(codex.threads.count)")
         do {
-            try await codex.listThreads()
+            try await codex.listAllThreads()
             debugSidebarLog(
                 "refreshThreads success durationMs=\(Int(Date().timeIntervalSince(startedAt) * 1000)) "
                     + "threadCount=\(codex.threads.count)"

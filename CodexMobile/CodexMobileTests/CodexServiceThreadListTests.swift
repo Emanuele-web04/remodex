@@ -210,6 +210,99 @@ final class CodexServiceThreadListTests: XCTestCase {
         XCTAssertNil(reloadedService.thread(for: "stale-cached-thread"))
     }
 
+    func testCompleteThreadListRemovesThreadDeletedOnDesktop() {
+        let service = makeService()
+        service.threads = [
+            CodexThread(id: "still-live", title: "Still live"),
+            CodexThread(id: "deleted-on-desktop", title: "Deleted on Desktop"),
+        ]
+        service.serverConfirmedThreadIDs = Set(["still-live", "deleted-on-desktop"])
+
+        service.reconcileLocalThreadsWithServer(
+            [CodexThread(id: "still-live", title: "Still live")],
+            removeMissingServerThreads: true
+        )
+
+        XCTAssertEqual(service.threads.map(\.id), ["still-live"])
+        XCTAssertFalse(service.locallyDeletedThreadIDs.contains("deleted-on-desktop"))
+    }
+
+    func testCappedThreadListKeepsRowsMissingFromCurrentPage() {
+        let service = makeService()
+        service.threads = [
+            CodexThread(id: "visible", title: "Visible"),
+            CodexThread(id: "outside-page", title: "Outside page"),
+        ]
+
+        service.reconcileLocalThreadsWithServer(
+            [CodexThread(id: "visible", title: "Visible")],
+            removeMissingServerThreads: false
+        )
+
+        XCTAssertEqual(Set(service.threads.map(\.id)), Set(["visible", "outside-page"]))
+    }
+
+    func testCompleteThreadListRemovesMissingRestoredSnapshotOnFirstRefresh() {
+        let service = makeService()
+        service.threads = [CodexThread(id: "stale-cache", title: "Deleted on Desktop")]
+        service.restoredThreadSnapshotIDs = ["stale-cache"]
+
+        service.reconcileLocalThreadsWithServer([], removeMissingServerThreads: true)
+
+        XCTAssertNil(service.thread(for: "stale-cache"))
+        XCTAssertFalse(service.restoredThreadSnapshotIDs.contains("stale-cache"))
+    }
+
+    func testCompleteThreadListDoesNotDeleteUnconfirmedLocalDraft() {
+        let service = makeService()
+        service.threads = [CodexThread(id: "local-draft", title: "Unsaved draft")]
+
+        service.reconcileLocalThreadsWithServer([], removeMissingServerThreads: true)
+
+        XCTAssertNotNil(service.thread(for: "local-draft"))
+    }
+
+    func testCompleteThreadListKeepsChildWhenDesktopDeletesParent() {
+        let service = makeService()
+        service.threads = [
+            CodexThread(id: "parent", title: "Parent"),
+            CodexThread(id: "child", title: "Child", parentThreadId: "parent"),
+        ]
+        service.serverConfirmedThreadIDs = ["parent", "child"]
+
+        service.reconcileLocalThreadsWithServer(
+            [CodexThread(id: "child", title: "Child", parentThreadId: "parent")],
+            removeMissingServerThreads: true
+        )
+
+        XCTAssertNil(service.thread(for: "parent"))
+        XCTAssertNotNil(service.thread(for: "child"))
+    }
+
+    func testCompleteCatalogDistinguishesDesktopArchiveFromDelete() {
+        let service = makeService()
+        service.threads = [
+            CodexThread(id: "archived", title: "Archived"),
+            CodexThread(id: "deleted", title: "Deleted"),
+        ]
+        service.serverConfirmedThreadIDs = ["archived", "deleted"]
+
+        service.reconcileCompleteThreadCatalog(
+            activeThreads: [],
+            archivedThreads: [CodexThread(id: "archived", title: "Archived")]
+        )
+
+        XCTAssertEqual(service.thread(for: "archived")?.syncState, .archivedLocal)
+        XCTAssertFalse(service.locallyArchivedThreadIDs.contains("archived"))
+        XCTAssertNil(service.thread(for: "deleted"))
+
+        service.reconcileCompleteThreadCatalog(
+            activeThreads: [CodexThread(id: "archived", title: "Unarchived")],
+            archivedThreads: []
+        )
+        XCTAssertEqual(service.thread(for: "archived")?.syncState, .live)
+    }
+
     func testRestoredThreadStateFollowsCurrentLocalArchiveDefaults() {
         let suiteName = "CodexServiceThreadListTests.archive-cache.\(UUID().uuidString)"
         let cacheMacDeviceID = "test-mac-\(UUID().uuidString)"

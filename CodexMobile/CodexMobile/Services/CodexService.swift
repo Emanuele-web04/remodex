@@ -739,6 +739,12 @@ final class CodexService {
     @ObservationIgnored var canonicalHistoryReconcileRetryAttemptByThreadID: [String: Int] = [:]
     // Coalesces sidebar/bootstrap thread/list refreshes so launch paths do not duplicate the same fetch.
     @ObservationIgnored var threadListFetchTaskByLimit: [Int: (id: UUID, task: Task<[CodexThread], Error>)] = [:]
+    // A phone rename remains locally authoritative only until app-server confirms it.
+    // After confirmation, later Desktop renames must become visible on the phone.
+    @ObservationIgnored var pendingThreadRenameByThreadID: [String: String] = [:]
+    // Deletion reconciliation applies only to rows previously confirmed by a complete
+    // server catalog, so local drafts and one-page cache placeholders are never pruned.
+    @ObservationIgnored var serverConfirmedThreadIDs: Set<String> = []
     var isAppInForeground = true
     // Network quality flag: when true, sync and keepalive intervals are stretched to reduce
     // bandwidth usage on constrained connections (Low Data Mode, hotspot tethering).
@@ -887,6 +893,7 @@ final class CodexService {
     static let locallyDeletedThreadIDsKey = "codex.locallyDeletedThreadIDs"
     static let forkedThreadOriginsDefaultsKey = "codex.forkedThreadOrigins"
     static let renamedThreadNamesDefaultsKey = "codex.renamedThreadNames"
+    static let pendingThreadRenamesDefaultsKey = "codex.pendingThreadRenames"
     static let pinnedThreadIDsDefaultsKey = "codex.pinnedThreadIDs"
     static let pinnedThreadSnapshotsDefaultsKey = "codex.pinnedThreadSnapshots"
     static let associatedManagedWorktreePathsDefaultsKey = "codex.associatedManagedWorktreePaths"

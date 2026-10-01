@@ -116,6 +116,117 @@ final class CodexThreadRenamePersistenceTests: XCTestCase {
         XCTAssertEqual(secondReloadedService.thread(for: "thread-1")?.displayTitle, "Phone Rename")
     }
 
+    func testDesktopRenameNotificationSupersedesConfirmedPhoneRename() {
+        let suiteName = "CodexThreadRenamePersistenceTests.desktop.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Expected isolated UserDefaults suite")
+            return
+        }
+        defaults.removePersistentDomain(forName: suiteName)
+
+        let service = CodexService(defaults: defaults)
+        service.threads = [CodexThread(id: "thread-1", title: "Original")]
+        service.renameThread("thread-1", name: "Phone Rename")
+        service.pendingThreadRenameByThreadID.removeValue(forKey: "thread-1")
+
+        service.handleIncomingRPCMessage(RPCMessage(
+            method: "thread/name/updated",
+            params: .object([
+                "threadId": .string("thread-1"),
+                "name": .string("Desktop Rename"),
+            ])
+        ))
+
+        XCTAssertEqual(service.thread(for: "thread-1")?.displayTitle, "Desktop Rename")
+        XCTAssertNil(service.persistedThreadRename(for: "thread-1"))
+    }
+
+    func testStaleRenameNotificationDoesNotOverrideNewerPendingPhoneRename() {
+        let suiteName = "CodexThreadRenamePersistenceTests.stale.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Expected isolated UserDefaults suite")
+            return
+        }
+        defaults.removePersistentDomain(forName: suiteName)
+
+        let service = CodexService(defaults: defaults)
+        service.threads = [CodexThread(id: "thread-1", title: "Original")]
+        service.renameThread("thread-1", name: "Newest phone rename")
+
+        service.handleIncomingRPCMessage(RPCMessage(
+            method: "thread/name/updated",
+            params: .object([
+                "threadId": .string("thread-1"),
+                "name": .string("Older rename"),
+            ])
+        ))
+
+        XCTAssertEqual(service.thread(for: "thread-1")?.displayTitle, "Newest phone rename")
+        XCTAssertEqual(service.persistedThreadRename(for: "thread-1"), "Newest phone rename")
+    }
+
+    func testPendingPhoneRenameSurvivesServiceReloadUntilServerConfirmsIt() {
+        let suiteName = "CodexThreadRenamePersistenceTests.pending.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Expected isolated UserDefaults suite")
+            return
+        }
+        defaults.removePersistentDomain(forName: suiteName)
+
+        let service = CodexService(defaults: defaults)
+        service.threads = [CodexThread(id: "thread-1", title: "Original")]
+        service.renameThread("thread-1", name: "Phone Rename")
+
+        let reloadedService = CodexService(defaults: defaults)
+        reloadedService.loadMacScopedDefaultsState(for: nil)
+
+        XCTAssertEqual(reloadedService.pendingThreadRenameByThreadID["thread-1"], "Phone Rename")
+    }
+
+    func testThreadDeletedNotificationRemovesLocalThreadWithoutTombstone() {
+        let suiteName = "CodexThreadRenamePersistenceTests.delete.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Expected isolated UserDefaults suite")
+            return
+        }
+        defaults.removePersistentDomain(forName: suiteName)
+
+        let service = CodexService(defaults: defaults)
+        service.threads = [CodexThread(id: "thread-1", title: "Delete me")]
+        service.renameThread("thread-1", name: "Local rename")
+
+        service.handleIncomingRPCMessage(RPCMessage(
+            method: "thread/deleted",
+            params: .object(["threadId": .string("thread-1")])
+        ))
+
+        XCTAssertNil(service.thread(for: "thread-1"))
+        XCTAssertNil(service.persistedThreadRename(for: "thread-1"))
+        XCTAssertFalse(service.locallyDeletedThreadIDs.contains("thread-1"))
+    }
+
+    func testFreshServerListClearsStaleRenameAfterRelaunch() {
+        let suiteName = "CodexThreadRenamePersistenceTests.reconcile.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Expected isolated UserDefaults suite")
+            return
+        }
+        defaults.removePersistentDomain(forName: suiteName)
+
+        let firstService = CodexService(defaults: defaults)
+        firstService.threads = [CodexThread(id: "thread-1", title: "Original")]
+        firstService.renameThread("thread-1", name: "Phone Rename")
+
+        let reloadedService = CodexService(defaults: defaults)
+        reloadedService.threads = [CodexThread(id: "thread-1", title: "Phone Rename")]
+        reloadedService.reconcileLocalThreadsWithServer([
+            CodexThread(id: "thread-1", title: "Desktop Rename", name: "Desktop Rename"),
+        ])
+
+        XCTAssertEqual(reloadedService.thread(for: "thread-1")?.displayTitle, "Desktop Rename")
+        XCTAssertNil(reloadedService.persistedThreadRename(for: "thread-1"))
+    }
+
     func testServerTitleOnlyRenameDoesNotOverridePersistedLocalRename() {
         let suiteName = "CodexThreadRenamePersistenceTests.\(UUID().uuidString)"
         guard let defaults = UserDefaults(suiteName: suiteName) else {

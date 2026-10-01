@@ -278,6 +278,9 @@ extension CodexService {
         case "thread/name/updated":
             handleThreadNameUpdated(paramsObject)
 
+        case "thread/deleted":
+            handleThreadDeleted(paramsObject)
+
         case "thread/status/changed":
             handleThreadStatusChanged(paramsObject)
 
@@ -431,6 +434,7 @@ extension CodexService {
         "thread/unarchived",
         "thread/replaced",
         "thread/name/updated",
+        "thread/deleted",
         "thread/status/changed",
         "thread/tokenUsage/updated",
         "thread/goal/updated",
@@ -671,12 +675,15 @@ extension CodexService {
         let threadName = firstStringValue(in: paramsObject, keys: renameKeys)
             ?? firstStringValue(in: eventObject, keys: renameKeys)
         let normalizedThreadName = normalizedIdentifier(threadName)
-        let hasLocalRename = persistedThreadRename(for: threadId) != nil
+        if let pendingName = pendingThreadRenameByThreadID[threadId],
+           normalizedThreadName != pendingName {
+            return
+        }
+        pendingThreadRenameByThreadID.removeValue(forKey: threadId)
+        persistPendingThreadRenames()
+        persistThreadRename(nil, for: threadId)
 
         if let normalizedThreadName, !normalizedThreadName.isEmpty {
-            guard !hasLocalRename else {
-                return
-            }
             if let existingIndex = threadIndex(for: threadId) {
                 threads[existingIndex].title = normalizedThreadName
                 threads[existingIndex].name = normalizedThreadName
@@ -696,7 +703,6 @@ extension CodexService {
 
         // If server explicitly sends an empty/null name, clear local custom title.
         guard hasExplicitRenameField,
-              !hasLocalRename,
               let existingIndex = threadIndex(for: threadId) else {
             return
         }
@@ -705,6 +711,15 @@ extension CodexService {
         threads[existingIndex].name = nil
         threads = sortThreads(threads)
         requestImmediateSync(threadId: threadId)
+    }
+
+    private func handleThreadDeleted(_ paramsObject: IncomingParamsObject?) {
+        guard let threadId = extractThreadID(from: paramsObject)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !threadId.isEmpty else {
+            return
+        }
+        applyRemoteThreadDeletion(threadId: threadId)
     }
 
     private func handleTurnStarted(_ paramsObject: IncomingParamsObject?) {
