@@ -1360,6 +1360,7 @@ function startBridge({
       readBridgePreferences,
       updateBridgePreferences,
       updateBridgePackageAndRestart,
+      releaseThreadForDesktop: (threadId) => desktopIpcLiveOwner?.releaseThreadForDesktop(threadId),
     })) {
       return;
     }

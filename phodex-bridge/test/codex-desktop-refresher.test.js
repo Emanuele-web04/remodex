@@ -148,6 +148,7 @@ test("readBridgeConfig keeps safe defaults and explicit overrides", () => {
   assert.equal(macConfig.desktopIpcLiveSyncEnabled, true);
   assert.equal(macConfig.desktopAutoFollowEnabled, false);
   assert.equal(macConfig.desktopIpcSnapshotDebounceMs, 75);
+  assert.equal(macConfig.codexAppPath, "/Applications/Codex.app");
   assert.equal(persistedKeepAwakeConfig.keepMacAwakeEnabled, false);
   assert.equal(macEndpointConfig.refreshEnabled, false);
   assert.equal(linuxConfig.refreshEnabled, false);
@@ -162,6 +163,24 @@ test("readBridgeConfig keeps safe defaults and explicit overrides", () => {
   assert.equal(explicitOffConfig.desktopIpcSnapshotDebounceMs, 25);
   assert.equal(explicitOffConfig.keepMacAwakeEnabled, false);
   assert.equal(explicitAutoFollowOffConfig.desktopAutoFollowEnabled, false);
+});
+
+test("readBridgeConfig falls back to ChatGPT.app for current Codex Desktop builds", () => {
+  const config = readBridgeConfig({
+    env: {},
+    platform: "darwin",
+    runtimeRoot: "/tmp/remodex-package",
+    fsImpl: {
+      existsSync(targetPath) {
+        return targetPath === "/Applications/ChatGPT.app";
+      },
+      readFileSync() {
+        throw new Error("unexpected read");
+      },
+    },
+  });
+
+  assert.equal(config.codexAppPath, "/Applications/ChatGPT.app");
 });
 
 test("readBridgeConfig uses only the packaged relay default outside a source checkout", () => {

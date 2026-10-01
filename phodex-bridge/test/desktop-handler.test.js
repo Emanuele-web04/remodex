@@ -72,6 +72,82 @@ test("desktop/continueOnMac relaunches Codex for the requested thread", async ()
   }]);
 });
 
+test("desktop/continueOnMac releases the Remodex writer after closing Desktop and before reopening it", async () => {
+  const events = [];
+  const responses = [];
+  let running = true;
+
+  handleDesktopRequest(JSON.stringify({
+    id: "request-release",
+    method: "desktop/continueOnMac",
+    params: { threadId: "thread-owned-by-remodex" },
+  }), (response) => {
+    responses.push(JSON.parse(response));
+  }, {
+    platform: "darwin",
+    bundleId: "com.openai.codex",
+    appPath: "/Applications/ChatGPT.app",
+    executor: async (command, args) => {
+      if (command === "pkill") {
+        running = false;
+        events.push("close-desktop");
+      } else if (command === "open" && args.length === 2) {
+        events.push("open-desktop");
+      } else if (command === "open") {
+        events.push("open-thread");
+      }
+      return { stdout: "", stderr: "" };
+    },
+    isAppRunning: async () => running,
+    releaseThreadForDesktop: async (threadId) => {
+      assert.equal(threadId, "thread-owned-by-remodex");
+      events.push("release-writer");
+    },
+    sleepFn: async () => {},
+    threadMaterializeWaitMs: 0,
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.deepEqual(events, [
+    "close-desktop",
+    "release-writer",
+    "open-desktop",
+    "open-thread",
+  ]);
+  assert.equal(responses[0].result?.success, true);
+});
+
+test("desktop/continueOnMac stops when the Remodex writer cannot be released", async () => {
+  const executorCalls = [];
+  const responses = [];
+
+  handleDesktopRequest(JSON.stringify({
+    id: "request-release-failure",
+    method: "desktop/continueOnMac",
+    params: { threadId: "thread-still-running" },
+  }), (response) => {
+    responses.push(JSON.parse(response));
+  }, {
+    platform: "darwin",
+    executor: async (...args) => {
+      executorCalls.push(args);
+      return { stdout: "", stderr: "" };
+    },
+    isAppRunning: async () => false,
+    releaseThreadForDesktop: async () => {
+      throw new Error("turn is active");
+    },
+    sleepFn: async () => {},
+    threadMaterializeWaitMs: 0,
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(executorCalls.length, 0);
+  assert.equal(responses[0].error?.data?.errorCode, "handoff_writer_release_failed");
+});
+
 test("desktop/continueOnMac boots Codex before deep-linking unknown threads", async () => {
   const executorCalls = [];
   const responses = [];

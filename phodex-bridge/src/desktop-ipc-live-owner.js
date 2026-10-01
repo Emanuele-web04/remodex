@@ -1935,6 +1935,28 @@ function createDesktopIpcLiveOwner({
       const updatedAt = Number(conversations.get(normalizedThreadId)?.updatedAt) || 0;
       return now() - updatedAt <= liveOwnershipFreshnessMs;
     },
+    async releaseThreadForDesktop(threadId) {
+      const normalizedThreadId = readString(threadId);
+      if (!ownedThreadIds.has(normalizedThreadId)) {
+        return false;
+      }
+      if (hasActiveLocalTurn(normalizedThreadId)) {
+        throw new Error("Wait for the active Remodex turn to finish before handing this task to Desktop.");
+      }
+
+      // App-server unsubscribe only detaches event delivery and intentionally
+      // keeps the rollout loaded, so its writer lock remains held. Cycling the
+      // idle thread through archive/unarchive unloads it and restores the same
+      // active history without reacquiring the writer. Both calls must finish
+      // before Desktop opens the thread and attempts to become its writer.
+      await sendCodexRequest("thread/archive", { threadId: normalizedThreadId });
+      await sendCodexRequest("thread/unarchive", { threadId: normalizedThreadId });
+      removeOwnedThread(normalizedThreadId, {
+        broadcastRemoval: true,
+        reason: "desktop/handoff",
+      });
+      return true;
+    },
     _debugSnapshot(threadId) {
       return cloneJSON(conversations.get(threadId) || null);
     },
@@ -1950,6 +1972,9 @@ function createDisabledDesktopIpcLiveOwner() {
       return false;
     },
     isFreshThreadOwned() {
+      return false;
+    },
+    async releaseThreadForDesktop() {
       return false;
     },
   };
