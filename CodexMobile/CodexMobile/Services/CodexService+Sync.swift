@@ -105,6 +105,13 @@ extension CodexService {
             if isConnected && isInitialized {
                 startWebSocketKeepAliveLoop()
                 startSyncLoop()
+                // A suspended app can miss terminal Desktop IPC deltas while its cached
+                // closed thread still looks hydrated. Reconcile the visible thread once.
+                if let activeThreadId,
+                   !threadHasActiveOrRunningTurn(activeThreadId),
+                   !shouldShowImmediateEmptyPlaceholder(threadId: activeThreadId) {
+                    markThreadNeedingCanonicalHistoryReconcile(activeThreadId)
+                }
                 requestImmediateSync(threadId: activeThreadId)
                 // Re-check bridge-managed state when the app becomes active again.
                 Task { @MainActor [weak self] in
