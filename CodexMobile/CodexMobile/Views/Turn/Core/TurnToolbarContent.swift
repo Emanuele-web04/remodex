@@ -41,7 +41,63 @@ struct TurnToolbarContent: ToolbarContent {
     @Binding var isShowingPathSheet: Bool
 
     var body: some ToolbarContent {
-        let isThreadActionLoading = isHandingOffToMac || isStartingNewChat
+        if #available(iOS 26.0, *) {
+            modernBody
+        } else {
+            legacyBody
+        }
+    }
+
+    // iOS 26: adjacent ToolbarItems share one glass capsule, so git actions
+    // and the thread menu stay as separate items and the system merges them.
+    @ToolbarContentBuilder
+    private var modernBody: some ToolbarContent {
+        ToolbarItem(placement: .title) {
+            titleTapTarget
+        }
+        if showsGitActions {
+            ToolbarItem(placement: .topBarTrailing) {
+                gitActionsButton
+            }
+        }
+        if showsThreadActions {
+            ToolbarItem(placement: .topBarTrailing) {
+                threadActionsButton
+            }
+        }
+    }
+
+    // iOS < 26: the system does not auto-merge adjacent ToolbarItems, so when
+    // both controls are shown TurnToolbarActionCluster renders them inside a
+    // single shared material capsule instead. The three cases are mutually
+    // exclusive by construction.
+    @ToolbarContentBuilder
+    private var legacyBody: some ToolbarContent {
+        ToolbarItem(placement: .principal) {
+            titleTapTarget
+        }
+        if showsGitActions && showsThreadActions {
+            ToolbarItem(placement: .topBarTrailing) {
+                legacyActionCluster
+            }
+        }
+        if showsGitActions && !showsThreadActions {
+            ToolbarItem(placement: .topBarTrailing) {
+                gitActionsButton
+            }
+        }
+        if !showsGitActions && showsThreadActions {
+            ToolbarItem(placement: .topBarTrailing) {
+                threadActionsButton
+            }
+        }
+    }
+
+    private var isThreadActionLoading: Bool {
+        isHandingOffToMac || isStartingNewChat
+    }
+
+    private var threadActions: [TurnThreadActionMenuItem] {
         let canTapMacHandoff = onTapMacHandoff != nil && !isThreadActionLoading
         // Worktree handoff has its own Git/worktree gates; keep it aligned with the composer Local menu.
         let canTapWorktreeHandoff = onTapWorktreeHandoff != nil
@@ -49,101 +105,61 @@ struct TurnToolbarContent: ToolbarContent {
             && !isCreatingGitWorktree
         let canTapNewChat = onTapNewChat != nil && !isThreadActionLoading
         let canTapTerminal = onTapTerminal != nil
-        let threadActions = threadActionItems(
+        return threadActionItems(
             canTapMacHandoff: canTapMacHandoff,
             canTapWorktreeHandoff: canTapWorktreeHandoff,
             canTapNewChat: canTapNewChat,
             canTapTerminal: canTapTerminal
         )
+    }
 
-        // Keep title + path as one leading-aligned control. Splitting them into
-        // iOS 26 `.title` / `.subtitle` placements lets the system align each
-        // row independently, which makes the stack look offset.
-        if #available(iOS 26.0, *) {
-            ToolbarItem(placement: .title) {
-                titleTapTarget
-            }
-        } else {
-            ToolbarItem(placement: .principal) {
-                titleTapTarget
-            }
-        }
+    private var gitActionsButton: some View {
+        TurnGitActionsToolbarButton(
+            isEnabled: isGitActionEnabled,
+            disabledActions: disabledGitActions,
+            isRunningAction: isRunningGitAction,
+            loadingTitle: gitActionLoadingTitle,
+            showsDiscardRuntimeChangesAndSync: showsDiscardRuntimeChangesAndSync,
+            gitSyncState: gitSyncState,
+            repoDiffTotals: repoDiffTotals,
+            isLoadingRepoDiff: isLoadingRepoDiff,
+            onTapRepoDiff: onTapRepoDiff,
+            onSelect: onGitAction
+        )
+    }
 
-        // Order: git actions sit closest to the title, the ellipsis thread-
-        // actions menu trails after them.
-        //
-        // iOS 26: emit two adjacent ToolbarItems with no ToolbarSpacer so the
-        // system merges them into a single shared glass capsule. Wrapping both
-        // buttons inside ONE ToolbarItem (e.g. via TurnToolbarActionCluster)
-        // breaks the inner UIKit ellipsis button — iOS 26 treats the HStack
-        // as a single control and the UIButton's menu/hit-testing regresses.
-        //
-        // iOS < 26: the system does not auto-merge adjacent ToolbarItems, so
-        // TurnToolbarActionCluster renders both buttons inside a single shared
-        // material capsule.
-        if showsGitActions, showsThreadActions {
-            if #available(iOS 26.0, *) {
-                ToolbarItem(placement: .topBarTrailing) {
-                    TurnGitActionsToolbarButton(
-                        isEnabled: isGitActionEnabled,
-                        disabledActions: disabledGitActions,
-                        isRunningAction: isRunningGitAction,
-                        loadingTitle: gitActionLoadingTitle,
-                        showsDiscardRuntimeChangesAndSync: showsDiscardRuntimeChangesAndSync,
-                        gitSyncState: gitSyncState,
-                        repoDiffTotals: repoDiffTotals,
-                        isLoadingRepoDiff: isLoadingRepoDiff,
-                        onTapRepoDiff: onTapRepoDiff,
-                        onSelect: onGitAction
-                    )
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    TurnThreadActionsMenuButton(
-                        isLoading: isThreadActionLoading,
-                        actions: threadActions
-                    )
-                }
-            } else {
-                ToolbarItem(placement: .topBarTrailing) {
-                    TurnToolbarActionCluster(
-                        isEnabled: isGitActionEnabled,
-                        disabledActions: disabledGitActions,
-                        isRunningAction: isRunningGitAction,
-                        loadingTitle: gitActionLoadingTitle,
-                        showsDiscardRuntimeChangesAndSync: showsDiscardRuntimeChangesAndSync,
-                        gitSyncState: gitSyncState,
-                        repoDiffTotals: repoDiffTotals,
-                        isLoadingRepoDiff: isLoadingRepoDiff,
-                        onTapRepoDiff: onTapRepoDiff,
-                        onGitAction: onGitAction,
-                        isThreadActionLoading: isThreadActionLoading,
-                        threadActions: threadActions
-                    )
-                }
-            }
-        } else if showsGitActions {
-            ToolbarItem(placement: .topBarTrailing) {
-                TurnGitActionsToolbarButton(
-                    isEnabled: isGitActionEnabled,
-                    disabledActions: disabledGitActions,
-                    isRunningAction: isRunningGitAction,
-                    loadingTitle: gitActionLoadingTitle,
-                    showsDiscardRuntimeChangesAndSync: showsDiscardRuntimeChangesAndSync,
-                    gitSyncState: gitSyncState,
-                    repoDiffTotals: repoDiffTotals,
-                    isLoadingRepoDiff: isLoadingRepoDiff,
-                    onTapRepoDiff: onTapRepoDiff,
-                    onSelect: onGitAction
-                )
-            }
-        } else if showsThreadActions {
-            ToolbarItem(placement: .topBarTrailing) {
-                TurnThreadActionsMenuButton(
-                    isLoading: isThreadActionLoading,
-                    actions: threadActions
-                )
-            }
-        }
+    private var threadActionsButton: some View {
+        TurnThreadActionsMenuButton(
+            isLoading: isThreadActionLoading,
+            actions: threadActions
+        )
+    }
+
+    // Keep title + path as one leading-aligned control. Splitting them into
+    // iOS 26 `.title` / `.subtitle` placements lets the system align each
+    // row independently, which makes the stack look offset.
+
+    // Order: git actions sit closest to the title, the ellipsis thread-
+    // actions menu trails after them. Wrapping both buttons inside ONE
+    // ToolbarItem on iOS 26 (e.g. via TurnToolbarActionCluster) breaks the
+    // inner UIKit ellipsis button — iOS 26 treats the HStack as a single
+    // control and the UIButton's menu/hit-testing regresses.
+
+    private var legacyActionCluster: some View {
+        TurnToolbarActionCluster(
+            isEnabled: isGitActionEnabled,
+            disabledActions: disabledGitActions,
+            isRunningAction: isRunningGitAction,
+            loadingTitle: gitActionLoadingTitle,
+            showsDiscardRuntimeChangesAndSync: showsDiscardRuntimeChangesAndSync,
+            gitSyncState: gitSyncState,
+            repoDiffTotals: repoDiffTotals,
+            isLoadingRepoDiff: isLoadingRepoDiff,
+            onTapRepoDiff: onTapRepoDiff,
+            onGitAction: onGitAction,
+            isThreadActionLoading: isThreadActionLoading,
+            threadActions: threadActions
+        )
     }
 
     // Hides worktree-only actions for rootless Quick Chat, where there is no real branch context.
