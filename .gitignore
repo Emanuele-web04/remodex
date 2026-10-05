@@ -45,8 +45,10 @@ output/
 # Temp files
 $TMP_PLACEHOLDER
 
-# Claude project config (local only)
-.claude/
+# Claude project config (local only, except shared skills)
+.claude/*
+!.claude/skills/
+!.claude/references/
 
 # VS Code
 .vscode/
