@@ -943,8 +943,8 @@ function sanitizeUserInputEntries(entries) {
   return normalizeDesktopInputEntries(sanitizeSharedUserInputEntries(entries)).map(cloneJSON);
 }
 
-// App-server defaults text_elements, but Desktop 26.903 reads its length
-// directly in IPC snapshots. Preserve existing spans and their byte offsets.
+// App-server defaults text_elements, but Desktop reads the array directly in
+// snapshots and follower requests. Preserve existing spans and byte offsets.
 function normalizeDesktopInputEntries(entries) {
   if (!Array.isArray(entries)) {
     return [];
@@ -1462,6 +1462,7 @@ module.exports = {
   createEmptyConversationState,
   ensureConversationInMap,
   mergeConversationTurnsFromThread,
+  normalizeDesktopInputEntries,
   normalizeSandboxPolicyCompatibility,
   normalizeThreadGoal,
   readThreadIdFromParams,

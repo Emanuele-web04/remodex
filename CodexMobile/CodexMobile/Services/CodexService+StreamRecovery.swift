@@ -93,6 +93,7 @@ extension CodexService {
             "threadId": .string(threadId),
             "input": .array([.object([
                 "type": .string("text"), "text": .string(CodexStreamFailure.continuationPrompt),
+                "text_elements": .array([]),
             ])]),
         ]
         if supportsRuntimeSettingsSync {
