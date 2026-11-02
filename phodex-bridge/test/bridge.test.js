@@ -279,7 +279,7 @@ test("normalizeRelayBoundJsonRpcMessage drops client-origin RPC requests before 
   );
 });
 
-test("resolveJsonlTurnsListRolloutPathForFallback searches JSONL for stale non-empty first pages", () => {
+test("resolveJsonlTurnsListRolloutPathForFallback only consults the cache for non-empty pages", () => {
   const calls = [];
   const rolloutPath = resolveJsonlTurnsListRolloutPathForFallback({
     threadId: "thread-jsonl-stale",
@@ -294,11 +294,8 @@ test("resolveJsonlTurnsListRolloutPathForFallback searches JSONL for stale non-e
     },
   });
 
-  assert.equal(rolloutPath, "/tmp/thread-jsonl-stale.jsonl");
-  assert.deepEqual(calls, [
-    ["cache", "thread-jsonl-stale"],
-    ["find", "thread-jsonl-stale"],
-  ]);
+  assert.equal(rolloutPath, "");
+  assert.deepEqual(calls, [["cache", "thread-jsonl-stale"]]);
 });
 
 test("resolveJsonlTurnsListRolloutPathForFallback rescans after empty canonical responses", () => {
@@ -1013,7 +1010,7 @@ test("newer JSONL turns never displace the canonical cursor anchor at limit one"
     ["turn-jsonl-newer", "turn-canonical-anchor"]
   );
   assert.equal(merged.result.nextCursor, "cursor-after-canonical-anchor");
-  assert.equal(merged.result.remodexJsonlFallback, true);
+  assert.equal(merged.result.remodexJsonlFallback, undefined);
   assert.equal(merged.result.remodexJsonlMergedLatest, true);
 });
 
