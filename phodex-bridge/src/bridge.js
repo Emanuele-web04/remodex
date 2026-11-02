@@ -3116,6 +3116,18 @@ function maybeMergeLatestJsonlTurnIntoTurnsListResponse(request, response, jsonl
     return null;
   }
 
+  const threadId = normalizeNonEmptyString(request.params?.threadId || request.params?.thread_id);
+  const jsonlThreadId = normalizeNonEmptyString(jsonlTurn.threadId || jsonlTurn.thread_id);
+  if (threadId && jsonlThreadId && threadId !== jsonlThreadId) {
+    return null;
+  }
+  const jsonlCreatedAt = threadListTimestamp(jsonlTurn.createdAt ?? jsonlTurn.created_at);
+  if (jsonlCreatedAt && responseTurns.some((turn) => (
+    threadListTimestamp(turn.createdAt ?? turn.created_at) >= jsonlCreatedAt
+  ))) {
+    return null;
+  }
+
   // Keep the canonical page intact. Slicing this back to the requested limit
   // can retain the newer JSONL turn while dropping the canonical cursor anchor,
   // making that canonical turn permanently unreachable.
@@ -3141,10 +3153,27 @@ function shouldMergeLatestJsonlTurn(turn) {
     return true;
   }
 
-  return Array.isArray(turn.items) && turn.items.some((item) => {
+  const items = Array.isArray(turn.items) ? turn.items : [];
+  if (items.some((item) => {
     const type = normalizeHistoryItemToken(item?.type);
     return type === "plan" || type === "filechange";
-  });
+  })) {
+    return true;
+  }
+
+  // A terminal rollout tail needs both sides of a real conversation turn.
+  // Metadata, truncated tails, and commentary alone cannot prove a lost answer.
+  return status === "completed"
+    && !isSyntheticJsonlHistoryTurnId(turnListTurnIdentifier(turn))
+    && items.some((item) => isUserRoleItem(item) && visibleUserPromptText(readUserItemText(item)))
+    && items.some((item) => {
+      const type = normalizeHistoryItemToken(item?.type);
+      const role = normalizeNonEmptyString(item?.role).toLowerCase();
+      const phase = normalizeHistoryItemToken(item?.phase);
+      return (type === "agentmessage" || type === "assistantmessage" || (type === "message" && role === "assistant"))
+        && (!phase || phase === "finalanswer")
+        && Boolean(relayHistoryItemText(item));
+    });
 }
 
 function turnListTurnIdentifier(turn) {

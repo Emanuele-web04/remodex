@@ -1017,6 +1017,38 @@ test("newer JSONL turns never displace the canonical cursor anchor at limit one"
   assert.equal(merged.result.remodexJsonlMergedLatest, true);
 });
 
+test("completed text-only JSONL turns recover once without replacing the canonical cursor", () => {
+  const request = { id: "history", params: { threadId: "thread", limit: 1 } };
+  const canonicalTurn = { id: "older", createdAt: "2026-11-01T10:00:00Z", status: "completed", items: [] };
+  const response = { id: request.id, result: { data: [canonicalTurn], nextCursor: "older-page" } };
+  const turn = {
+    id: "latest", threadId: "thread", createdAt: "2026-11-01T10:01:00Z", status: "completed",
+    items: [
+      { type: "userMessage", content: [{ type: "text", text: "What happened?" }] },
+      { type: "agentMessage", phase: "final_answer", text: "The task completed." },
+    ],
+  };
+  const merged = maybeMergeLatestJsonlTurnIntoTurnsListResponse(request, response, { data: [turn] });
+  assert.deepEqual(merged?.result.data, [turn, canonicalTurn]);
+  assert.equal(merged.result.nextCursor, "older-page");
+  assert.equal(maybeMergeLatestJsonlTurnIntoTurnsListResponse(request, merged, { data: [turn] }), null);
+
+  for (const invalidTurn of [
+    { ...turn, id: "turn-line-123" },
+    { ...turn, threadId: "other-thread" },
+    { ...turn, createdAt: "2026-11-01T09:59:00Z" },
+    { ...turn, items: [turn.items[0]] },
+    { ...turn, items: [turn.items[1]] },
+    { ...turn, items: [turn.items[0], { ...turn.items[1], text: "  " }] },
+    { ...turn, items: [turn.items[0], { ...turn.items[1], phase: "commentary" }] },
+    { ...turn, status: "interrupted" },
+    { ...turn, items: [] },
+  ]) {
+    assert.equal(maybeMergeLatestJsonlTurnIntoTurnsListResponse(request, response, { data: [invalidTurn] }), null,
+      `must not merge incomplete, stale, or unrelated history: ${JSON.stringify(invalidTurn)}`);
+  }
+});
+
 test("normalizeRelayBoundJsonRpcMessage converts tracked method-bearing responses for iOS", () => {
   const pendingRequestMethodsById = new Map([
     ["req-thread-list", {
