@@ -100,6 +100,7 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
     let id: String
     var title: String?
     var name: String?
+    var hasCanonicalName: Bool
     var preview: String?
     var createdAt: Date?
     var updatedAt: Date?
@@ -161,6 +162,7 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
         self.id = id
         self.title = title
         self.name = name
+        self.hasCanonicalName = name != nil
         self.preview = preview
         self.createdAt = createdAt
         self.updatedAt = updatedAt
@@ -243,6 +245,7 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
         id = try container.decode(String.self, forKey: .id)
         title = try container.decodeIfPresent(String.self, forKey: .title)
         name = try container.decodeIfPresent(String.self, forKey: .name)
+        hasCanonicalName = container.contains(.name)
         preview = try container.decodeIfPresent(String.self, forKey: .preview)
         createdAt = try Self.decodeDateIfPresent(from: container, keys: [.createdAt, .createdAtSnake])
         updatedAt = try Self.decodeDateIfPresent(from: container, keys: [.updatedAt, .updatedAtSnake])
@@ -332,7 +335,11 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
 
         try container.encode(id, forKey: .id)
         try container.encodeIfPresent(title, forKey: .title)
-        try container.encodeIfPresent(name, forKey: .name)
+        if hasCanonicalName {
+            try container.encode(name, forKey: .name)
+        } else {
+            try container.encodeIfPresent(name, forKey: .name)
+        }
         try container.encodeIfPresent(preview, forKey: .preview)
         try container.encodeIfPresent(createdAt, forKey: .createdAt)
         try container.encodeIfPresent(updatedAt, forKey: .updatedAt)

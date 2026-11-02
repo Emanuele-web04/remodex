@@ -287,6 +287,11 @@ extension CodexService {
         case "thread/unarchived":
             handleThreadArchiveStateChanged(paramsObject, isArchived: false)
 
+        case "thread/deleted":
+            if let threadId = normalizedIdentifier(extractThreadID(from: paramsObject)) {
+                applyRemoteThreadDeletion(threadId: threadId)
+            }
+
         case "thread/replaced":
             handleThreadReplaced(paramsObject)
 
@@ -671,15 +676,19 @@ extension CodexService {
         let threadName = firstStringValue(in: paramsObject, keys: renameKeys)
             ?? firstStringValue(in: eventObject, keys: renameKeys)
         let normalizedThreadName = normalizedIdentifier(threadName)
-        let hasLocalRename = persistedThreadRename(for: threadId) != nil
+        guard hasExplicitRenameField,
+              !locallyDeletedThreadIDs.contains(threadId),
+              pendingThreadNameWrites[threadId] == nil else { return }
+        threadNameRevision &+= 1
+        if persistedThreadRename(for: threadId) != nil {
+            persistThreadRename(nil, for: threadId)
+        }
 
-        if let normalizedThreadName, !normalizedThreadName.isEmpty {
-            guard !hasLocalRename else {
-                return
-            }
+        if let normalizedThreadName {
             if let existingIndex = threadIndex(for: threadId) {
                 threads[existingIndex].title = normalizedThreadName
                 threads[existingIndex].name = normalizedThreadName
+                threads[existingIndex].hasCanonicalName = true
             } else {
                 threads.append(
                     CodexThread(
@@ -695,14 +704,13 @@ extension CodexService {
         }
 
         // If server explicitly sends an empty/null name, clear local custom title.
-        guard hasExplicitRenameField,
-              !hasLocalRename,
-              let existingIndex = threadIndex(for: threadId) else {
+        guard let existingIndex = threadIndex(for: threadId) else {
             return
         }
 
         threads[existingIndex].title = nil
         threads[existingIndex].name = nil
+        threads[existingIndex].hasCanonicalName = true
         threads = sortThreads(threads)
         requestImmediateSync(threadId: threadId)
     }

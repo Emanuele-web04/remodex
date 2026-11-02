@@ -104,7 +104,7 @@ extension CodexService {
         autoApprovalRetryTokensByReviewKey.removeAll()
     }
 
-    func listThreads(limit: Int? = nil) async throws {
+    func listThreads(limit: Int? = nil, checkForDeletedThreads: Bool = false) async throws {
         isLoadingThreads = true
         defer {
             isLoadingThreads = false
@@ -113,8 +113,13 @@ extension CodexService {
 
         let activeLimit = limit ?? recentActiveThreadListLimit
 
-        let activeThreads = try await fetchCoalescedServerThreads(limit: activeLimit)
-        reconcileLocalThreadsWithServer(activeThreads)
+        let catalog = try await fetchCoalescedServerThreads(limit: activeLimit)
+        reconcileLocalThreadsWithServer(
+            catalog.threads, nameRevision: catalog.nameRevision, canConfirmDeletion: catalog.canConfirmDeletion
+        )
+        if checkForDeletedThreads, catalog.canConfirmDeletion {
+            checkMissingCatalogThreads(catalog.threads)
+        }
 
         if activeThreadId == nil {
             activeThreadId = firstLiveThreadID()
@@ -1128,21 +1133,31 @@ enum CodexThreadStartProjectBinding {
     }
 }
 
+struct ThreadCatalogSnapshot {
+    let threads: [CodexThread]
+    let nameRevision: UInt64
+    let canConfirmDeletion: Bool
+}
+
 extension CodexService {
     // Reuses an in-flight thread/list request for matching caps so launch sync and sidebar refresh share one RPC.
-    func fetchCoalescedServerThreads(limit: Int) async throws -> [CodexThread] {
+    func fetchCoalescedServerThreads(limit: Int) async throws -> ThreadCatalogSnapshot {
         if let existingFetch = threadListFetchTaskByLimit[limit] {
             return try await existingFetch.task.value
         }
 
         let fetchID = UUID()
+        let nameRevision = threadNameRevision
         let task = Task { @MainActor in
             defer {
                 if threadListFetchTaskByLimit[limit]?.id == fetchID {
                     threadListFetchTaskByLimit[limit] = nil
                 }
             }
-            return try await fetchServerThreads(limit: limit)
+            let catalog = try await fetchServerThreadCatalog(limit: limit)
+            return ThreadCatalogSnapshot(
+                threads: catalog.threads, nameRevision: nameRevision, canConfirmDeletion: catalog.canConfirmDeletion
+            )
         }
         threadListFetchTaskByLimit[limit] = (id: fetchID, task: task)
 
@@ -1154,6 +1169,15 @@ extension CodexService {
         archived: Bool = false,
         onPage: ((_ page: [CodexThread], _ accumulatedThreads: [CodexThread]) -> Void)? = nil
     ) async throws -> [CodexThread] {
+        try await fetchServerThreadCatalog(limit: limit, archived: archived, onPage: onPage).threads
+    }
+
+    private func fetchServerThreadCatalog(
+        limit: Int?,
+        archived: Bool = false,
+        onPage: ((_ page: [CodexThread], _ accumulatedThreads: [CodexThread]) -> Void)? = nil
+    ) async throws -> (threads: [CodexThread], canConfirmDeletion: Bool) {
+        var canConfirmDeletion = true
         var allThreads: [CodexThread] = []
         var nextCursor: JSONValue = .null
         var hasRequestedFirstPage = false
@@ -1198,6 +1222,7 @@ extension CodexService {
                 throw CodexServiceError.invalidResponse("thread/list response missing data array")
             }
 
+            canConfirmDeletion = canConfirmDeletion && resultObject["remodexCanConfirmCatalogDeletion"]?.boolValue == true
             let decodedPage = page.compactMap { decodeModel(CodexThread.self, from: $0) }
             allThreads.append(contentsOf: decodedPage)
             onPage?(decodedPage, allThreads)
@@ -1209,7 +1234,7 @@ extension CodexService {
             hasRequestedFirstPage: hasRequestedFirstPage
         )
 
-        return allThreads
+        return (allThreads, canConfirmDeletion)
     }
 
     // Requests all user-facing thread sources instead of relying on the server default.

@@ -188,10 +188,12 @@ extension CodexService {
 
         do {
             // Poll recent metadata only; listThreads() uses the same cap during reconnect/refresh.
-            let activeThreads = try await fetchCoalescedServerThreads(limit: recentActiveThreadListLimit)
+            let catalog = try await fetchCoalescedServerThreads(limit: recentActiveThreadListLimit)
 
-            reconcileLocalThreadsWithServer(activeThreads)
-            debugSyncLog("sync thread/list active=\(activeThreads.count) local=\(threads.count)")
+            reconcileLocalThreadsWithServer(
+                catalog.threads, nameRevision: catalog.nameRevision, canConfirmDeletion: catalog.canConfirmDeletion
+            )
+            debugSyncLog("sync thread/list active=\(catalog.threads.count) local=\(threads.count)")
         } catch {
             // A capped thread/list timing out while the socket still accepts writes is the
             // signature of a half-open connection: recover the transport instead of polling
@@ -227,7 +229,11 @@ extension CodexService {
         }
     }
 
-    func reconcileLocalThreadsWithServer(_ serverThreads: [CodexThread]) {
+    func reconcileLocalThreadsWithServer(
+        _ serverThreads: [CodexThread],
+        nameRevision: UInt64? = nil,
+        canConfirmDeletion: Bool = false
+    ) {
         let localByID = Dictionary(uniqueKeysWithValues: threads.map { ($0.id, $0) })
         let serverThreadIDs = Set(serverThreads.map(\.id))
         let persistedArchivedIDs = locallyArchivedThreadIDs
@@ -238,6 +244,12 @@ extension CodexService {
         var snapshotOnlyPinnedIDs: Set<String> = []
         var stillUnconfirmedSnapshotIDs: Set<String> = []
 
+        let isCurrentNameSnapshot = nameRevision == nil || nameRevision == threadNameRevision
+        let catalogObservation = UUID()
+        if !canConfirmDeletion {
+            materializedThreadCatalogObservations.removeAll()
+        }
+
         // Merge active server threads.
         for serverThread in serverThreads {
             applyRemoteRuntimeSettings(from: serverThread)
@@ -245,8 +257,13 @@ extension CodexService {
                 continue
             }
 
-            var liveThread = serverThread
+            if canConfirmDeletion, serverThread.runtimeProvider == .codex,
+               materializedThreadCatalogObservations[serverThread.id] != nil
+                    || normalizedIdentifier(serverThread.preview) != nil {
+                materializedThreadCatalogObservations[serverThread.id] = catalogObservation
+            }
 
+            var liveThread = serverThread
             if let localThread = localByID[liveThread.id] {
                 liveThread = mergedThread(liveThread, with: localThread, treatAsServerState: true)
                 liveThread.syncState = localThread.syncState
@@ -254,6 +271,20 @@ extension CodexService {
                 liveThread.syncState = .archivedLocal
             } else {
                 liveThread.syncState = .live
+            }
+
+            if isCurrentNameSnapshot,
+               serverThread.runtimeProvider == .codex,
+               serverThread.hasCanonicalName,
+               pendingThreadNameWrites[liveThread.id] == nil {
+                if persistedThreadRename(for: liveThread.id) != nil {
+                    persistThreadRename(nil, for: liveThread.id)
+                }
+                liveThread.name = normalizedIdentifier(serverThread.name)
+                liveThread.title = liveThread.name ?? serverThread.title
+            } else if let localThread = localByID[liveThread.id], !isCurrentNameSnapshot {
+                liveThread.name = localThread.name
+                liveThread.title = localThread.title
             }
 
             merged[liveThread.id] = liveThread
@@ -327,6 +358,61 @@ extension CodexService {
             Task { @MainActor [weak self] in
                 _ = await self?.routePendingNotificationOpenIfPossible(refreshIfNeeded: false)
             }
+        }
+    }
+
+    // A capped catalog can only nominate candidates. Verify absence with a
+    // metadata read, which also succeeds for an archived Codex chat.
+    func checkMissingCatalogThreads(_ catalog: [CodexThread]) {
+        guard missingThreadCatalogProbeTask == nil else { return }
+        let present = Set(catalog.map(\.id))
+        let candidates = threads.compactMap { thread -> (id: String, observation: UUID)? in
+            guard thread.syncState == .live, !present.contains(thread.id),
+                  !threadHasActiveOrRunningTurn(thread.id),
+                  let observation = materializedThreadCatalogObservations[thread.id] else { return nil }
+            return (thread.id, observation)
+        }
+        guard !candidates.isEmpty else { return }
+
+        // Rotate the bounded batch so older, still-readable chats can't starve
+        // a deleted candidate on every subsequent refresh.
+        let start = missingThreadCatalogProbeOffset % candidates.count
+        let count = min(8, candidates.count)
+        let probes = (0..<count).map { candidates[(start + $0) % candidates.count] }
+        missingThreadCatalogProbeOffset = (start + count) % candidates.count
+
+        missingThreadCatalogProbeTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.missingThreadCatalogProbeTask = nil }
+            for (id, observation) in probes {
+                guard !Task.isCancelled, self.isConnected else { return }
+                guard self.materializedThreadCatalogObservations[id] == observation,
+                      !self.threadHasActiveOrRunningTurn(id) else { continue }
+                do {
+                    _ = try await self.sendRequest(
+                        method: "thread/read",
+                        params: .object(["threadId": .string(id), "includeTurns": .bool(false)]),
+                        timeoutNanoseconds: 2_000_000_000
+                    )
+                } catch let CodexServiceError.rpcError(error) {
+                    guard !Task.isCancelled, self.isConnected,
+                          self.materializedThreadCatalogObservations[id] == observation,
+                          self.thread(for: id)?.syncState == .live,
+                          !self.threadHasActiveOrRunningTurn(id),
+                          error.code == -32600, error.message == "thread not loaded: \(id)" else { continue }
+                    self.applyRemoteThreadDeletion(threadId: id)
+                } catch {
+                    // A failed lookup without a definitive missing-thread response is inconclusive.
+                }
+            }
+        }
+    }
+
+    func applyRemoteThreadDeletion(threadId: String) {
+        guard !locallyDeletedThreadIDs.contains(threadId) else { return }
+        removeThreadLocally(threadId, persistAsDeleted: true)
+        if activeThreadId == nil {
+            activeThreadId = firstLiveThreadID()
         }
     }
 
@@ -514,9 +600,19 @@ extension CodexService {
     }
 
     private func sendThreadNameSetRPC(threadId: String, name: String) {
-        guard isConnected, webSocketConnection != nil || webSocketTask != nil else { return }
+        threadNameRevision &+= 1
+        guard isConnected,
+              webSocketConnection != nil || webSocketTask != nil || requestTransportOverride != nil else { return }
+        let token = UUID()
+        pendingThreadNameWrites[threadId] = token
         Task { @MainActor [weak self] in
-            guard let self else { return }
+            guard let self, self.pendingThreadNameWrites[threadId] == token else { return }
+            defer {
+                if self.pendingThreadNameWrites[threadId] == token {
+                    self.pendingThreadNameWrites.removeValue(forKey: threadId)
+                    self.threadNameRevision &+= 1
+                }
+            }
             do {
                 _ = try await self.sendRequest(
                     method: "thread/name/set",
@@ -650,6 +746,8 @@ extension CodexService {
         threadIdByTurnID = threadIdByTurnID.filter { $0.value != threadId }
 
         clearOutcomeBadge(for: threadId)
+        pendingThreadNameWrites.removeValue(forKey: threadId)
+        materializedThreadCatalogObservations.removeValue(forKey: threadId)
         latestTurnTerminalStateByThread.removeValue(forKey: threadId)
         goalByThreadID.removeValue(forKey: threadId)
         asyncUserInputErrorsByThread.removeValue(forKey: threadId)

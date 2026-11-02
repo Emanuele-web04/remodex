@@ -1070,7 +1070,8 @@ test("bridge preserves catalog request limits and excludes archived or cursor pa
     relaySocket.send(JSON.stringify({ ...request, method: "thread/list" }));
     await waitFor(() => fakeCodex.sent.some((message) => message.id === request.id));
     fakeCodex.emitMessage({ id: request.id, result: { data: [{ id: request.id }], nextCursor: "next-page" } });
-    await waitForMessage(relayMessages, (message) => message.id === request.id);
+    const response = await waitForMessage(relayMessages, (message) => message.id === request.id);
+    assert.equal(response.result.remodexCanConfirmCatalogDeletion, true);
   }
   assert.deepEqual(catalogs.map(({ result, options }) => ({ id: result.data[0].id, limit: options?.limit })), [
     { id: "catalog", limit: 70 },
@@ -1297,7 +1298,14 @@ test("endpoint routing delegates only selected extensions and passes through Cod
     REMODEX_CODEX_ENDPOINT: "ws://fake-codex",
     REMODEX_CODEX_ENDPOINT_METHODS: " project/createDirectory, workspace/readImage, workspace/readFile ",
   } });
-  const { startBridge } = loadBridgeWithTestDoubles({ createCodexTransportImpl: () => fakeCodex });
+  const { startBridge } = loadBridgeWithTestDoubles({
+    createCodexTransportImpl: () => fakeCodex,
+    createOpenCodeRuntimeImpl: () => ({
+      handlesThreadId() { return false; },
+      shutdown() {},
+      async listThreadCatalog() { return { active: [], archived: [] }; },
+    }),
+  });
   bridge = startBridge({ printPairingQr: false, config });
   await waitFor(() => relaySocket?.readyState === WebSocket.OPEN);
 
@@ -1317,6 +1325,11 @@ test("endpoint routing delegates only selected extensions and passes through Cod
   };
 
   await upstreamRequest("project/list", { limit: 2 }, { result: { data: [] } });
+  await upstreamRequest("thread/list", { limit: 2 }, {
+    result: { data: [], nextCursor: null, remodexCanConfirmCatalogDeletion: true },
+  }, {
+    result: { data: [], nextCursor: null, remodexCanConfirmCatalogDeletion: false },
+  });
   await upstreamRequest("project/createDirectory", { name: "remote-folder" }, {
     error: { code: -32601, message: "Method not found" },
   });
@@ -1338,7 +1351,7 @@ test("endpoint routing delegates only selected extensions and passes through Cod
   const oversized = await waitForMessage(relayMessages, (message) => message.id === "untracked-image");
   assert.equal(oversized.error?.data?.errorCode, "relay_response_too_large");
   assert.deepEqual(fakeCodex.sent.map((message) => message.method), [
-    "project/list", "project/createDirectory", "workspace/readImage", "workspace/readImage",
+    "project/list", "thread/list", "project/createDirectory", "workspace/readImage", "workspace/readImage",
   ]);
 });
 

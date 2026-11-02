@@ -412,6 +412,11 @@ extension CodexService {
             planSessionSourceByThread.removeAll()
             forkedFromThreadIDByThreadID.removeAll()
             renamedThreadNameByThreadID.removeAll()
+            threadNameRevision &+= 1
+            pendingThreadNameWrites.removeAll()
+            materializedThreadCatalogObservations.removeAll()
+            missingThreadCatalogProbeTask?.cancel()
+            missingThreadCatalogProbeOffset = 0
             pinnedThreadIDs.removeAll()
             pinnedThreadSnapshotsByRootID.removeAll()
             snapshotOnlyPinnedThreadIDs.removeAll()

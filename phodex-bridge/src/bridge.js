@@ -2102,6 +2102,12 @@ function startBridge({
           desktopIpcActionFollower?.observeThreadMetadata(thread);
         }
       });
+      if (trackedRequest.method === "thread/list" && parsed.result && !Array.isArray(parsed.result)
+        && typeof parsed.result === "object") {
+        // A configured endpoint may use "thread not loaded" for a cold chat.
+        // Only the spawned Codex runtime supports this deletion confirmation.
+        parsed.result.remodexCanConfirmCatalogDeletion = !config.codexEndpoint;
+      }
       normalizedMessage = JSON.stringify(parsed);
       if (trackedRequest.isActiveThreadCatalog) {
         desktopIpcActionFollower?.observeThreadListResponse(parsed.result, { limit: trackedRequest.threadListLimit });
