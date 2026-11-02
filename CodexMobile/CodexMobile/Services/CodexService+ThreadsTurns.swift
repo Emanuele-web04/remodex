@@ -115,9 +115,9 @@ extension CodexService {
 
         let catalog = try await fetchCoalescedServerThreads(limit: activeLimit)
         reconcileLocalThreadsWithServer(
-            catalog.threads, nameRevision: catalog.nameRevision, canConfirmDeletion: catalog.canConfirmDeletion
+            catalog.threads, nameRevision: catalog.nameRevision, deletionScope: catalog.deletionScope
         )
-        if checkForDeletedThreads, catalog.canConfirmDeletion {
+        if checkForDeletedThreads, catalog.deletionScope != nil {
             checkMissingCatalogThreads(catalog.threads)
         }
 
@@ -1136,7 +1136,7 @@ enum CodexThreadStartProjectBinding {
 struct ThreadCatalogSnapshot {
     let threads: [CodexThread]
     let nameRevision: UInt64
-    let canConfirmDeletion: Bool
+    let deletionScope: String?
 }
 
 extension CodexService {
@@ -1155,8 +1155,9 @@ extension CodexService {
                 }
             }
             let catalog = try await fetchServerThreadCatalog(limit: limit)
+            try Task.checkCancellation()
             return ThreadCatalogSnapshot(
-                threads: catalog.threads, nameRevision: nameRevision, canConfirmDeletion: catalog.canConfirmDeletion
+                threads: catalog.threads, nameRevision: nameRevision, deletionScope: catalog.deletionScope
             )
         }
         threadListFetchTaskByLimit[limit] = (id: fetchID, task: task)
@@ -1176,8 +1177,8 @@ extension CodexService {
         limit: Int?,
         archived: Bool = false,
         onPage: ((_ page: [CodexThread], _ accumulatedThreads: [CodexThread]) -> Void)? = nil
-    ) async throws -> (threads: [CodexThread], canConfirmDeletion: Bool) {
-        var canConfirmDeletion = true
+    ) async throws -> (threads: [CodexThread], deletionScope: String?) {
+        var deletionScope: String?
         var allThreads: [CodexThread] = []
         var nextCursor: JSONValue = .null
         var hasRequestedFirstPage = false
@@ -1222,7 +1223,12 @@ extension CodexService {
                 throw CodexServiceError.invalidResponse("thread/list response missing data array")
             }
 
-            canConfirmDeletion = canConfirmDeletion && resultObject["remodexCanConfirmCatalogDeletion"]?.boolValue == true
+            let pageScope = normalizedIdentifier(resultObject["remodexCatalogDeletionScope"]?.stringValue)
+            if !hasRequestedFirstPage {
+                deletionScope = pageScope
+            } else if pageScope != deletionScope {
+                deletionScope = nil
+            }
             let decodedPage = page.compactMap { decodeModel(CodexThread.self, from: $0) }
             allThreads.append(contentsOf: decodedPage)
             onPage?(decodedPage, allThreads)
@@ -1234,7 +1240,7 @@ extension CodexService {
             hasRequestedFirstPage: hasRequestedFirstPage
         )
 
-        return (allThreads, canConfirmDeletion)
+        return (allThreads, deletionScope)
     }
 
     // Requests all user-facing thread sources instead of relying on the server default.

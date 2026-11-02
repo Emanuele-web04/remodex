@@ -210,6 +210,7 @@ extension CodexService {
         let trimmedName = name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if trimmedName.isEmpty {
             renamedThreadNameByThreadID.removeValue(forKey: normalizedThreadId)
+            persistUnsyncedThreadRename(nil, for: normalizedThreadId)
         } else {
             renamedThreadNameByThreadID[normalizedThreadId] = trimmedName
         }
@@ -221,12 +222,29 @@ extension CodexService {
         defaults.set(encoded, forKey: macScopedDefaultsKey(Self.renamedThreadNamesDefaultsKey))
     }
 
+    // Keeps a local edit across reconnect and relaunch until app-server acknowledges it.
+    func persistUnsyncedThreadRename(_ name: String?, for threadId: String) {
+        guard let threadId = normalizedForkThreadID(threadId),
+              unsyncedThreadNamesByThreadID[threadId] != name else { return }
+        unsyncedThreadNamesByThreadID[threadId] = name
+        if let encoded = try? encoder.encode(unsyncedThreadNamesByThreadID) {
+            defaults.set(encoded, forKey: macScopedDefaultsKey(Self.unsyncedThreadNamesDefaultsKey))
+        }
+    }
+
+    func canApplyCanonicalThreadName(_ name: String?, threadId: String) -> Bool {
+        guard pendingThreadNameWrites[threadId] == nil else { return false }
+        return unsyncedThreadNamesByThreadID[threadId].map { $0 == name } ?? true
+    }
+
     func persistedThreadRename(for threadId: String?) -> String? {
         guard let normalizedThreadId = normalizedForkThreadID(threadId) else {
             return nil
         }
 
-        return normalizedPersistedThreadName(renamedThreadNameByThreadID[normalizedThreadId])
+        return normalizedPersistedThreadName(
+            unsyncedThreadNamesByThreadID[normalizedThreadId] ?? renamedThreadNameByThreadID[normalizedThreadId]
+        )
     }
 
     // Reapplies local rename intent after server refreshes so stale list payloads cannot reset titles.

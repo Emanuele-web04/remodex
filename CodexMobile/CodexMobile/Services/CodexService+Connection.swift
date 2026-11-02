@@ -556,6 +556,7 @@ extension CodexService {
     // never block thread sync on bridges where model/list is slow.
     func performPostConnectSyncPass(preferredThreadId: String? = nil) async {
         await syncThreadsList()
+        retryUnsyncedThreadRenames()
         flushPendingReplayDiscontinuityHistoryRefresh()
         if await routePendingNotificationOpenIfPossible(refreshIfNeeded: false) {
             scheduleCompleteThreadListHydration()
@@ -779,6 +780,10 @@ extension CodexService {
         postConnectSyncToken = nil
         threadListFetchTaskByLimit.values.forEach { $0.task.cancel() }
         threadListFetchTaskByLimit.removeAll()
+        missingThreadCatalogProbeTask?.cancel()
+        pendingThreadNameWrites.values.forEach { $0.task.cancel() }
+        pendingThreadNameWrites.removeAll()
+        threadNameRevision &+= 1
         cancelAllPerThreadRefreshWork()
     }
 

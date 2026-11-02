@@ -678,7 +678,7 @@ extension CodexService {
         let normalizedThreadName = normalizedIdentifier(threadName)
         guard hasExplicitRenameField,
               !locallyDeletedThreadIDs.contains(threadId),
-              pendingThreadNameWrites[threadId] == nil else { return }
+              canApplyCanonicalThreadName(normalizedThreadName, threadId: threadId) else { return }
         threadNameRevision &+= 1
         if persistedThreadRename(for: threadId) != nil {
             persistThreadRename(nil, for: threadId)

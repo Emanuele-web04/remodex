@@ -847,8 +847,10 @@ final class CodexService {
     @ObservationIgnored var threadTimelineStateByThread: [String: ThreadTimelineState] = [:]
     @ObservationIgnored var forkedFromThreadIDByThreadID: [String: String] = [:]
     @ObservationIgnored var renamedThreadNameByThreadID: [String: String] = [:]
+    @ObservationIgnored var unsyncedThreadNamesByThreadID: [String: String] = [:]
     @ObservationIgnored var threadNameRevision: UInt64 = 0
-    @ObservationIgnored var pendingThreadNameWrites: [String: UUID] = [:]
+    @ObservationIgnored var pendingThreadNameWrites: [String: (id: UUID, task: Task<Void, Never>)] = [:]
+    @ObservationIgnored var threadCatalogDeletionScope: String?
     @ObservationIgnored var materializedThreadCatalogObservations: [String: UUID] = [:]
     @ObservationIgnored var missingThreadCatalogProbeTask: Task<Void, Never>?
     @ObservationIgnored var missingThreadCatalogProbeOffset = 0
@@ -894,6 +896,7 @@ final class CodexService {
     static let locallyDeletedThreadIDsKey = "codex.locallyDeletedThreadIDs"
     static let forkedThreadOriginsDefaultsKey = "codex.forkedThreadOrigins"
     static let renamedThreadNamesDefaultsKey = "codex.renamedThreadNames"
+    static let unsyncedThreadNamesDefaultsKey = "codex.unsyncedThreadNames"
     static let pinnedThreadIDsDefaultsKey = "codex.pinnedThreadIDs"
     static let pinnedThreadSnapshotsDefaultsKey = "codex.pinnedThreadSnapshots"
     static let associatedManagedWorktreePathsDefaultsKey = "codex.associatedManagedWorktreePaths"

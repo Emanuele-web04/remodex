@@ -191,7 +191,7 @@ extension CodexService {
             let catalog = try await fetchCoalescedServerThreads(limit: recentActiveThreadListLimit)
 
             reconcileLocalThreadsWithServer(
-                catalog.threads, nameRevision: catalog.nameRevision, canConfirmDeletion: catalog.canConfirmDeletion
+                catalog.threads, nameRevision: catalog.nameRevision, deletionScope: catalog.deletionScope
             )
             debugSyncLog("sync thread/list active=\(catalog.threads.count) local=\(threads.count)")
         } catch {
@@ -232,7 +232,7 @@ extension CodexService {
     func reconcileLocalThreadsWithServer(
         _ serverThreads: [CodexThread],
         nameRevision: UInt64? = nil,
-        canConfirmDeletion: Bool = false
+        deletionScope: String? = nil
     ) {
         let localByID = Dictionary(uniqueKeysWithValues: threads.map { ($0.id, $0) })
         let serverThreadIDs = Set(serverThreads.map(\.id))
@@ -246,8 +246,11 @@ extension CodexService {
 
         let isCurrentNameSnapshot = nameRevision == nil || nameRevision == threadNameRevision
         let catalogObservation = UUID()
-        if !canConfirmDeletion {
+        if deletionScope != threadCatalogDeletionScope {
+            threadCatalogDeletionScope = deletionScope
             materializedThreadCatalogObservations.removeAll()
+            missingThreadCatalogProbeTask?.cancel()
+            missingThreadCatalogProbeOffset = 0
         }
 
         // Merge active server threads.
@@ -257,7 +260,7 @@ extension CodexService {
                 continue
             }
 
-            if canConfirmDeletion, serverThread.runtimeProvider == .codex,
+            if deletionScope != nil, serverThread.runtimeProvider == .codex,
                materializedThreadCatalogObservations[serverThread.id] != nil
                     || normalizedIdentifier(serverThread.preview) != nil {
                 materializedThreadCatalogObservations[serverThread.id] = catalogObservation
@@ -276,7 +279,7 @@ extension CodexService {
             if isCurrentNameSnapshot,
                serverThread.runtimeProvider == .codex,
                serverThread.hasCanonicalName,
-               pendingThreadNameWrites[liveThread.id] == nil {
+               canApplyCanonicalThreadName(normalizedIdentifier(serverThread.name), threadId: liveThread.id) {
                 if persistedThreadRename(for: liveThread.id) != nil {
                     persistThreadRename(nil, for: liveThread.id)
                 }
@@ -538,6 +541,8 @@ extension CodexService {
 
     func renameThread(_ threadId: String, name: String) {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else { return }
+
         // Optimistic local update.
         if let index = threadIndex(for: threadId) {
             var updatedThreads = threads
@@ -545,7 +550,7 @@ extension CodexService {
             updatedThreads[index].title = trimmedName
             threads = updatedThreads
         }
-        persistThreadRename(trimmedName, for: threadId)
+        persistUnsyncedThreadRename(trimmedName, for: threadId)
         debugSyncLog("thread renamed by user: \(threadId) → \(trimmedName)")
         sendThreadNameSetRPC(threadId: threadId, name: trimmedName)
     }
@@ -589,7 +594,7 @@ extension CodexService {
 
         threads[index].name = trimmedName
         threads[index].title = trimmedName
-        persistThreadRename(trimmedName, for: threadId)
+        persistUnsyncedThreadRename(trimmedName, for: threadId)
         debugSyncLog("thread renamed automatically: \(threadId) → \(trimmedName)")
         sendThreadNameSetRPC(threadId: threadId, name: trimmedName)
         return true
@@ -599,16 +604,24 @@ extension CodexService {
         value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
+    func retryUnsyncedThreadRenames() {
+        for (threadId, name) in unsyncedThreadNamesByThreadID
+        where pendingThreadNameWrites[threadId] == nil && thread(for: threadId)?.syncState == .live {
+            sendThreadNameSetRPC(threadId: threadId, name: name)
+        }
+    }
+
     private func sendThreadNameSetRPC(threadId: String, name: String) {
         threadNameRevision &+= 1
         guard isConnected,
               webSocketConnection != nil || webSocketTask != nil || requestTransportOverride != nil else { return }
         let token = UUID()
-        pendingThreadNameWrites[threadId] = token
-        Task { @MainActor [weak self] in
-            guard let self, self.pendingThreadNameWrites[threadId] == token else { return }
+        let previous = pendingThreadNameWrites[threadId]?.task
+        let task = Task { @MainActor [weak self] in
+            await previous?.value
+            guard let self, self.pendingThreadNameWrites[threadId]?.id == token else { return }
             defer {
-                if self.pendingThreadNameWrites[threadId] == token {
+                if self.pendingThreadNameWrites[threadId]?.id == token {
                     self.pendingThreadNameWrites.removeValue(forKey: threadId)
                     self.threadNameRevision &+= 1
                 }
@@ -617,15 +630,21 @@ extension CodexService {
                 _ = try await self.sendRequest(
                     method: "thread/name/set",
                     params: .object([
-                        "thread_id": .string(threadId),
+                        "threadId": .string(threadId),
                         "name": .string(name),
                     ])
                 )
+                if self.pendingThreadNameWrites[threadId]?.id == token,
+                   self.unsyncedThreadNamesByThreadID[threadId] == name {
+                    self.persistThreadRename(name, for: threadId)
+                    self.persistUnsyncedThreadRename(nil, for: threadId)
+                }
                 self.debugSyncLog("thread/name/set RPC success: \(threadId)")
             } catch {
                 self.debugSyncLog("thread/name/set RPC failed (non-fatal): \(error.localizedDescription)")
             }
         }
+        pendingThreadNameWrites[threadId] = (token, task)
     }
 
     // Removes every thread in a sidebar group without issuing per-thread RPC mutations.

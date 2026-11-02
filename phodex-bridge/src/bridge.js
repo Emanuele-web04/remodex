@@ -722,6 +722,7 @@ function startBridge({
   onBridgeStatus = null,
 } = {}) {
   const config = explicitConfig || readBridgeConfig();
+  const catalogDeletionScope = config.codexEndpoint ? null : randomBytes(16).toString("hex");
   config.keepMacAwakeEnabled = config.keepMacAwakeEnabled === true;
   const initializeEndpoint = Boolean(config.codexEndpoint) && config.codexEndpointInitialize === true;
   const endpointMethods = new Set(
@@ -2104,9 +2105,9 @@ function startBridge({
       });
       if (trackedRequest.method === "thread/list" && parsed.result && !Array.isArray(parsed.result)
         && typeof parsed.result === "object") {
-        // A configured endpoint may use "thread not loaded" for a cold chat.
-        // Only the spawned Codex runtime supports this deletion confirmation.
-        parsed.result.remodexCanConfirmCatalogDeletion = !config.codexEndpoint;
+        // The local runtime's missing-thread response is meaningful only for
+        // chats previously observed in this bridge process's Codex store.
+        parsed.result.remodexCatalogDeletionScope = catalogDeletionScope;
       }
       normalizedMessage = JSON.stringify(parsed);
       if (trackedRequest.isActiveThreadCatalog) {

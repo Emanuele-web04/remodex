@@ -189,14 +189,22 @@ final class CodexThreadRenamePersistenceTests: XCTestCase {
         XCTAssertEqual(reloadedService.thread(for: "thread-1")?.displayTitle, "Phone Rename")
     }
 
-    func testCatalogDistinguishesOmittedAndExplicitlyClearedName() throws {
+    func testCatalogDistinguishesOmittedAndExplicitlyClearedNameAfterAcknowledgement() async throws {
         let suite = "CodexThreadRenamePersistenceTests.\(UUID())"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
         let service = CodexService(defaults: defaults)
+        service.isConnected = true
+        service.requestTransportOverride = { method, params in
+            XCTAssertEqual(method, "thread/name/set")
+            XCTAssertEqual(params?.objectValue?["name"]?.stringValue, "Phone Name")
+            return RPCMessage(id: .string("rename"), result: .object([:]))
+        }
         service.upsertThread(CodexThread(id: "chat", name: "Original"))
         let beforeRename = service.threadNameRevision
         service.renameThread("chat", name: "Phone Name")
+        await service.pendingThreadNameWrites["chat"]?.task.value
+        XCTAssertNil(service.unsyncedThreadNamesByThreadID["chat"])
 
         let stale = CodexThread(id: "chat", name: "Original")
         service.reconcileLocalThreadsWithServer([stale], nameRevision: beforeRename)
@@ -218,6 +226,67 @@ final class CodexThreadRenamePersistenceTests: XCTestCase {
         XCTAssertEqual(service.thread(for: "chat")?.displayTitle, "Desktop Name")
     }
 
+    func testOfflineRenameSurvivesRelaunchAndRetriesOnReconnect() async throws {
+        let suite = "CodexThreadRenamePersistenceTests.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let original = CodexThread(id: "chat", name: "Original")
+        let service = CodexService(defaults: defaults)
+        service.upsertThread(original)
+        service.renameThread("chat", name: "Offline Name")
+        service.reconcileLocalThreadsWithServer([original])
+        XCTAssertEqual(service.thread(for: "chat")?.displayTitle, "Offline Name")
+
+        let reloaded = CodexService(defaults: defaults)
+        reloaded.reconcileLocalThreadsWithServer([original])
+        XCTAssertEqual(reloaded.thread(for: "chat")?.displayTitle, "Offline Name")
+
+        reloaded.isConnected = true
+        var sentNames: [String] = []
+        reloaded.requestTransportOverride = { method, params in
+            XCTAssertEqual(method, "thread/name/set")
+            XCTAssertEqual(params?.objectValue?["threadId"]?.stringValue, "chat")
+            sentNames.append(try XCTUnwrap(params?.objectValue?["name"]?.stringValue))
+            return RPCMessage(id: .string("rename"), result: .object([:]))
+        }
+        reloaded.retryUnsyncedThreadRenames()
+        await reloaded.pendingThreadNameWrites["chat"]?.task.value
+        XCTAssertEqual(sentNames, ["Offline Name"])
+
+        reloaded.reconcileLocalThreadsWithServer([CodexThread(id: "chat", name: "Later Desktop Name")])
+        XCTAssertEqual(reloaded.thread(for: "chat")?.displayTitle, "Later Desktop Name")
+    }
+
+    func testFailedRenameSurvivesCanonicalCatalogAndNotification() async throws {
+        let suite = "CodexThreadRenamePersistenceTests.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let service = CodexService(defaults: defaults)
+        service.isConnected = true
+        service.upsertThread(CodexThread(id: "chat", name: "Original"))
+        service.requestTransportOverride = { _, _ in
+            throw CodexServiceError.rpcError(RPCError(code: -32000, message: "temporarily unavailable"))
+        }
+        service.renameThread("chat", name: "Failed Phone Name")
+        await service.pendingThreadNameWrites["chat"]?.task.value
+        let cleared = try JSONDecoder().decode(
+            CodexThread.self,
+            from: Data(#"{"id":"chat","name":null}"#.utf8)
+        )
+        service.reconcileLocalThreadsWithServer([cleared])
+        service.handleIncomingRPCMessage(RPCMessage(
+            method: "thread/name/updated",
+            params: .object(["threadId": .string("chat"), "threadName": .null]),
+            includeJSONRPC: false
+        ))
+        XCTAssertEqual(service.thread(for: "chat")?.displayTitle, "Failed Phone Name")
+
+        service.reconcileLocalThreadsWithServer([CodexThread(id: "chat", name: "Failed Phone Name")])
+        service.reconcileLocalThreadsWithServer([cleared])
+        XCTAssertNil(service.thread(for: "chat")?.name)
+        XCTAssertNil(service.persistedThreadRename(for: "chat"))
+    }
+
     func testCatalogAbsenceRequiresMetadataConfirmationBeforeRemovingChat() async throws {
         let suite = "CodexThreadRenamePersistenceTests.\(UUID())"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
@@ -229,8 +298,8 @@ final class CodexThreadRenamePersistenceTests: XCTestCase {
         let reappearing = CodexThread(id: "reappearing", preview: "Previously visible")
         let transient = CodexThread(id: "transient", preview: "Previously visible")
         let blank = CodexThread(id: "blank")
-        service.reconcileLocalThreadsWithServer([deleted, archived, reappearing, transient, blank], canConfirmDeletion: true)
-        service.reconcileLocalThreadsWithServer([], canConfirmDeletion: true)
+        service.reconcileLocalThreadsWithServer([deleted, archived, reappearing, transient, blank], deletionScope: "local")
+        service.reconcileLocalThreadsWithServer([], deletionScope: "local")
         XCTAssertNotNil(service.thread(for: deleted.id))
 
         var queried: Set<String> = []
@@ -243,7 +312,7 @@ final class CodexThreadRenamePersistenceTests: XCTestCase {
                 return RPCMessage(id: .string(id), result: .object([:]), includeJSONRPC: false)
             }
             if id == reappearing.id {
-                service?.reconcileLocalThreadsWithServer([reappearing], canConfirmDeletion: true)
+                service?.reconcileLocalThreadsWithServer([reappearing], deletionScope: "local")
             }
             let error = id == transient.id
                 ? RPCError(code: -32000, message: "temporarily unavailable")
@@ -269,7 +338,7 @@ final class CodexThreadRenamePersistenceTests: XCTestCase {
         let service = CodexService(defaults: defaults)
         service.isConnected = true
         let chat = CodexThread(id: "cold", preview: "Previously visible")
-        service.reconcileLocalThreadsWithServer([chat], canConfirmDeletion: true)
+        service.reconcileLocalThreadsWithServer([chat], deletionScope: "local")
         service.requestTransportOverride = { method, _ in
             XCTAssertEqual(method, "thread/list")
             return RPCMessage(id: .string("catalog"), result: .object(["data": .array([])]))
@@ -278,6 +347,27 @@ final class CodexThreadRenamePersistenceTests: XCTestCase {
         try await service.listThreads(checkForDeletedThreads: true)
         XCTAssertNil(service.missingThreadCatalogProbeTask)
         XCTAssertNotNil(service.thread(for: chat.id))
+    }
+
+    func testCatalogFromAnotherBridgeProcessCannotDeleteEarlierChats() async throws {
+        let suite = "CodexThreadRenamePersistenceTests.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let service = CodexService(defaults: defaults)
+        service.isConnected = true
+        let earlier = CodexThread(id: "earlier", preview: "From the first store")
+        service.reconcileLocalThreadsWithServer([earlier], deletionScope: "first")
+
+        service.requestTransportOverride = { method, _ in
+            XCTAssertEqual(method, "thread/list")
+            return RPCMessage(id: .string("catalog"), result: .object([
+                "data": .array([]),
+                "remodexCatalogDeletionScope": .string("second"),
+            ]))
+        }
+        try await service.listThreads(checkForDeletedThreads: true)
+        XCTAssertNil(service.missingThreadCatalogProbeTask)
+        XCTAssertNotNil(service.thread(for: earlier.id))
     }
 
     func testCatalogDeletionChecksRotatePastReadableChats() async throws {
@@ -293,7 +383,7 @@ final class CodexThreadRenamePersistenceTests: XCTestCase {
                 updatedAt: Date(timeIntervalSince1970: Double(9 - index))
             )
         }
-        service.reconcileLocalThreadsWithServer(chats, canConfirmDeletion: true)
+        service.reconcileLocalThreadsWithServer(chats, deletionScope: "local")
 
         var probes: [String] = []
         service.requestTransportOverride = { _, params in
