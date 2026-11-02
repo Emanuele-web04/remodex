@@ -303,6 +303,70 @@ test("qr bootstrap allows a fresh QR scan to replace the trusted iPhone", () => 
   });
 });
 
+test("expired and malformed pairing attempts leave the trusted session usable", (t) => {
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  const macIdentity = createOkpKeyPair("ed25519");
+  const phoneIdentity = createOkpKeyPair("ed25519");
+  const phoneEphemeral = createOkpKeyPair("x25519");
+  const sessionId = "pairing-replacement";
+  const macDeviceId = "mac";
+  const phoneDeviceId = "trusted-phone";
+  const secureTransport = createTestBridgeSecureTransport({
+    sessionId,
+    relayUrl: "wss://relay.example/relay",
+    deviceState: {
+      macDeviceId,
+      macIdentityPrivateKey: macIdentity.privateKey,
+      macIdentityPublicKey: macIdentity.publicKey,
+      trustedPhones: { [phoneDeviceId]: phoneIdentity.publicKey },
+    },
+  });
+  const originalPairing = secureTransport.createPairingPayload();
+  const handshake = {
+    secureTransport,
+    sessionId,
+    macDeviceId,
+    macIdentity,
+    phoneIdentity,
+    phoneEphemeral,
+    lastAppliedBridgeOutboundSeq: 0,
+  };
+  finishHandshake({
+    ...handshake,
+    phoneDeviceId,
+    handshakeMode: HANDSHAKE_MODE_TRUSTED_RECONNECT,
+  });
+
+  now = originalPairing.expiresAt - 1;
+  finishHandshake({
+    ...handshake,
+    phoneDeviceId: "replacement-phone",
+    handshakeMode: HANDSHAKE_MODE_QR_BOOTSTRAP,
+    beforeAuth() {
+      secureTransport.createPairingPayload();
+      now = originalPairing.expiresAt;
+    },
+    expectedAuthError: "pairing_expired",
+  });
+  assert.equal(secureTransport.isSecureChannelReady(), true);
+
+  finishHandshake({
+    ...handshake,
+    phoneDeviceId: "replacement-phone",
+    phoneEphemeral: { publicKey: Buffer.alloc(32).toString("base64") },
+    handshakeMode: HANDSHAKE_MODE_QR_BOOTSTRAP,
+    expectedAuthError: "invalid_phone_ephemeral_key",
+  });
+  assert.equal(secureTransport.isSecureChannelReady(), true);
+
+  finishHandshake({
+    ...handshake,
+    phoneDeviceId,
+    handshakeMode: HANDSHAKE_MODE_TRUSTED_RECONNECT,
+  });
+});
+
 test("qr bootstrap starts a fresh replay window instead of leaking buffered messages", () => {
   const macIdentity = createOkpKeyPair("ed25519");
   const phoneIdentity = createOkpKeyPair("ed25519");
@@ -885,6 +949,8 @@ function finishHandshake({
   handshakeMode,
   lastAppliedBridgeOutboundSeq,
   skipResumeState = false,
+  beforeAuth,
+  expectedAuthError,
 }) {
   const controlMessages = [];
   const applicationMessages = [];
@@ -947,6 +1013,7 @@ function finishHandshake({
     })
   );
 
+  beforeAuth?.();
   secureTransport.handleIncomingWireMessage(
     JSON.stringify({
       kind: "clientAuth",
@@ -964,6 +1031,12 @@ function finishHandshake({
       },
     }
   );
+
+  if (expectedAuthError) {
+    assert.equal(controlMessages.at(-1)?.kind, "secureError");
+    assert.equal(controlMessages.at(-1)?.code, expectedAuthError);
+    return;
+  }
 
   const secureReady = controlMessages.find((message) => message.kind === "secureReady");
   assert.ok(secureReady, "expected secureReady");
