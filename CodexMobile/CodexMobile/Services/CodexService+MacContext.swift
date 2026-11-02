@@ -108,7 +108,7 @@ extension CodexService {
         )
         canPersistAIChangeSets = persistedChangeSets != nil
         includeLegacyAIChangeSetFallbackOnRetry = persistedChangeSets == nil && includeLegacyFallback
-        replaceMacScopedAIChangeSets(persistedChangeSets ?? [])
+        replaceMacScopedAIChangeSets(finalizeRecoveredCollectingChangeSets(persistedChangeSets ?? []))
     }
 
     @discardableResult
@@ -135,7 +135,7 @@ extension CodexService {
                 }
                 byTurn[key] = byTurn[key].map { changeSet.reconcilingRecoveredChangeSet($0) } ?? changeSet
             }
-            changeSets = Array(byTurn.values) + Array(unscopedById.values)
+            changeSets = finalizeRecoveredCollectingChangeSets(Array(byTurn.values) + Array(unscopedById.values))
         }
 
         let sortedChangeSets = changeSets.sorted(by: chronological)
@@ -150,6 +150,15 @@ extension CodexService {
             invalidateAssistantRevertStates()
         }
         return true
+    }
+
+    private func finalizeRecoveredCollectingChangeSets(_ changeSets: [AIChangeSet]) -> [AIChangeSet] {
+        changeSets.map { changeSet in
+            guard changeSet.status == .collecting else {
+                return changeSet
+            }
+            return finalizedChangeSetForTerminalTurn(changeSet) ?? changeSet
+        }
     }
 
     private func replaceMacScopedAIChangeSets(_ loadedChangeSets: [AIChangeSet]) {

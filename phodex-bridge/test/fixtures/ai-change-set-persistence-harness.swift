@@ -28,7 +28,17 @@ final class CodexService {
     var aiChangeSetsByID: [String: AIChangeSet] = [:]
     var aiChangeSetIDByTurnKey: [AIChangeSetTurnKey: String] = [:]
     var aiChangeSetIDByAssistantMessageID: [String: String] = [:]
+    var currentMacScopedPersistenceDeviceId: String?
+    var completedTurns: Set<AIChangeSetTurnKey> = []
 
+    func turnTerminalState(for turnId: String?, threadId: String) -> Bool? {
+        guard let key = AIChangeSetTurnKey(threadId: threadId, turnId: turnId),
+              completedTurns.contains(key) else { return nil }
+        return true
+    }
+
+    func gitWorkingDirectory(for threadId: String) -> String? { "/repo" }
+    func latestAssistantMessageId(for threadId: String, turnId: String) -> String? { "answer-\(turnId)" }
     func invalidateAssistantRevertStates() {}
 }
 
@@ -63,6 +73,7 @@ struct AIChangeSetPersistenceHarness {
 
         try exerciseReadRetry(persistence, ledgerURL(root, "retry"), encrypted, record)
         try exerciseSameTurnReadRetry(persistence, ledgerURL(root, "same-turn"))
+        try exerciseTerminalTurnReadRetry(persistence, ledgerURL(root, "finished-turn"))
         try exerciseFailedDeletion(persistence, sourceURL, record)
         print("AI change-set ledger recovery checks passed")
     }
@@ -135,6 +146,61 @@ struct AIChangeSetPersistenceHarness {
         try require(service.aiChangeSetIDByTurnKey[turn] == reconciled.id
                     && service.aiChangeSetIDByAssistantMessageID["answer"] == reconciled.id,
                     "the turn and assistant row must both use the reconciled change set")
+    }
+
+    private static func exerciseTerminalTurnReadRetry(_ persistence: AIChangeSetPersistence, _ url: URL) throws {
+        let batch = makePatchBatch("before", "after")
+        let pending = AIChangeSet(
+            id: "pending", threadId: "finished-thread", turnId: "finished-turn",
+            source: .fileChangeFallback, forwardUnifiedPatch: batch.forwardUnifiedPatch,
+            fileChanges: batch.fileChanges, fallbackPatchCount: 1, fallbackPatchBatches: [batch]
+        )
+        let active = AIChangeSet(
+            id: "active", threadId: pending.threadId, turnId: "other-turn",
+            source: .fileChangeFallback, forwardUnifiedPatch: batch.forwardUnifiedPatch,
+            fileChanges: batch.fileChanges, fallbackPatchCount: 1, fallbackPatchBatches: [batch]
+        )
+        try require(persistence.save([pending, active], macDeviceId: "finished-turn"), "could not seed collecting patches")
+        let encrypted = try Data(contentsOf: url)
+        let unreadable = Data("unreadable ledger".utf8)
+        try unreadable.write(to: url)
+
+        let service = CodexService()
+        service.currentMacScopedPersistenceDeviceId = "finished-turn"
+        service.loadMacScopedAIChangeSets(for: "finished-turn")
+        let turn = AIChangeSetTurnKey(threadId: pending.threadId, turnId: pending.turnId)!
+        service.completedTurns.insert(turn)
+        service.noteTurnFinished(threadId: pending.threadId, turnId: pending.turnId)
+        try require(try Data(contentsOf: url) == unreadable, "completion overwrote an unreadable ledger")
+
+        try encrypted.write(to: url)
+        let relaunched = CodexService()
+        relaunched.completedTurns.insert(turn)
+        relaunched.loadMacScopedAIChangeSets(for: "finished-turn")
+        try require(relaunched.aiChangeSetsByID[pending.id]?.status == .ready,
+                    "readable startup ignored the previously recorded terminal state")
+
+        try require(service.saveMacScopedAIChangeSets(for: "finished-turn"), "could not recover after completion")
+        let reloaded = persistence.load(macDeviceId: "finished-turn") ?? []
+        let finalized = reloaded.first(where: { $0.id == pending.id })
+        try require(finalized?.status == .ready && finalized?.finalizedAt != nil,
+                    "recovered terminal turn remained collecting")
+        try require(finalized?.repoRoot == "/repo" && finalized?.assistantMessageId == "answer-finished-turn",
+                    "recovery did not restore the normal finalization metadata")
+        try require(service.aiChangeSetIDByAssistantMessageID["answer-finished-turn"] == pending.id,
+                    "recovered terminal change set was not indexed by its assistant message")
+        try require(reloaded.first(where: { $0.id == active.id })?.status == .collecting,
+                    "recovery prematurely finalized a turn without a known terminal outcome")
+
+        try unreadable.write(to: url)
+        let recoversOnCompletion = CodexService()
+        recoversOnCompletion.currentMacScopedPersistenceDeviceId = "finished-turn"
+        recoversOnCompletion.loadMacScopedAIChangeSets(for: "finished-turn")
+        try encrypted.write(to: url)
+        recoversOnCompletion.completedTurns.insert(turn)
+        recoversOnCompletion.noteTurnFinished(threadId: pending.threadId, turnId: pending.turnId)
+        try require(persistence.load(macDeviceId: "finished-turn")?.first(where: { $0.id == pending.id })?.status == .ready,
+                    "completion did not retry an earlier failed read")
     }
 
     private static func makePatchBatch(_ before: String, _ after: String) -> AIPatchBatch {

@@ -287,14 +287,53 @@ extension CodexService {
 
     // Finalizes the change set once the turn has finished, even if the diff arrives slightly later.
     func noteTurnFinished(threadId: String, turnId: String?) {
-        guard let turnKey = AIChangeSetTurnKey(threadId: threadId, turnId: turnId),
-              let changeSetId = aiChangeSetIDByTurnKey[turnKey] else {
+        guard let turnKey = AIChangeSetTurnKey(threadId: threadId, turnId: turnId) else {
+            return
+        }
+        guard let changeSetId = aiChangeSetIDByTurnKey[turnKey] else {
+            if !canPersistAIChangeSets {
+                persistAIChangeSets()
+            }
             return
         }
 
         finalizeChangeSetIfPossible(changeSetId: changeSetId)
         persistAIChangeSets()
         invalidateAssistantRevertStates()
+    }
+
+    func finalizedChangeSetForTerminalTurn(_ pending: AIChangeSet) -> AIChangeSet? {
+        guard pending.status != .reverted,
+              turnTerminalState(for: pending.turnId, threadId: pending.threadId) != nil else {
+            return nil
+        }
+
+        var changeSet = pending
+        changeSet.repoRoot = changeSet.repoRoot ?? gitWorkingDirectory(for: changeSet.threadId)
+        changeSet.assistantMessageId = changeSet.assistantMessageId ?? latestAssistantMessageId(
+            for: changeSet.threadId,
+            turnId: changeSet.turnId
+        )
+
+        if !hasRevertPatchPayload(changeSet) {
+            changeSet.status = .notRevertable
+            changeSet.unsupportedReasons = ["This response cannot be auto-reverted because no exact patch was captured."]
+        } else if changeSet.source == .fileChangeFallback
+                    && changeSet.fallbackPatchBatches.isEmpty
+                    && changeSet.fallbackPatchCount > 1 {
+            changeSet.status = .notRevertable
+            changeSet.unsupportedReasons = ["This response was captured before ordered patch batches were stored, so it cannot be safely auto-reverted."]
+        } else if !changeSet.unsupportedReasons.isEmpty || changeSet.fileChanges.isEmpty {
+            changeSet.status = .notRevertable
+        } else {
+            changeSet.status = .ready
+        }
+
+        if changeSet.finalizedAt == nil {
+            changeSet.finalizedAt = Date()
+        }
+
+        return changeSet
     }
 
     // Remembers canonical repo roots so repo-scoped safety checks stay consistent across sibling chat folders.
@@ -547,44 +586,9 @@ private extension CodexService {
     }
 
     func finalizeChangeSetIfPossible(changeSetId: String) {
-        guard var changeSet = aiChangeSetsByID[changeSetId] else {
+        guard let pending = aiChangeSetsByID[changeSetId],
+              let changeSet = finalizedChangeSetForTerminalTurn(pending) else {
             return
-        }
-
-        guard turnTerminalState(
-            for: changeSet.turnId,
-            threadId: changeSet.threadId
-        ) != nil else {
-            aiChangeSetsByID[changeSetId] = changeSet
-            return
-        }
-
-        guard changeSet.status != .reverted else {
-            return
-        }
-
-        changeSet.repoRoot = changeSet.repoRoot ?? gitWorkingDirectory(for: changeSet.threadId)
-        changeSet.assistantMessageId = changeSet.assistantMessageId ?? latestAssistantMessageId(
-            for: changeSet.threadId,
-            turnId: changeSet.turnId
-        )
-
-        if !hasRevertPatchPayload(changeSet) {
-            changeSet.status = .notRevertable
-            changeSet.unsupportedReasons = ["This response cannot be auto-reverted because no exact patch was captured."]
-        } else if changeSet.source == .fileChangeFallback
-                    && changeSet.fallbackPatchBatches.isEmpty
-                    && changeSet.fallbackPatchCount > 1 {
-            changeSet.status = .notRevertable
-            changeSet.unsupportedReasons = ["This response was captured before ordered patch batches were stored, so it cannot be safely auto-reverted."]
-        } else if !changeSet.unsupportedReasons.isEmpty || changeSet.fileChanges.isEmpty {
-            changeSet.status = .notRevertable
-        } else {
-            changeSet.status = .ready
-        }
-
-        if changeSet.finalizedAt == nil {
-            changeSet.finalizedAt = Date()
         }
 
         aiChangeSetsByID[changeSetId] = changeSet

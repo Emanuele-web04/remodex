@@ -12,13 +12,16 @@ test("iOS AI change-set ledger stays encrypted and retries interrupted migration
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-change-set-ledger-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const mobile = path.resolve(__dirname, "../../CodexMobile/CodexMobile");
-  const source = fs.readFileSync(path.join(mobile, "Services/CodexService+MacContext.swift"), "utf8");
+  const macContext = fs.readFileSync(path.join(mobile, "Services/CodexService+MacContext.swift"), "utf8");
+  const changeSets = fs.readFileSync(path.join(mobile, "Services/CodexService+AIChangeSets.swift"), "utf8");
   // Compile the real ledger lifecycle methods without unrelated view, messaging, or defaults state.
   const methods = [
-    ["func loadMacScopedAIChangeSets(", "func loadCurrentMacScopedDefaultsState("],
-    ["func uniqueNormalizedMacDeviceIds(", "func migrateMacScopedLocalCaches("],
-    ["func normalizedMacScopedDeviceId(", "func shouldLoadLegacyLocalStateFallback("],
-  ].map(([start, end]) => {
+    [macContext, "func loadMacScopedAIChangeSets(", "func loadCurrentMacScopedDefaultsState("],
+    [macContext, "func uniqueNormalizedMacDeviceIds(", "func migrateMacScopedLocalCaches("],
+    [macContext, "func normalizedMacScopedDeviceId(", "func shouldLoadLegacyLocalStateFallback("],
+    [changeSets, "func noteTurnFinished(", "// Remembers canonical repo roots"],
+    [changeSets, "func hasRevertPatchPayload(", "func latestAssistantMessageId("],
+  ].map(([source, start, end]) => {
     const first = source.indexOf(`    ${start}`);
     const last = source.indexOf(`    ${end}`, first);
     assert.ok(first >= 0 && last > first, `missing ledger lifecycle declaration: ${start}`);
