@@ -1252,10 +1252,6 @@ function startBridge({
     // Streaming deltas make this the hottest path in the bridge: parse the
     // envelope once and share the read-only object with every observer.
     const parsedMessage = parseBridgeMessage(message);
-    if (parsedMessage?.result && forwardedInitializeRequestIds.has(String(parsedMessage.id))) {
-      parsedMessage.result.remodexRuntimeSettingsVersion = 2;
-      message = JSON.stringify(parsedMessage);
-    }
     if (parsedMessage?.method === "thread/settings/updated"
       && parsedMessage.params?.threadSettings) {
       threadRuntimeSettingsStore.observe(parsedMessage.params.threadId, parsedMessage.params.threadSettings);
@@ -1275,7 +1271,9 @@ function startBridge({
       return;
     }
     updatePendingAuthLoginFromCodexMessage(message, parsedMessage);
-    trackCodexHandshakeState(message, parsedMessage);
+    if (normalizeForwardedInitializeResponse(parsedMessage)) {
+      message = JSON.stringify(parsedMessage);
+    }
     desktopRefresher.handleOutbound(message, parsedMessage);
     desktopIpcLiveOwner?.observeOutbound(message, parsedMessage);
     observeAppServerActivity(parsedMessage);
@@ -2299,10 +2297,7 @@ function startBridge({
 
       sendResponse(JSON.stringify({
         id: parsed.id,
-        result: {
-          bridgeManaged: true,
-          remodexRuntimeSettingsVersion: 2,
-        },
+        result: bridgeManagedInitializeResult(),
       }));
       return true;
     }
@@ -2378,36 +2373,30 @@ function startBridge({
     console.warn(normalizedWarning);
   }
 
-  // Learns whether the underlying Codex transport has already completed its own MCP handshake.
-  function trackCodexHandshakeState(rawMessage, parsedMessage = null) {
-    const parsed = parsedMessage ?? safeParseJSON(rawMessage);
-    if (!parsed) {
-      return;
+  function bridgeManagedInitializeResult() {
+    return { bridgeManaged: true, remodexRuntimeSettingsVersion: 2 };
+  }
+
+  // A phone can reconnect before the first initialize reply reaches the
+  // bridge. Stock app-server accepts the first request and rejects the second
+  // as already initialized even though the same transport is ready to use.
+  function normalizeForwardedInitializeResponse(response) {
+    if (response?.id == null || response.method != null
+      || !forwardedInitializeRequestIds.delete(String(response.id))) {
+      return false;
     }
-
-    const responseId = parsed?.id;
-    if (responseId == null) {
-      return;
-    }
-
-    const responseKey = String(responseId);
-    if (!forwardedInitializeRequestIds.has(responseKey)) {
-      return;
-    }
-
-    forwardedInitializeRequestIds.delete(responseKey);
-
-    if (parsed?.result != null) {
+    if (response.result != null) {
       codexHandshakeState = "warm";
-      return;
+      response.result.remodexRuntimeSettingsVersion = 2;
+      return true;
     }
-
-    const errorMessage = typeof parsed?.error?.message === "string"
-      ? parsed.error.message.toLowerCase()
-      : "";
-    if (errorMessage.includes("already initialized")) {
+    if (response.error?.code === -32600 && response.error.message === "Already initialized") {
       codexHandshakeState = "warm";
+      delete response.error;
+      response.result = bridgeManagedInitializeResult();
+      return true;
     }
+    return false;
   }
 
   // Runs bridge-private JSON-RPC calls against the local app-server so token-bearing responses
