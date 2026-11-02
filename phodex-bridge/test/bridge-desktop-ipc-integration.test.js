@@ -1225,6 +1225,49 @@ test("endpoint routing delegates only selected extensions and passes through Cod
   ]);
 });
 
+test("stock endpoint initializes once before phone requests", async (t) => {
+  const relayServer = new WebSocket.Server({ port: 0 });
+  const messages = [];
+  const fakeCodex = createFakeCodexTransport();
+  let relaySocket;
+  let bridge;
+  t.after(() => {
+    bridge?.stop();
+    relaySocket?.close();
+    relayServer.close();
+  });
+  await new Promise((resolve) => relayServer.once("listening", resolve));
+  relayServer.on("connection", (socket) => {
+    relaySocket = socket;
+    socket.on("message", (data) => messages.push(JSON.parse(data.toString("utf8"))));
+  });
+  const { readBridgeConfig } = require("../src/codex-desktop-refresher");
+  const config = readBridgeConfig({ env: {
+    REMODEX_RELAY: `ws://127.0.0.1:${relayServer.address().port}`,
+    REMODEX_CODEX_ENDPOINT: "ws://fake-codex",
+    REMODEX_CODEX_ENDPOINT_INITIALIZE: "true",
+  } });
+  const { startBridge } = loadBridgeWithTestDoubles({ createCodexTransportImpl: () => fakeCodex });
+  bridge = startBridge({ printPairingQr: false, config });
+
+  await waitFor(() => fakeCodex.sent.length > 0 || relaySocket?.readyState === WebSocket.OPEN);
+  assert.equal(Boolean(relaySocket), false);
+  const initialize = fakeCodex.sent[0];
+  assert.equal(initialize.method, "initialize");
+  assert.equal(initialize.params.capabilities.experimentalApi, true);
+  fakeCodex.emitMessage({ id: initialize.id, result: { userAgent: "codex-test" } });
+  await waitFor(() => relaySocket?.readyState === WebSocket.OPEN);
+  assert.deepEqual(fakeCodex.sent[1], { method: "initialized" });
+  assert.equal(messages.some((message) => message.id === initialize.id), false);
+
+  for (const id of ["first-phone", "reconnected-phone"]) {
+    relaySocket.send(JSON.stringify({ id, method: "initialize" }));
+    const reply = await waitForMessage(messages, (message) => message.id === id);
+    assert.equal(reply.result?.bridgeManaged, true);
+  }
+  assert.deepEqual(fakeCodex.sent.map((message) => message.method), ["initialize", "initialized"]);
+});
+
 test("bridge Activity is opt-in and canonical-only endpoints need no Desktop IPC", async (t) => {
   const relayServer = new WebSocket.Server({ port: 0 });
   const relayMessages = [];

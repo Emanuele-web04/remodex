@@ -346,6 +346,7 @@ remodex watch
 | `REMODEX_RELAY` | empty in source checkouts; optional in published packages | Session base URL used for QR bootstrap, trusted-session resolve, and phone/Mac session routing |
 | `REMODEX_PUSH_SERVICE_URL` | disabled by default | Optional HTTP base URL for managed push registration/completion |
 | `REMODEX_CODEX_ENDPOINT` | — | Connect to an existing Codex WebSocket instead of spawning a local `codex app-server` |
+| `REMODEX_CODEX_ENDPOINT_INITIALIZE` | `false` | Perform the app-server handshake before connecting to the relay |
 | `REMODEX_CODEX_ENDPOINT_METHODS` | — | Comma-separated Remodex RPCs a custom Codex endpoint handles in place of the local bridge |
 | `REMODEX_OPENCODE_BIN` | `~/.opencode/bin/opencode` | Path to the local OpenCode executable if installed elsewhere |
 | `REMODEX_DESKTOP_IPC_LIVE_SYNC` | `true` | Broadcast Remodex-owned active threads over the local Codex Desktop / VSCode IPC bus |
@@ -368,8 +369,8 @@ REMODEX_DESKTOP_IPC_LIVE_SYNC=false remodex up
 # Optionally open phone-driven threads in Desktop automatically
 REMODEX_DESKTOP_AUTO_FOLLOW=true remodex up
 
-# Connect to an existing Codex instance
-REMODEX_CODEX_ENDPOINT=ws://localhost:8080 remodex up
+# Connect to a stock local Codex app-server WebSocket
+REMODEX_CODEX_ENDPOINT=ws://localhost:8080 REMODEX_CODEX_ENDPOINT_INITIALIZE=true remodex up
 
 # Use a custom self-hosted relay endpoint (`ws://` is unencrypted)
 REMODEX_RELAY="ws://localhost:9000/relay" remodex up

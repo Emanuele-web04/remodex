@@ -719,6 +719,7 @@ function startBridge({
 } = {}) {
   const config = explicitConfig || readBridgeConfig();
   config.keepMacAwakeEnabled = config.keepMacAwakeEnabled === true;
+  const initializeEndpoint = Boolean(config.codexEndpoint) && config.codexEndpointInitialize === true;
   const endpointMethods = new Set(
     config.codexEndpoint && Array.isArray(config.codexEndpointMethods)
       ? config.codexEndpointMethods.filter((method) => isBridgeProjectMethod(method)
@@ -792,7 +793,7 @@ function startBridge({
   let relayWatchdog = null;
   let lastRelayActivityAt = 0;
   let lastConnectionStatus = null;
-  let codexLaunchState = config.codexEndpoint ? "connected" : "starting";
+  let codexLaunchState = config.codexEndpoint && !initializeEndpoint ? "connected" : "starting";
   let codexHandshakeState = config.codexEndpoint ? "warm" : "cold";
   const forwardedInitializeRequestIds = new Set();
   const bridgeManagedCodexRequestWaiters = new Map();
@@ -984,7 +985,9 @@ function startBridge({
     lastError: "",
   });
 
-  codex.onError((error) => {
+  codex.onError(handleCodexTransportError);
+
+  function handleCodexTransportError(error) {
     codexLaunchState = "error";
     publishBridgeStatus({
       state: "error",
@@ -1001,16 +1004,28 @@ function startBridge({
     }
     console.error(error.message);
     process.exit(1);
-  });
-  // Marks the local Codex runtime as launchable before relay/network recovery updates.
-  codex.onStarted(() => {
-    codexLaunchState = "connected";
-    const lastPublishedBridgeStatus = bridgeStatusPublisher.latest();
-    if (!lastPublishedBridgeStatus) {
-      return;
+  }
+
+  // A stock endpoint initializes once per socket, independently of phone reconnects.
+  codex.onStarted(async () => {
+    if (initializeEndpoint) {
+      try {
+        await sendCodexRequest("initialize", {
+          clientInfo: { name: "remodex", version: bridgePackageVersion },
+          capabilities: { experimentalApi: true },
+        });
+        if (isShuttingDown) return;
+        codex.send(JSON.stringify({ method: "initialized" }));
+      } catch (error) {
+        if (!isShuttingDown) handleCodexTransportError(error);
+        return;
+      }
     }
 
-    publishBridgeStatus(lastPublishedBridgeStatus);
+    codexLaunchState = "connected";
+    const lastPublishedBridgeStatus = bridgeStatusPublisher.latest();
+    if (lastPublishedBridgeStatus) publishBridgeStatus(lastPublishedBridgeStatus);
+    if (initializeEndpoint) connectRelay();
   });
 
   function clearReconnectTimer() {
@@ -1217,7 +1232,7 @@ function startBridge({
     printQR(pairingSession);
   }
   pushServiceClient.logUnavailable();
-  connectRelay();
+  if (!initializeEndpoint) connectRelay();
 
   codex.onMessage((message) => {
     // Streaming deltas make this the hottest path in the bridge: parse the
