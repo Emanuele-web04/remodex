@@ -9,7 +9,7 @@ const fs = require("fs");
 const net = require("net");
 const { createThreadMutationQueue, runtimeSettingsPatch, hasOwn, normalizeThreadSettingsUpdate } = require("./codex-runtime-settings");
 const { projectSemanticItem } = require("./thread-activity-projector");
-const { normalizeSandboxPolicyCompatibility } = require("./desktop-ipc-conversation-adapter");
+const { normalizeDesktopInputEntries, normalizeSandboxPolicyCompatibility } = require("./desktop-ipc-conversation-adapter");
 const { isDesktopRolloutOrigin } = require("./rollout-live-mirror");
 
 const {
@@ -2375,7 +2375,7 @@ function createDesktopIpcActionFollower({
       };
     }
     if (method === "turn/steer") {
-      const input = Array.isArray(params.input) ? params.input : [];
+      const input = normalizeDesktopInputEntries(params.input);
       const state = rawStatesByThreadId.get(threadId);
       const cwd = readString(state?.cwd) || readString(state?.current_working_directory) || null;
       const clientUserMessageId = readString(params.clientUserMessageId) || requestId;
@@ -2605,6 +2605,7 @@ function createDesktopIpcActionFollower({
       ? normalized
       : route.turnStartParams;
     const request = normalizeDesktopRequestPermissions(cloneJSON(turnStartParams));
+    request.input = normalizeDesktopInputEntries(request.input);
     if (!readString(request.clientUserMessageId)) {
       request.clientUserMessageId = route.senderRequestId;
     }

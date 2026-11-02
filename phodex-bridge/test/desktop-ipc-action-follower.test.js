@@ -8497,3 +8497,56 @@ function useProcessPlatform(t, platform) {
     Object.defineProperty(process, "platform", descriptor);
   });
 }
+
+for (const method of ["turn/start", "turn/steer"]) {
+  test(`desktop IPC follower supplies text_elements for ${method} without losing rich input`, async (t) => {
+    const ipcMethod = method === "turn/start" ? "thread-follower-start-turn" : "thread-follower-steer-turn";
+    const ipc = createFakeIpcTransport({
+      onRequest(frame, socket) {
+        if (frame.method !== ipcMethod) return;
+        setImmediate(() => emitFrame(socket, {
+          type: "response", requestId: frame.requestId, method: frame.method,
+          resultType: "success", handledByClientId: "desktop",
+          result: { result: { turn: { id: "text-elements-turn" }, turnId: "text-elements-turn" } },
+        }));
+      },
+    });
+    const observations = [];
+    const follower = createDesktopIpcActionFollower({
+      socketPath: "/tmp/fake-remodex-text-elements.sock",
+      netModule: ipc.netModule,
+      sendApplicationResponse() {},
+      onActivityObservation(value) { observations.push(value); },
+      requestTimeoutMs: 500,
+    });
+    t.after(() => follower.stopAll());
+    follower.observeInbound(JSON.stringify({ method: "thread/list", params: {} }));
+    await waitFor(() => observations.some((value) => value.type === "connected"));
+    sendActivitySnapshot(ipc.state.socket, "text-elements-thread", "inProgress", { turns: [] });
+    await waitFor(() => observations.some((value) => value.type === "state"));
+
+    const input = [
+      { type: "text", text: "hello" },
+      { type: "text", text: "legacy", text_elements: null },
+      { type: "text", text: "tag", text_elements: [{ byteRange: { start: 0, end: 3 }, placeholder: "tag" }] },
+      { type: "image", url: "data:image/png;base64,AA==" },
+      { type: "skill", name: "example", path: "/repo/example/SKILL.md" },
+    ];
+    const original = structuredClone(input);
+    assert.equal(follower.observeInbound(JSON.stringify({
+      id: "text-elements-request", method,
+      params: { threadId: "text-elements-thread", input, expectedTurnId: "text-elements-turn" },
+    })), true);
+    await waitFor(() => ipc.state.frames.some((frame) => frame.method === ipcMethod));
+    const frame = ipc.state.frames.find((frame) => frame.method === ipcMethod);
+    const forwarded = method === "turn/start" ? frame.params.turnStart.request.input : frame.params.input;
+    assert.deepEqual(forwarded, [
+      { type: "text", text: "hello", text_elements: [] },
+      { type: "text", text: "legacy", text_elements: [] },
+      { type: "text", text: "tag", text_elements: [{ byteRange: { start: 0, end: 3 }, placeholder: "tag" }] },
+      { type: "image", url: "data:image/png;base64,AA==" },
+      { type: "skill", name: "example", path: "/repo/example/SKILL.md" },
+    ]);
+    assert.deepEqual(input, original);
+  });
+}

@@ -2477,6 +2477,7 @@ extension CodexService {
                 .object([
                     "type": .string("text"),
                     "text": .string(appendingMissingLegacyMentionTokens(fallbackText, to: trimmedText)),
+                    "text_elements": .array([]),
                 ])
             )
         } else {
@@ -2489,6 +2490,7 @@ extension CodexService {
                     .object([
                         "type": .string("text"),
                         "text": .string(fallbackText),
+                        "text_elements": .array([]),
                     ])
                 )
             }
