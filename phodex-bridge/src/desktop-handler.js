@@ -10,9 +10,9 @@ const path = require("path");
 const { promisify } = require("util");
 const { findRolloutFileForThread, resolveSessionsRoot } = require("./rollout-watch");
 
+const { DEFAULT_CODEX_BUNDLE_ID, resolveCodexAppPath } = require("./codex-desktop-app");
+
 const execFileAsync = promisify(execFile);
-const DEFAULT_BUNDLE_ID = "com.openai.codex";
-const DEFAULT_APP_PATH = "/Applications/Codex.app";
 const DEFAULT_PLATFORM = process.platform;
 const HANDOFF_TIMEOUT_MS = 20_000;
 const DEFAULT_RELAUNCH_WAIT_MS = 300;
@@ -61,11 +61,17 @@ function handleDesktopRequest(rawMessage, sendResponse, options = {}) {
 
 async function handleDesktopMethod(method, params, options = {}) {
   const platform = options.platform || DEFAULT_PLATFORM;
-  const bundleId = options.bundleId || DEFAULT_BUNDLE_ID;
-  const appPath = options.appPath || DEFAULT_APP_PATH;
+  const bundleId = options.bundleId || DEFAULT_CODEX_BUNDLE_ID;
   const executor = options.executor || execFileAsync;
   const env = options.env || process.env;
   const fsModule = options.fsModule || fs;
+  const appPath = resolveCodexAppPath({
+    appPath: options.appPath,
+    bundleId,
+    platform,
+    homeDir: env.HOME,
+    fsImpl: fsModule,
+  });
   const isAppRunning = options.isAppRunning || null;
   const sleepFn = options.sleepFn || sleep;
   const appBootWaitMs = options.appBootWaitMs ?? DEFAULT_APP_BOOT_WAIT_MS;
@@ -200,9 +206,16 @@ async function continueOnDesktop(
     };
   }
 
-  const appRunning = typeof isAppRunning === "function"
-    ? await isAppRunning(appPath)
-    : await detectRunningCodexApp(appPath, executor);
+  const infoPath = appPath ? path.join(appPath, "Contents", "Info.plist") : null;
+  const installedBundle = Boolean(infoPath && fsModule.existsSync(infoPath));
+  const targetArgs = installedBundle ? ["-a", appPath] : ["-b", bundleId];
+  const openApp = (url) => executor("open", url ? [...targetArgs, url] : targetArgs, {
+    timeout: HANDOFF_TIMEOUT_MS,
+  });
+  const processArgs = installedBundle ? await codexAppProcessArgs(appPath, infoPath, executor, fsModule) : null;
+  const checkAppRunning = () => processArgs
+    && (isAppRunning ? isAppRunning(appPath) : detectRunningCodexApp(processArgs, executor));
+  const appRunning = await checkAppRunning();
 
   // If Codex.app is already open, explicit handoff should still feel like a
   // real device switch: close, reopen, then focus the requested thread.
@@ -211,12 +224,10 @@ async function continueOnDesktop(
       // Cold-launch the desktop app first, then deep-link the thread once the
       // router is ready. A single `open codex://threads/...` can land on the
       // default new-chat route when Codex.app is not fully booted yet.
-      await openCodexApp({ bundleId, appPath, executor });
+      await openApp();
       await sleepFn(appBootWaitMs);
       await openWhenThreadReady(threadId, targetUrl, {
-        bundleId,
-        appPath,
-        executor,
+        openApp,
         env,
         fsModule,
         sleepFn,
@@ -244,12 +255,10 @@ async function continueOnDesktop(
   // window before the final deep link is likely to work.
   if (!appRunning) {
     try {
-      await openCodexApp({ bundleId, appPath, executor });
+      await openApp();
       await sleepFn(appBootWaitMs);
       await openWhenThreadReady(threadId, targetUrl, {
-        bundleId,
-        appPath,
-        executor,
+        openApp,
         env,
         fsModule,
         sleepFn,
@@ -275,18 +284,16 @@ async function continueOnDesktop(
 
   try {
     await forceRelaunchCodexApp({
-      bundleId,
-      appPath,
+      openApp,
       executor,
-      isAppRunning,
+      processArgs,
+      checkAppRunning,
       sleepFn,
       relaunchWaitMs,
       appBootWaitMs,
     });
     await openWhenThreadReady(threadId, targetUrl, {
-      bundleId,
-      appPath,
-      executor,
+      openApp,
       env,
       fsModule,
       sleepFn,
@@ -421,40 +428,29 @@ function resolveSessionsRootForEnv(env) {
   return resolveSessionsRoot();
 }
 
-async function detectRunningCodexApp(appPath, executor) {
-  const appName = path.basename(appPath, ".app");
+async function codexAppProcessArgs(appPath, infoPath, executor, fsModule) {
+  const { stdout } = await executor("/usr/bin/plutil", [
+    "-extract", "CFBundleExecutable", "raw", "-o", "-", infoPath,
+  ], { timeout: HANDOFF_TIMEOUT_MS }).catch(() => ({}));
+  const executable = stdout?.trim();
+  if (!executable || executable === "." || executable === ".." || path.basename(executable) !== executable) {
+    return null;
+  }
+  const executablePath = path.join(appPath, "Contents", "MacOS", executable);
+  if (!fsModule.existsSync(executablePath)) return null;
+  // Match the bundle's executable, not every process with the same name.
+  const escaped = executablePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return ["-f", "-x", `${escaped}([[:space:]].*)?`];
+}
 
+async function detectRunningCodexApp(processArgs, executor) {
   try {
-    await executor("pgrep", ["-x", appName], {
+    await executor("pgrep", processArgs, {
       timeout: HANDOFF_TIMEOUT_MS,
     });
     return true;
   } catch {
     return false;
-  }
-}
-
-async function openCodexTarget(targetUrl, { bundleId, appPath, executor }) {
-  try {
-    await executor("open", ["-b", bundleId, targetUrl], {
-      timeout: HANDOFF_TIMEOUT_MS,
-    });
-  } catch {
-    await executor("open", ["-a", appPath, targetUrl], {
-      timeout: HANDOFF_TIMEOUT_MS,
-    });
-  }
-}
-
-async function openCodexApp({ bundleId, appPath, executor }) {
-  try {
-    await executor("open", ["-b", bundleId], {
-      timeout: HANDOFF_TIMEOUT_MS,
-    });
-  } catch {
-    await executor("open", ["-a", appPath], {
-      timeout: HANDOFF_TIMEOUT_MS,
-    });
   }
 }
 
@@ -478,7 +474,7 @@ async function refreshWindowsCodex(targetUrl, { executor, env, sleepFn, settleMs
 async function openWhenThreadReady(
   threadId,
   targetUrl,
-  { bundleId, appPath, executor, env, fsModule, sleepFn, waitMs, pollMs }
+  { openApp, env, fsModule, sleepFn, waitMs, pollMs }
 ) {
   await waitForThreadMaterialization(threadId, {
     env,
@@ -487,22 +483,20 @@ async function openWhenThreadReady(
     timeoutMs: waitMs,
     pollMs,
   });
-  await openCodexTarget(targetUrl, { bundleId, appPath, executor });
+  await openApp(targetUrl);
 }
 
 async function forceRelaunchCodexApp({
-  bundleId,
-  appPath,
+  openApp,
   executor,
-  isAppRunning,
+  processArgs,
+  checkAppRunning,
   sleepFn,
   relaunchWaitMs,
   appBootWaitMs,
 }) {
-  const appName = path.basename(appPath, ".app");
-
   try {
-    await executor("pkill", ["-x", appName], {
+    await executor("pkill", processArgs, {
       timeout: HANDOFF_TIMEOUT_MS,
     });
   } catch (error) {
@@ -511,20 +505,17 @@ async function forceRelaunchCodexApp({
     }
   }
 
-  await waitForAppExit(appPath, executor, isAppRunning);
+  await waitForAppExit(checkAppRunning);
   await sleepFn(relaunchWaitMs);
-  await openCodexApp({ bundleId, appPath, executor });
+  await openApp();
   await sleepFn(appBootWaitMs);
 }
 
-async function waitForAppExit(appPath, executor, isAppRunning) {
+async function waitForAppExit(checkAppRunning) {
   const deadline = Date.now() + HANDOFF_TIMEOUT_MS;
 
   while (Date.now() < deadline) {
-    const isRunning = typeof isAppRunning === "function"
-      ? await isAppRunning(appPath)
-      : await detectRunningCodexApp(appPath, executor);
-    if (!isRunning) {
+    if (!await checkAppRunning()) {
       return;
     }
 

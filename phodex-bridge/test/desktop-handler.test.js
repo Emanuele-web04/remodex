@@ -10,66 +10,76 @@ const path = require("node:path");
 
 const { handleDesktopRequest } = require("../src/desktop-handler");
 
-test("desktop/continueOnMac relaunches Codex for the requested thread", async () => {
-  const executorCalls = [];
-  const responses = [];
+test("desktop handoff detects and relaunches the configured bundle's executable", async () => {
+  const appPath = "/test/Custom ChatGPT.app";
+  const infoPath = path.join(appPath, "Contents", "Info.plist");
+  const executablePath = path.join(appPath, "Contents", "MacOS", "ChatGPT");
+  const processPattern = executablePath + "([[:space:]].*)?";
   let running = true;
-
-  const handled = handleDesktopRequest(JSON.stringify({
-    id: "request-1",
-    method: "desktop/continueOnMac",
-    params: {
-      threadId: "thread-123",
-    },
-  }), (response) => {
-    responses.push(JSON.parse(response));
-  }, {
-    platform: "darwin",
-    bundleId: "com.openai.codex",
-    appPath: "/Applications/Codex.app",
-    executor: async (...args) => {
-      executorCalls.push(args);
-      if (args[0] === "pkill") {
-        running = false;
-      }
-      return { stdout: "", stderr: "" };
-    },
-    isAppRunning: async () => running,
-    sleepFn: async () => {},
-    threadMaterializeWaitMs: 0,
+  const processCalls = [];
+  const openCalls = [];
+  const response = await new Promise((resolve) => {
+    handleDesktopRequest(JSON.stringify({
+      id: "current-app",
+      method: "desktop/continueOnMac",
+      params: { threadId: "thread-123" },
+    }), resolve, {
+      platform: "darwin",
+      appPath,
+      fsModule: { existsSync: (candidate) => [infoPath, executablePath].includes(candidate) },
+      executor: async (command, args) => {
+        if (command === "/usr/bin/plutil") return { stdout: "ChatGPT" };
+        if (command === "pgrep" || command === "pkill") {
+          processCalls.push([command, ...args]);
+          if (command === "pkill") running = false;
+          else if (!running) throw Object.assign(new Error("not running"), { code: 1 });
+        }
+        if (command === "open") openCalls.push(args);
+        return { stdout: "" };
+      },
+      sleepFn: async () => {},
+      threadMaterializeWaitMs: 0,
+    });
   });
-
-  assert.equal(handled, true);
-
-  await new Promise((resolve) => setTimeout(resolve, 0));
-
-  assert.equal(executorCalls.length, 3);
-  assert.equal(executorCalls[0][0], "pkill");
-  assert.deepEqual(executorCalls[0][1], [
-    "-x",
-    "Codex",
+  assert.equal(JSON.parse(response).result?.relaunched, true);
+  assert.deepEqual(openCalls, [
+    ["-a", appPath],
+    ["-a", appPath, "codex://threads/thread-123"],
   ]);
-  assert.equal(executorCalls[1][0], "open");
-  assert.deepEqual(executorCalls[1][1], [
-    "-b",
-    "com.openai.codex",
+  assert.deepEqual(processCalls, [
+    ["pgrep", "-f", "-x", processPattern.replace(".app", "\\.app")],
+    ["pkill", "-f", "-x", processPattern.replace(".app", "\\.app")],
+    ["pgrep", "-f", "-x", processPattern.replace(".app", "\\.app")],
   ]);
-  assert.equal(executorCalls[2][0], "open");
-  assert.deepEqual(executorCalls[2][1], [
-    "-b",
-    "com.openai.codex",
-    "codex://threads/thread-123",
+});
+
+test("desktop handoff skips relaunch when the configured bundle cannot be verified", async () => {
+  const commands = [];
+  let running = true;
+  const response = await new Promise((resolve) => {
+    handleDesktopRequest(JSON.stringify({
+      id: "unavailable-bundle",
+      method: "desktop/continueOnMac",
+      params: { threadId: "thread-123" },
+    }), resolve, {
+      platform: "darwin",
+      appPath: "/missing/ChatGPT.app",
+      fsModule: { existsSync: () => false },
+      isAppRunning: async () => running,
+      executor: async (command, args) => {
+        commands.push([command, ...args]);
+        if (command === "pkill") running = false;
+        return { stdout: "" };
+      },
+      sleepFn: async () => {},
+      threadMaterializeWaitMs: 0,
+    });
+  });
+  assert.equal(JSON.parse(response).result?.relaunched, false);
+  assert.deepEqual(commands, [
+    ["open", "-b", "com.openai.codex"],
+    ["open", "-b", "com.openai.codex", "codex://threads/thread-123"],
   ]);
-  assert.deepEqual(responses, [{
-    id: "request-1",
-    result: {
-      success: true,
-      relaunched: true,
-      targetUrl: "codex://threads/thread-123",
-      threadId: "thread-123",
-      desktopKnown: false,
-    },
-  }]);
 });
 
 test("desktop/continueOnMac boots Codex before deep-linking unknown threads", async () => {
@@ -118,9 +128,13 @@ test("desktop/continueOnMac relaunches when a desktop-known thread is requested 
   const executorCalls = [];
   const responses = [];
   let running = true;
+  const appPath = "/test/Legacy Codex.app";
   const fakeFS = {
     existsSync(targetPath) {
-      return /[\\/]sessions$/.test(targetPath);
+      return /[\\/]sessions$/.test(targetPath) || [
+        path.join(appPath, "Contents", "Info.plist"),
+        path.join(appPath, "Contents", "MacOS", "Codex"),
+      ].includes(targetPath);
     },
     readdirSync() {
       return [{
@@ -150,10 +164,11 @@ test("desktop/continueOnMac relaunches when a desktop-known thread is requested 
   }, {
     platform: "darwin",
     bundleId: "com.openai.codex",
-    appPath: "/Applications/Codex.app",
+    appPath,
     env: { CODEX_HOME: "/tmp/codex-home" },
     fsModule: fakeFS,
     executor: async (...args) => {
+      if (args[0] === "/usr/bin/plutil") return { stdout: "Codex" };
       executorCalls.push(args);
       if (args[0] === "pkill") {
         running = false;
@@ -169,18 +184,19 @@ test("desktop/continueOnMac relaunches when a desktop-known thread is requested 
   assert.equal(executorCalls.length, 3);
   assert.equal(executorCalls[0][0], "pkill");
   assert.deepEqual(executorCalls[0][1], [
+    "-f",
     "-x",
-    "Codex",
+    "/test/Legacy Codex\\.app/Contents/MacOS/Codex([[:space:]].*)?",
   ]);
   assert.equal(executorCalls[1][0], "open");
   assert.deepEqual(executorCalls[1][1], [
-    "-b",
-    "com.openai.codex",
+    "-a",
+    appPath,
   ]);
   assert.equal(executorCalls[2][0], "open");
   assert.deepEqual(executorCalls[2][1], [
-    "-b",
-    "com.openai.codex",
+    "-a",
+    appPath,
     "codex://threads/thread-desktop-known",
   ]);
   assert.equal(responses[0].result?.relaunched, true);

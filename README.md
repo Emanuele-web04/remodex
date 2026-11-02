@@ -346,6 +346,7 @@ remodex watch
 | `REMODEX_RELAY` | empty in source checkouts; optional in published packages | Session base URL used for QR bootstrap, trusted-session resolve, and phone/Mac session routing |
 | `REMODEX_PUSH_SERVICE_URL` | disabled by default | Optional HTTP base URL for managed push registration/completion |
 | `REMODEX_CODEX_ENDPOINT` | — | Connect to an existing Codex WebSocket instead of spawning a local `codex app-server` |
+| `REMODEX_CODEX_APP_PATH` | auto-detected on macOS | Override the local ChatGPT or Codex desktop bundle used for the bundled CLI and handoff |
 | `REMODEX_OPENCODE_BIN` | `~/.opencode/bin/opencode` | Path to the local OpenCode executable if installed elsewhere |
 | `REMODEX_DESKTOP_IPC_LIVE_SYNC` | `true` | Broadcast Remodex-owned active threads over the local Codex Desktop / VSCode IPC bus |
 | `REMODEX_DESKTOP_AUTO_FOLLOW` | `false` | Explicitly opt in to opening phone-driven threads in Codex Desktop |
