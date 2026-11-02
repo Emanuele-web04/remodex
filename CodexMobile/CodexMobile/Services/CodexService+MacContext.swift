@@ -165,6 +165,44 @@ extension CodexService {
         }
     }
 
+    func mergeMacScopedChangeSets(
+        from sourceDeviceIds: [String],
+        to targetDeviceId: String
+    ) -> (changed: Bool, pending: Set<String>) {
+        let sourceDeviceIds = uniqueNormalizedMacDeviceIds(sourceDeviceIds).filter { $0 != targetDeviceId }
+        var pending = Set(sourceDeviceIds)
+        guard !pending.isEmpty,
+              let targetChangeSets = aiChangeSetPersistence.load(macDeviceId: targetDeviceId) else {
+            return (false, pending)
+        }
+
+        var targetChangeSetsById = targetChangeSets.reduce(into: [String: AIChangeSet]()) { partialResult, changeSet in
+            partialResult[changeSet.id] = changeSet
+        }
+        var mergedSourceIds: [String] = []
+        var changed = false
+
+        for sourceDeviceId in sourceDeviceIds {
+            guard let sourceChangeSets = aiChangeSetPersistence.load(macDeviceId: sourceDeviceId) else {
+                continue
+            }
+            for changeSet in sourceChangeSets where targetChangeSetsById[changeSet.id] == nil {
+                targetChangeSetsById[changeSet.id] = changeSet
+                changed = true
+            }
+            mergedSourceIds.append(sourceDeviceId)
+        }
+
+        if changed, !aiChangeSetPersistence.save(Array(targetChangeSetsById.values), macDeviceId: targetDeviceId) {
+            return (false, pending)
+        }
+
+        for sourceDeviceId in mergedSourceIds where aiChangeSetPersistence.delete(macDeviceId: sourceDeviceId) {
+            pending.remove(sourceDeviceId)
+        }
+        return (changed, pending)
+    }
+
     func loadCurrentMacScopedDefaultsState() {
         loadMacScopedDefaultsState(for: normalizedCurrentTrustedMacDeviceId)
     }
@@ -714,44 +752,6 @@ private extension CodexService {
 
         composerDraftPersistence.save(targetDrafts, macDeviceId: targetDeviceId)
         return true
-    }
-
-    func mergeMacScopedChangeSets(
-        from sourceDeviceIds: [String],
-        to targetDeviceId: String
-    ) -> (changed: Bool, pending: Set<String>) {
-        let sourceDeviceIds = uniqueNormalizedMacDeviceIds(sourceDeviceIds).filter { $0 != targetDeviceId }
-        var pending = Set(sourceDeviceIds)
-        guard !pending.isEmpty,
-              let targetChangeSets = aiChangeSetPersistence.load(macDeviceId: targetDeviceId) else {
-            return (false, pending)
-        }
-
-        var targetChangeSetsById = targetChangeSets.reduce(into: [String: AIChangeSet]()) { partialResult, changeSet in
-            partialResult[changeSet.id] = changeSet
-        }
-        var mergedSourceIds: [String] = []
-        var changed = false
-
-        for sourceDeviceId in sourceDeviceIds {
-            guard let sourceChangeSets = aiChangeSetPersistence.load(macDeviceId: sourceDeviceId) else {
-                continue
-            }
-            for changeSet in sourceChangeSets where targetChangeSetsById[changeSet.id] == nil {
-                targetChangeSetsById[changeSet.id] = changeSet
-                changed = true
-            }
-            mergedSourceIds.append(sourceDeviceId)
-        }
-
-        if changed, !aiChangeSetPersistence.save(Array(targetChangeSetsById.values), macDeviceId: targetDeviceId) {
-            return (false, pending)
-        }
-
-        for sourceDeviceId in mergedSourceIds where aiChangeSetPersistence.delete(macDeviceId: sourceDeviceId) {
-            pending.remove(sourceDeviceId)
-        }
-        return (changed, pending)
     }
 
     // Target values win so a current device's fresh settings are not overwritten by stale ids.

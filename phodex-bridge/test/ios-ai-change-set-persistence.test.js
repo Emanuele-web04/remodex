@@ -16,7 +16,6 @@ test("iOS AI change-set ledger stays encrypted and retries interrupted migration
   // Compile the real ledger lifecycle methods without unrelated view, messaging, or defaults state.
   const methods = [
     ["func loadMacScopedAIChangeSets(", "func loadCurrentMacScopedDefaultsState("],
-    ["func mergeMacScopedChangeSets(", "// Target values win"],
     ["func uniqueNormalizedMacDeviceIds(", "func migrateMacScopedLocalCaches("],
     ["func normalizedMacScopedDeviceId(", "func shouldLoadLegacyLocalStateFallback("],
   ].map(([start, end]) => {
