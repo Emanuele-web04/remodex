@@ -14,6 +14,28 @@ final class TurnMessageCachesTests: XCTestCase {
         super.tearDown()
     }
 
+    func testDetailedDiffBudgetCountsContextRowsAndLongLines() {
+        XCTAssertTrue(TurnDiffRenderingPolicy.canRenderDetails("@@ -1 +1 @@\n-old\n+new"))
+        XCTAssertFalse(TurnDiffRenderingPolicy.canRenderDetails(String(repeating: " unchanged\n", count: 2_001)))
+        XCTAssertFalse(TurnDiffRenderingPolicy.canRenderDetails("+" + String(repeating: "é", count: 8_001)))
+        XCTAssertFalse(TurnDiffRenderingPolicy.canRenderDetails(String(repeating: String(repeating: "x", count: 200) + "\n", count: 1_300)))
+    }
+
+    func testLargeDiffScopesEverySmallFileSectionAcrossLegacyHeaders() {
+        let firstSection = "Status: Edited\n\nPath: src/small.swift\n```diff\n@@ -1 +1 @@\n-old\n+new\n```"
+        let largeSection = "Path: src/big.txt\n" + String(repeating: " unchanged\n", count: 2_001)
+        let lastSection = "**Path:** `src/small.swift`\n```diff\n@@ -3 +3 @@\n-old tail\n+new tail\n```"
+        let separator = "\n\n---\n\n"
+        let aggregate = [firstSection, largeSection, lastSection].joined(separator: separator)
+
+        XCTAssertFalse(TurnDiffRenderingPolicy.canRenderDetails(aggregate))
+        XCTAssertEqual(
+            TurnDiffRenderingPolicy.section(for: "/repo/src/small.swift", in: aggregate),
+            [firstSection, lastSection].joined(separator: separator)
+        )
+        XCTAssertNil(TurnDiffRenderingPolicy.section(for: "/repo/src/big.txt", in: aggregate))
+    }
+
     func testMarkdownRenderableTextCacheSeparatesEqualLengthTexts() {
         var buildCount = 0
 

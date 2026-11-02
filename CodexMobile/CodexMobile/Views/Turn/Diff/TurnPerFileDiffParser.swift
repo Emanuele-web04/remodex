@@ -26,7 +26,7 @@ struct PerFileDiffChunk: Identifiable {
     }
 }
 
-enum FileChangePathIdentity {
+nonisolated enum FileChangePathIdentity {
     // Treats absolute-vs-relative references to the same repo file as one identity,
     // while keeping same-named files in different directories separate.
     static func representsSameFile(_ lhs: String, _ rhs: String) -> Bool {
@@ -127,13 +127,8 @@ enum PerFileDiffParser {
         while i < lines.count {
             let trimmed = lines[i].trimmingCharacters(in: .whitespacesAndNewlines)
 
-            if trimmed.hasPrefix("**Path:**") || trimmed.hasPrefix("Path:") {
-                let raw = trimmed
-                    .replacingOccurrences(of: "**Path:**", with: "")
-                    .replacingOccurrences(of: "Path:", with: "")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                    .trimmingCharacters(in: CharacterSet(charactersIn: "`"))
-                if !raw.isEmpty { currentPath = raw }
+            if let path = pathFromHeader(trimmed) {
+                currentPath = path
                 i += 1
                 continue
             }
@@ -285,19 +280,19 @@ enum PerFileDiffParser {
         return lhsRank <= rhsRank ? lhs : rhs
     }
 
-    private static func extractPath(from lines: [String]) -> String? {
-        for line in lines {
-            let t = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            if t.hasPrefix("**Path:**") || t.hasPrefix("Path:") {
-                let raw = t
-                    .replacingOccurrences(of: "**Path:**", with: "")
-                    .replacingOccurrences(of: "Path:", with: "")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                    .trimmingCharacters(in: CharacterSet(charactersIn: "`"))
-                if !raw.isEmpty { return raw }
-            }
+    nonisolated static func pathFromHeader(_ line: String) -> String? {
+        let header = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        for prefix in ["**Path:**", "Path:"] where header.hasPrefix(prefix) {
+            let path = header.dropFirst(prefix.count)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "`"))
+            return path.isEmpty ? nil : path
         }
         return nil
+    }
+
+    private static func extractPath(from lines: [String]) -> String? {
+        lines.lazy.compactMap { pathFromHeader($0) }.first
     }
 
     private static func extractFencedCode(from lines: [String]) -> String? {

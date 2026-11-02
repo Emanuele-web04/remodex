@@ -250,12 +250,14 @@ struct UnifiedDiffView: View {
     let diff: UnifiedDiff
     let rawDiffCode: String
     let collapseAllHunks: Bool
-    @State private var collapsedHunkIDs: Set<String> = []
+    @State private var collapsedHunkIDs: Set<String>
 
     init(diffCode: String, collapseAllHunks: Bool = false) {
         rawDiffCode = diffCode
-        diff = UnifiedDiffParser.parse(diffCode)
+        let parsedDiff = UnifiedDiffParser.parse(diffCode)
+        diff = parsedDiff
         self.collapseAllHunks = collapseAllHunks
+        _collapsedHunkIDs = State(initialValue: collapseAllHunks ? Set(parsedDiff.hunks.map(\.id)) : [])
     }
 
     // Always renderable as long as we have any text to show. The view itself falls back to a
