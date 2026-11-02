@@ -14,6 +14,22 @@ final class TurnMessageCachesTests: XCTestCase {
         super.tearDown()
     }
 
+    func testDetailedDiffBudgetCountsContextRowsAndLongLines() {
+        XCTAssertTrue(TurnDiffRenderingPolicy.canRenderDetails("@@ -1 +1 @@\n-old\n+new"))
+        XCTAssertFalse(TurnDiffRenderingPolicy.canRenderDetails(String(repeating: " unchanged\n", count: 2_001)))
+        XCTAssertFalse(TurnDiffRenderingPolicy.canRenderDetails("+" + String(repeating: "é", count: 8_001)))
+        XCTAssertFalse(TurnDiffRenderingPolicy.canRenderDetails(String(repeating: String(repeating: "x", count: 200) + "\n", count: 1_300)))
+    }
+
+    func testLargeDiffCanStillScopeToSmallFileWithMarkdownPathHeader() {
+        let largeFile = "Path: src/big.txt\n" + String(repeating: " unchanged\n", count: 2_001)
+        let smallFile = "**Path:** `src/small.swift`\n```diff\n@@ -1 +1 @@\n-old\n+new\n```"
+        let aggregate = largeFile + "\n\n---\n\n" + smallFile
+
+        XCTAssertFalse(TurnDiffRenderingPolicy.canRenderDetails(aggregate))
+        XCTAssertEqual(TurnDiffRenderingPolicy.section(for: "/repo/src/small.swift", in: aggregate), smallFile)
+    }
+
     func testMarkdownRenderableTextCacheSeparatesEqualLengthTexts() {
         var buildCount = 0
 

@@ -674,7 +674,11 @@ struct NewChatDraftView: View {
             let gitService = GitActionsService(codex: codex, workingDirectory: selectedProjectPath)
             do {
                 let result = try await gitService.diff()
-                guard let presentation = TurnDiffPresentationBuilder.repositoryPresentation(from: result.patch) else {
+                let patch = result.patch
+                let presentation = await Task.detached(priority: .userInitiated) {
+                    TurnDiffPresentationBuilder.repositoryPresentation(from: patch)
+                }.value
+                guard let presentation else {
                     viewModel.gitSyncAlert = TurnGitSyncAlert(
                         title: "Git Error",
                         message: "There are no repository changes to show.",

@@ -487,7 +487,7 @@ enum AIUnifiedPatchParser {
         )
     }
 
-    static func hash(for rawPatch: String) -> String {
+    nonisolated static func hash(for rawPatch: String) -> String {
         let digest = SHA256.hash(data: Data(rawPatch.utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
     }

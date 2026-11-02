@@ -11,7 +11,7 @@ struct TurnDiffLineTotals {
     var deletions: Int = 0
 }
 
-enum TurnFileChangeAction: String, Hashable {
+nonisolated enum TurnFileChangeAction: String, Hashable, Sendable {
     case edited = "Edited"
     case added = "Added"
     case deleted = "Deleted"
@@ -48,7 +48,7 @@ enum TurnFileChangeAction: String, Hashable {
     }
 }
 
-struct TurnFileChangeSummaryEntry: Identifiable, Hashable {
+nonisolated struct TurnFileChangeSummaryEntry: Identifiable, Hashable, Sendable {
     let path: String
     var additions: Int
     var deletions: Int

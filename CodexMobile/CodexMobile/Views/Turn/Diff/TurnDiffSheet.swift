@@ -7,7 +7,7 @@
 import Foundation
 import SwiftUI
 
-struct TurnDiffPresentation: Identifiable, Equatable {
+nonisolated struct TurnDiffPresentation: Identifiable, Equatable, Sendable {
     let id: String
     let title: String
     let bodyText: String
@@ -15,7 +15,48 @@ struct TurnDiffPresentation: Identifiable, Equatable {
     let messageID: String
 }
 
-enum TurnDiffPresentationBuilder {
+nonisolated enum TurnDiffRenderingPolicy {
+    static func canRenderDetails(_ body: String) -> Bool {
+        let maximumBytes = 256_000
+        let maximumLines = 2_000
+        let maximumLineBytes = 16_000
+        guard body.utf8.count <= maximumBytes else { return false }
+
+        var lines = 1
+        var lineBytes = 0
+        for byte in body.utf8 {
+            if byte == 0x0A {
+                lines += 1
+                lineBytes = 0
+                if lines > maximumLines { return false }
+            } else {
+                lineBytes += 1
+                if lineBytes > maximumLineBytes { return false }
+            }
+        }
+        return true
+    }
+
+    // Large aggregate changes can still contain a small, inspectable file.
+    static func section(for path: String, in body: String) -> String? {
+        let separator = "\n\n---\n\n"
+        var start = body.startIndex
+        while start < body.endIndex {
+            let boundary = body.range(of: separator, range: start..<body.endIndex)
+            let section = body[start..<(boundary?.lowerBound ?? body.endIndex)]
+            let header = section.prefix(while: { !$0.isNewline })
+            if let candidate = PerFileDiffParser.pathFromHeader(String(header)),
+               FileChangePathIdentity.representsSameFile(candidate, path) {
+                return String(section)
+            }
+            guard let boundary else { break }
+            start = boundary.upperBound
+        }
+        return nil
+    }
+}
+
+nonisolated enum TurnDiffPresentationBuilder {
     // Converts a raw unified repo patch into the same sectioned shape the existing diff sheet already renders.
     static func repositoryPresentation(from rawPatch: String, title: String = "Repository Changes") -> TurnDiffPresentation? {
         let patch = rawPatch.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -33,7 +74,7 @@ enum TurnDiffPresentationBuilder {
             )
         }
 
-        let bodyText = chunks.map { chunk in
+        let bodyText = TurnDiffRenderingPolicy.canRenderDetails(patch) ? chunks.map { chunk in
             let action = chunk.action?.rawValue.lowercased() ?? "edited"
             return """
             Path: \(chunk.path)
@@ -45,14 +86,15 @@ enum TurnDiffPresentationBuilder {
             ```
             """
         }
-        .joined(separator: "\n\n---\n\n")
+        .joined(separator: "\n\n---\n\n") : patch
 
+        let patchID = AIUnifiedPatchParser.hash(for: patch)
         return TurnDiffPresentation(
-            id: AIUnifiedPatchParser.hash(for: patch),
+            id: patchID,
             title: title,
             bodyText: bodyText,
             entries: entries,
-            messageID: "repo-diff-\(AIUnifiedPatchParser.hash(for: patch))"
+            messageID: "repo-diff-\(patchID)"
         )
     }
 
@@ -179,9 +221,11 @@ struct TurnDiffSheet: View {
     let entries: [TurnFileChangeSummaryEntry]
     let bodyText: String
     let messageID: String
-    var restrictToPath: String?
+    let restrictToPath: String?
+    private let canRenderBodyDetails: Bool
 
     @Environment(\.dismiss) private var dismiss
+    @State private var scopedBodyText: String?
     @State private var allHunksCollapsed = false
     @State private var presentationDetent: PresentationDetent = .large
 
@@ -197,38 +241,86 @@ struct TurnDiffSheet: View {
         self.bodyText = bodyText
         self.messageID = messageID
         self.restrictToPath = restrictToPath
+        self.canRenderBodyDetails = TurnDiffRenderingPolicy.canRenderDetails(bodyText)
     }
 
-    private var chunks: [PerFileDiffChunk] {
-        let all = PerFileDiffChunkCache.chunks(messageID: messageID, bodyText: bodyText, entries: entries)
-        guard let restrictToPath else { return all }
-        return all.filter { FileChangePathIdentity.representsSameFile($0.path, restrictToPath) }
+    private var visibleEntries: [TurnFileChangeSummaryEntry] {
+        guard let restrictToPath else { return entries }
+        return entries.filter { FileChangePathIdentity.representsSameFile($0.path, restrictToPath) }
     }
 
-    private var totals: (additions: Int, deletions: Int) {
-        chunks.reduce(into: (0, 0)) { totals, chunk in
-            totals.0 += chunk.additions
-            totals.1 += chunk.deletions
+    private var needsScopedBody: Bool {
+        restrictToPath != nil && !canRenderBodyDetails
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if canRenderBodyDetails {
+            detailedContent(bodyText)
+        } else if needsScopedBody, scopedBodyText == nil {
+            ProgressView()
+                .frame(maxWidth: .infinity, minHeight: 120)
+        } else if let detail = scopedBodyText, !detail.isEmpty, TurnDiffRenderingPolicy.canRenderDetails(detail) {
+            detailedContent(detail)
+        } else {
+            summaryContent
         }
     }
 
-    private var allExpanded: Bool {
-        !allHunksCollapsed
+    private func detailedContent(_ detail: String) -> some View {
+        let cacheID = needsScopedBody ? "\(messageID)|\(restrictToPath ?? "")" : messageID
+        let parsedChunks = PerFileDiffChunkCache.chunks(
+            messageID: cacheID,
+            bodyText: detail,
+            entries: needsScopedBody ? visibleEntries : entries
+        )
+        let chunks = parsedChunks.filter { chunk in
+            restrictToPath.map { FileChangePathIdentity.representsSameFile(chunk.path, $0) } ?? true
+        }
+        let totals = chunks.reduce(into: (additions: 0, deletions: 0)) { totals, chunk in
+            totals.additions += chunk.additions
+            totals.deletions += chunk.deletions
+        }
+        return LazyVStack(alignment: .leading, spacing: 12) {
+            summaryHeader(fileCount: chunks.count, totals: totals, showsCollapseControl: !chunks.isEmpty)
+            ForEach(chunks) { chunk in
+                TurnDiffFileCard(chunk: chunk, collapseAllHunks: allHunksCollapsed)
+            }
+        }
+    }
+
+    private var summaryContent: some View {
+        let entries = visibleEntries
+        let shownEntries = entries.prefix(200)
+        return LazyVStack(alignment: .leading, spacing: 12) {
+            Text("This diff is too large to display in full.")
+                .font(AppFont.footnote())
+                .foregroundStyle(.secondary)
+
+            ForEach(shownEntries) { entry in
+                HStack {
+                    Text(entry.path)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer()
+                    DiffCountsLabel(additions: entry.additions, deletions: entry.deletions)
+                        .font(AppFont.mono(.caption))
+                }
+                .font(AppFont.subheadline())
+            }
+
+            if entries.count > shownEntries.count {
+                Text("\(entries.count - shownEntries.count) more files")
+                    .font(AppFont.footnote())
+                    .foregroundStyle(.secondary)
+            }
+        }
     }
 
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    summaryHeader
-
-                    ForEach(chunks) { chunk in
-                        TurnDiffFileCard(
-                            chunk: chunk,
-                            collapseAllHunks: allHunksCollapsed
-                        )
-                    }
-                }
+                content
                 .padding(.vertical)
                 .padding(.horizontal, 12)
             }
@@ -242,13 +334,25 @@ struct TurnDiffSheet: View {
             }
         }
         .presentationDetents([.medium, .large], selection: $presentationDetent)
+        .task(id: messageID) {
+            guard let restrictToPath, needsScopedBody else { return }
+            let bodyText = bodyText
+            let section = await Task.detached(priority: .userInitiated) {
+                TurnDiffRenderingPolicy.section(for: restrictToPath, in: bodyText)
+            }.value
+            guard !Task.isCancelled else { return }
+            scopedBodyText = section ?? ""
+        }
     }
 
-    private var summaryHeader: some View {
-        let totals = totals
-        return HStack(alignment: .top) {
+    private func summaryHeader(
+        fileCount: Int,
+        totals: (additions: Int, deletions: Int),
+        showsCollapseControl: Bool
+    ) -> some View {
+        HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("\(chunks.count) file\(chunks.count == 1 ? "" : "s") changed")
+                Text("\(fileCount) file\(fileCount == 1 ? "" : "s") changed")
                     .font(AppFont.subheadline(weight: .semibold))
                     .foregroundStyle(.primary)
 
@@ -260,13 +364,13 @@ struct TurnDiffSheet: View {
 
             Spacer(minLength: 8)
 
-            if !chunks.isEmpty {
+            if showsCollapseControl {
                 Button {
                     withAnimation(.easeInOut(duration: 0.18)) {
                         allHunksCollapsed.toggle()
                     }
                 } label: {
-                    Text(allExpanded ? "Collapse All" : "Expand All")
+                    Text(allHunksCollapsed ? "Expand All" : "Collapse All")
                         .font(AppFont.mono(.caption))
                         .foregroundStyle(.blue)
                 }
