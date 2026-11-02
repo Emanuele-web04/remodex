@@ -99,6 +99,7 @@ const { buildApplyPatchFileChangeItem } = require("./apply-patch-changes");
 
 const execFileAsync = promisify(execFile);
 const RELAY_HISTORY_IMAGE_REFERENCE_URL = "remodex://history-image-elided";
+const BRIDGE_MANAGED_REQUEST_ID_PREFIX = "bridge-managed-";
 const RELAY_THREAD_PAYLOAD_SOFT_LIMIT_BYTES = 4 * 1024 * 1024;
 const OPEN_CODE_THREAD_LIST_CURSOR_PREFIX = "remodex-opencode-list-v1:";
 const THREAD_LIST_DEFAULT_LIMIT = 100;
@@ -2296,7 +2297,7 @@ function startBridge({
   // Runs bridge-private JSON-RPC calls against the local app-server so token-bearing responses
   // can power bridge features like transcription without ever reaching the phone.
   function sendCodexRequest(method, params) {
-    const requestId = `bridge-managed-${randomBytes(12).toString("hex")}`;
+    const requestId = `${BRIDGE_MANAGED_REQUEST_ID_PREFIX}${randomBytes(12).toString("hex")}`;
     const payload = JSON.stringify({
       id: requestId,
       method,
@@ -2335,13 +2336,18 @@ function startBridge({
     }
 
     const responseId = typeof parsed?.id === "string" ? parsed.id : null;
-    if (!responseId) {
+    if (!responseId?.startsWith(BRIDGE_MANAGED_REQUEST_ID_PREFIX)) {
+      return false;
+    }
+    if (typeof parsed.method === "string"
+      && !hasOwn(parsed, "result") && !hasOwn(parsed, "error") && !hasOwn(parsed, "payload")) {
       return false;
     }
 
     const waiter = bridgeManagedCodexRequestWaiters.get(responseId);
     if (!waiter) {
-      return false;
+      // Private replies can carry credentials even after their caller timed out.
+      return true;
     }
 
     bridgeManagedCodexRequestWaiters.delete(responseId);

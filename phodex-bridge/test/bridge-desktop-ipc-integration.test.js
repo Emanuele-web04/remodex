@@ -1171,6 +1171,49 @@ test("bridge pages mixed active and archived catalogs without forwarding its cur
     && message.params?.threadId === "opencode:ses_3");
 });
 
+test("a timed-out private auth response cannot reach the phone", async (t) => {
+  const relayServer = new WebSocket.Server({ port: 0 });
+  const messages = [];
+  const fakeCodex = createFakeCodexTransport();
+  let relaySocket;
+  let bridge;
+  t.after(() => {
+    bridge?.stop();
+    relaySocket?.close();
+    relayServer.close();
+  });
+  t.mock.method(globalThis, "fetch", async () => ({ body: null }));
+  const originalSetTimeout = globalThis.setTimeout;
+  t.mock.method(globalThis, "setTimeout", (callback, delay, ...args) =>
+    originalSetTimeout(callback, delay === 20_000 ? 15 : delay, ...args));
+  await new Promise((resolve) => relayServer.once("listening", resolve));
+  relayServer.on("connection", (socket) => {
+    relaySocket = socket;
+    socket.on("message", (data) => messages.push(JSON.parse(data.toString("utf8"))));
+  });
+  const { startBridge } = loadBridgeWithTestDoubles({ createCodexTransportImpl: () => fakeCodex });
+  bridge = startBridge({
+    printPairingQr: false,
+    config: bridgeTestConfig(relayServer, { codexEndpoint: "ws://fake-codex" }),
+  });
+  await waitFor(() => relaySocket?.readyState === WebSocket.OPEN);
+
+  relaySocket.send(JSON.stringify({ id: "prewarm", method: "voice/prewarm" }));
+  await waitForMessage(messages, (message) => message.id === "prewarm");
+  const privateAuth = fakeCodex.sent.find((message) => message.method === "getAuthStatus");
+  assert.ok(privateAuth);
+  await wait(35);
+
+  fakeCodex.emitMessage({ id: privateAuth.id, result: { authToken: "fixture-token" } });
+  fakeCodex.emitMessage({
+    id: privateAuth.id,
+    method: "item/commandExecution/requestApproval",
+    params: { threadId: "fixture-thread" },
+  });
+  await waitForMessage(messages, (message) => message.method === "item/commandExecution/requestApproval");
+  assert.equal(messages.some((message) => message.id === privateAuth.id && "result" in message), false);
+});
+
 test("bridge Activity is opt-in and canonical-only endpoints need no Desktop IPC", async (t) => {
   const relayServer = new WebSocket.Server({ port: 0 });
   const relayMessages = [];
