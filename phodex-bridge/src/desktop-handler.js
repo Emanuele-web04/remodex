@@ -212,10 +212,9 @@ async function continueOnDesktop(
   const openApp = (url) => executor("open", url ? [...targetArgs, url] : targetArgs, {
     timeout: HANDOFF_TIMEOUT_MS,
   });
-  const processArgs = await codexAppProcessArgs(appPath, installedBundle ? infoPath : null, executor);
-  const checkAppRunning = isAppRunning
-    ? () => isAppRunning(appPath)
-    : () => appPath && detectRunningCodexApp(processArgs, executor);
+  const processArgs = installedBundle ? await codexAppProcessArgs(appPath, infoPath, executor, fsModule) : null;
+  const checkAppRunning = () => processArgs
+    && (isAppRunning ? isAppRunning(appPath) : detectRunningCodexApp(processArgs, executor));
   const appRunning = await checkAppRunning();
 
   // If Codex.app is already open, explicit handoff should still feel like a
@@ -429,20 +428,19 @@ function resolveSessionsRootForEnv(env) {
   return resolveSessionsRoot();
 }
 
-async function codexAppProcessArgs(appPath, infoPath, executor) {
-  if (infoPath) {
-    const { stdout } = await executor("/usr/bin/plutil", [
-      "-extract", "CFBundleExecutable", "raw", "-o", "-", infoPath,
-    ], { timeout: HANDOFF_TIMEOUT_MS }).catch(() => ({}));
-    const executable = stdout?.trim();
-    if (executable && path.basename(executable) === executable) {
-      const executablePath = path.join(appPath, "Contents", "MacOS", executable);
-      // Match the bundle's executable, not every process named ChatGPT.
-      const escaped = executablePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      return ["-f", "-x", `${escaped}([[:space:]].*)?`];
-    }
+async function codexAppProcessArgs(appPath, infoPath, executor, fsModule) {
+  const { stdout } = await executor("/usr/bin/plutil", [
+    "-extract", "CFBundleExecutable", "raw", "-o", "-", infoPath,
+  ], { timeout: HANDOFF_TIMEOUT_MS }).catch(() => ({}));
+  const executable = stdout?.trim();
+  if (!executable || executable === "." || executable === ".." || path.basename(executable) !== executable) {
+    return null;
   }
-  return ["-x", path.basename(appPath, ".app")];
+  const executablePath = path.join(appPath, "Contents", "MacOS", executable);
+  if (!fsModule.existsSync(executablePath)) return null;
+  // Match the bundle's executable, not every process with the same name.
+  const escaped = executablePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return ["-f", "-x", `${escaped}([[:space:]].*)?`];
 }
 
 async function detectRunningCodexApp(processArgs, executor) {
