@@ -24,7 +24,9 @@ nonisolated struct CodexMessage: Equatable {
     var isConnected = true
     var isInitialized = true
     var active = true
+    var activeThreadId: String?
     var messagesByThread: [String: [CodexMessage]] = [:]
+    var asyncUserInputErrorsByThread: [String: String] = [:]
     var asyncAnswerVerificationThreadIDs: Set<String> = []
     var lastErrorMessage: String?
     var sends = 0
@@ -82,6 +84,7 @@ nonisolated struct CodexMessage: Equatable {
             itemId: "item_question", asyncUserInput: .init(questions: [.init(title: "Works?", options: ["Yes", "No"])]))
         func makeService() -> CodexService {
             let service = CodexService()
+            service.activeThreadId = "thread"
             service.messagesByThread["thread"] = [question]
             return service
         }
@@ -101,7 +104,23 @@ nonisolated struct CodexMessage: Equatable {
             precondition(input(service).answers == ["Yes"])
             precondition(service.messagesByThread["thread"]!.count == 1)
             precondition(service.sends == 0 && service.starts == 0)
+            precondition(service.asyncUserInputErrorsByThread["thread"] == "Reconnect to send your answer.")
+            precondition(service.lastErrorMessage == "Reconnect to send your answer.")
+            service.dismissVisibleError(threadId: "thread")
+            precondition(service.asyncUserInputErrorsByThread["thread"] == nil)
+            precondition(service.lastErrorMessage == nil)
         }
+
+        let backgroundFailure = makeService()
+        backgroundFailure.activeThreadId = "other-thread"
+        backgroundFailure.isConnected = false
+        backgroundFailure.lastErrorMessage = "Another conversation's error"
+        await submit(backgroundFailure)
+        precondition(backgroundFailure.asyncUserInputErrorsByThread["thread"] == "Reconnect to send your answer.")
+        precondition(backgroundFailure.lastErrorMessage == "Another conversation's error")
+        backgroundFailure.dismissVisibleError(threadId: "thread")
+        precondition(backgroundFailure.asyncUserInputErrorsByThread["thread"] == "Reconnect to send your answer.")
+        precondition(backgroundFailure.lastErrorMessage == "Another conversation's error")
 
         let beforeDelivery = makeService()
         beforeDelivery.resolve = { throw CodexServiceError.disconnected }
@@ -111,10 +130,13 @@ nonisolated struct CodexMessage: Equatable {
         precondition(input(beforeDelivery).answers == ["Yes"])
         precondition(beforeDelivery.messagesByThread["thread"]!.count == 1)
         precondition(beforeDelivery.sends == 0)
+        precondition(beforeDelivery.asyncUserInputErrorsByThread["thread"] != nil)
         beforeDelivery.resolve = { "turn_1" }
         await submit(beforeDelivery)
         precondition(input(beforeDelivery).status == .answered)
         precondition(beforeDelivery.sends == 1)
+        precondition(beforeDelivery.asyncUserInputErrorsByThread["thread"] == nil)
+        precondition(beforeDelivery.lastErrorMessage == nil)
 
         let disconnectedWhileResolving = makeService()
         disconnectedWhileResolving.resolve = {
