@@ -1240,6 +1240,79 @@ test("endpoint routing delegates only selected extensions and passes through Cod
   ]);
 });
 
+test("overlapping phone initializes can reconnect to the same spawned Codex transport", async (t) => {
+  const relayServer = new WebSocket.Server({ port: 0 });
+  const messages = [];
+  const fakeCodex = createFakeCodexTransport();
+  let relaySocket;
+  let bridge;
+  t.after(() => {
+    bridge?.stop();
+    relaySocket?.close();
+    relayServer.close();
+  });
+  await new Promise((resolve) => relayServer.once("listening", resolve));
+  relayServer.on("connection", (socket) => {
+    relaySocket = socket;
+    socket.on("message", (data) => messages.push(JSON.parse(data.toString("utf8"))));
+  });
+
+  const { startBridge } = loadBridgeWithTestDoubles({ createCodexTransportImpl: () => fakeCodex });
+  bridge = startBridge({ printPairingQr: false, config: bridgeTestConfig(relayServer) });
+  await waitFor(() => relaySocket?.readyState === WebSocket.OPEN);
+
+  const params = {
+    clientInfo: { name: "remodex-test", version: "1.0.0" },
+    capabilities: { experimentalApi: true },
+  };
+  const sendInitialize = (id) => relaySocket.send(JSON.stringify({ id, method: "initialize", params }));
+  const reply = (id) => waitForMessage(messages, (message) => message.id === id && !message.method);
+
+  // An actual initialize failure stays visible and leaves the bridge cold.
+  sendInitialize("invalid-phone");
+  await waitFor(() => fakeCodex.sent.some(({ id }) => id === "invalid-phone"));
+  const invalidError = { code: -32602, message: "Invalid params" };
+  fakeCodex.emitMessage({ id: "invalid-phone", error: invalidError });
+  assert.deepEqual((await reply("invalid-phone")).error, invalidError);
+
+  // Both requests leave the bridge before Codex answers the first. Stock Codex
+  // accepts that first initialize and returns -32600 for the second request.
+  sendInitialize("old-phone");
+  sendInitialize("reconnected-phone");
+  await waitFor(() => fakeCodex.sent.some(({ id }) => id === "reconnected-phone"));
+  // Server-initiated requests have an independent ID space.
+  const serverRequest = {
+    id: "reconnected-phone",
+    method: "item/commandExecution/requestApproval",
+    params: { threadId: "thread-reconnect", turnId: "turn-reconnect", itemId: "command-reconnect" },
+  };
+  fakeCodex.emitMessage(serverRequest);
+  assert.deepEqual(await waitForMessage(messages, ({ method }) => method === serverRequest.method), serverRequest);
+
+  fakeCodex.emitMessage({ id: "old-phone", result: { userAgent: "codex-test" } });
+  const alreadyInitialized = { code: -32600, message: "Already initialized" };
+  fakeCodex.emitMessage({ id: "reconnected-phone", error: alreadyInitialized });
+
+  assert.deepEqual((await reply("old-phone")).result, {
+    userAgent: "codex-test",
+    remodexRuntimeSettingsVersion: 2,
+  });
+  const reconnected = await reply("reconnected-phone");
+  assert.equal(reconnected.error, undefined);
+  assert.deepEqual(reconnected.result, { bridgeManaged: true, remodexRuntimeSettingsVersion: 2 });
+
+  sendInitialize("warm-phone");
+  assert.deepEqual((await reply("warm-phone")).result, reconnected.result);
+  assert.deepEqual(fakeCodex.sent.filter(({ method }) => method === "initialize").map(({ id }) => id), [
+    "invalid-phone", "old-phone", "reconnected-phone",
+  ]);
+
+  relaySocket.send(JSON.stringify({ id: "other-request", method: "thread/list" }));
+  await waitFor(() => fakeCodex.sent.some(({ id }) => id === "other-request"));
+  fakeCodex.emitMessage({ id: "other-request", error: alreadyInitialized });
+  assert.deepEqual((await reply("other-request")).error, alreadyInitialized);
+});
+
 test("stock endpoint initializes once before phone requests", async (t) => {
   const relayServer = new WebSocket.Server({ port: 0 });
   const messages = [];
