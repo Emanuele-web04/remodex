@@ -9,6 +9,7 @@ import Foundation
 enum AIChangeSetError: LocalizedError {
     case missingWorkingDirectory
     case missingPatch
+    case ledgerUnavailable
     case bridgeError(code: String?, message: String?)
 
     var errorDescription: String? {
@@ -17,6 +18,8 @@ enum AIChangeSetError: LocalizedError {
             return "The selected local folder is not available on this device."
         case .missingPatch:
             return "This response cannot be auto-reverted because no exact patch was captured."
+        case .ledgerUnavailable:
+            return "Change history is temporarily unavailable. Try again."
         case .bridgeError(let code, let message):
             switch code {
             case "missing_patch":
@@ -82,6 +85,14 @@ extension CodexService {
 
         switch changeSet.status {
         case .ready:
+            if let error = revertLedgerAvailabilityError {
+                return AssistantRevertPresentation(
+                    title: "Cannot undo",
+                    isEnabled: false,
+                    helperText: error.localizedDescription,
+                    riskLevel: .blocked
+                )
+            }
             if !hasWorkingDirectory {
                 return AssistantRevertPresentation(
                     title: "Cannot undo",
@@ -152,7 +163,8 @@ extension CodexService {
 
     // Provides the latest finalized patch metadata for UI sheets and action handlers.
     func readyChangeSet(forAssistantMessage message: CodexMessage) -> AIChangeSet? {
-        guard let changeSet = aiChangeSet(forAssistantMessage: message),
+        guard revertLedgerAvailabilityError == nil,
+              let changeSet = aiChangeSet(forAssistantMessage: message),
               changeSet.status == .ready else {
             return nil
         }
@@ -542,11 +554,19 @@ private extension CodexService {
         changeSet.refreshFallbackPatchSummary()
     }
 
+    // An unreadable ledger can still contain earlier batches for a visible turn.
+    var revertLedgerAvailabilityError: AIChangeSetError? {
+        canPersistAIChangeSets ? nil : .ledgerUnavailable
+    }
+
     // Chooses the bridge method: aggregate diffs use the legacy single-patch path, fallback batches stay ordered.
     func revertBridgeRequest(
         for changeSet: AIChangeSet,
         normalizedWorkingDirectory: String
     ) throws -> AIRevertBridgeRequest {
+        if let error = revertLedgerAvailabilityError {
+            throw error
+        }
         if changeSet.source == .fileChangeFallback, !changeSet.fallbackPatchBatches.isEmpty {
             let patches = changeSet.fallbackPatchBatches.reversed().map { batch in
                 JSONValue.object([

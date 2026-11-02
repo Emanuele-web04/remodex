@@ -127,6 +127,13 @@ struct AIChangeSetPersistenceHarness {
         service.loadMacScopedAIChangeSets(for: "same-turn")
         service.aiChangeSetsByID[captured.id] = captured
         try require(!service.saveMacScopedAIChangeSets(for: "same-turn"), "unreadable ledger was overwritten")
+        do {
+            _ = try service.revertBridgeRequest(for: captured, normalizedWorkingDirectory: "/repo")
+            try require(false, "preview/apply could undo only the new patch while the saved ledger was unreadable")
+        } catch let error as AIChangeSetError {
+            try require(error.localizedDescription == "Change history is temporarily unavailable. Try again.",
+                        "the blocked undo did not explain how to retry")
+        }
 
         try encrypted.write(to: url)
         try require(service.saveMacScopedAIChangeSets(for: "same-turn"), "same-turn recovery could not save")
@@ -142,6 +149,15 @@ struct AIChangeSetPersistenceHarness {
         try require(reconciled.fallbackPatchCount == 2 && reconciled.fileChanges.first?.additions == 2,
                     "recovery did not rebuild the file-change summary")
         try require(reconciled.status == .ready, "a finalized, supported revert was no longer available")
+        let request = try service.revertBridgeRequest(for: reconciled, normalizedWorkingDirectory: "/repo")
+        try require(request.previewMethod == "workspace/revertPatchBatchPreview"
+                    && request.applyMethod == "workspace/revertPatchBatchApply",
+                    "recovery did not restore batch preview/apply")
+        let patches = request.params.objectValue?["patches"]?.arrayValue?.compactMap {
+            $0.objectValue?["forwardPatch"]?.stringValue
+        }
+        try require(patches == [second.forwardUnifiedPatch, first.forwardUnifiedPatch],
+                    "preview/apply must undo the entire recovered turn in reverse order")
         let turn = AIChangeSetTurnKey(threadId: persisted.threadId, turnId: persisted.turnId)!
         try require(service.aiChangeSetIDByTurnKey[turn] == reconciled.id
                     && service.aiChangeSetIDByAssistantMessageID["answer"] == reconciled.id,
