@@ -1710,6 +1710,107 @@ test("bridge-generated lifecycle notifications reach completion tracking", async
     .map(({ params }) => params), [{ threadId: "thread-ambiguous-push", includeTurns: true }]);
 });
 
+test("bridge restores a newer completed text turn on a stale canonical first page", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-canonical-text-history-"));
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = directory;
+  const relayServer = new WebSocket.Server({ port: 0 });
+  let socket;
+  let bridge;
+  const messages = [];
+  t.after(() => {
+    bridge?.stop();
+    socket?.close();
+    relayServer.close();
+    if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previousCodexHome;
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  const threadId = "thread-completed-text-history";
+  const sessionsDir = path.join(directory, "sessions");
+  fs.mkdirSync(sessionsDir);
+  let timestamp = Date.now() - 60_000;
+  const oldStartedAt = Math.floor(timestamp / 1000);
+  const record = (type, payload) => {
+    timestamp += 1000;
+    return JSON.stringify({ timestamp: new Date(timestamp).toISOString(), type, payload });
+  };
+  const turnRecords = (turnId, answer, plan = false) => [
+    record("event_msg", { type: "task_started", turn_id: turnId }),
+    record("event_msg", { type: "user_message", turn_id: turnId, message: "Show the result" }),
+    ...(plan ? [record("response_item", {
+      type: "function_call", name: "update_plan", call_id: "older-plan",
+      arguments: JSON.stringify({ plan: [{ step: "Keep the older artifact", status: "completed" }] }),
+    })] : []),
+    record("response_item", {
+      id: `${turnId}-answer`, type: "message", role: "assistant", phase: "final_answer",
+      content: [{ type: "output_text", text: answer }],
+    }),
+    record("event_msg", { type: "task_complete", turn_id: turnId }),
+  ];
+  fs.writeFileSync(path.join(sessionsDir, `rollout-${threadId}.jsonl`), [
+    record("session_meta", { id: threadId, cwd: directory }),
+    ...turnRecords("turn-canonical", "Previously loaded answer", true),
+    ...turnRecords("turn-newest", "Recovered final answer"),
+    "",
+  ].join("\n"));
+
+  relayServer.on("connection", (connection) => {
+    socket = connection;
+    socket.on("message", (data) => messages.push(JSON.parse(data.toString())));
+  });
+  await new Promise((resolve) => relayServer.once("listening", resolve));
+  const { startBridge } = loadBridgeWithTestDoubles({
+    createCodexTransportImpl: () => createFakeCodexTransport({
+      turnsListResult: (params) => ({
+        data: [{ id: "turn-canonical", status: "completed", startedAt: oldStartedAt, items: [] }],
+        nextCursor: params.cursor || params.limit !== 1 ? null : "canonical-next",
+      }),
+    }),
+  });
+  bridge = startBridge({
+    printPairingQr: false,
+    config: bridgeTestConfig(relayServer, { desktopIpcSocketPath: path.join(directory, "missing-ipc.sock") }),
+  });
+  await waitFor(() => socket?.readyState === WebSocket.OPEN);
+  const request = async (id, params = {}) => {
+    socket.send(JSON.stringify({
+      id, method: "thread/turns/list",
+      params: { threadId, limit: 1, sortDirection: "desc", itemsView: "full", ...params },
+    }));
+    await waitFor(() => messages.some((message) => message.id === id));
+    return messages.find((message) => message.id === id).result;
+  };
+
+  const recovered = await request("stale-first-page");
+  assert.deepEqual(recovered.data.map((turn) => turn.id), ["turn-newest", "turn-canonical"]);
+  assert.equal(recovered.nextCursor, "canonical-next");
+  assert.equal(recovered.remodexJsonlMergedLatest, true);
+  assert.equal(recovered.remodexJsonlFallback, undefined, "the canonical cursor must remain usable on iOS");
+  const answer = recovered.data[0].items.find((item) => item.id === "turn-newest-answer");
+  assert.equal(answer?.content?.[0]?.text ?? answer?.text, "Recovered final answer");
+  assert.ok(recovered.data[1].items.some((item) => item.id === "older-plan"));
+
+  const directoryReads = t.mock.method(fs, "readdirSync");
+  const warmPage = await request("warm-stale-first-page");
+  assert.deepEqual(warmPage.data.map((turn) => turn.id), ["turn-newest", "turn-canonical"]);
+  assert.equal(directoryReads.mock.callCount(), 0);
+  directoryReads.mock.restore();
+
+  for (const [id, params] of [
+    ["canonical-only", { remodexRequireCanonical: true }],
+    ["older-page", { cursor: "canonical-next" }],
+    ["summary-page", { itemsView: "summary" }],
+    ["ascending-page", { sortDirection: "asc" }],
+    ["state-probe", { remodexTurnStateOnly: true }],
+  ]) {
+    const page = await request(id, params);
+    assert.deepEqual(page.data.map((turn) => turn.id), ["turn-canonical"], id);
+    assert.equal(page.remodexJsonlMergedLatest, undefined, id);
+  }
+});
+
 // Loads bridge.js with plaintext test transports while leaving the production module untouched.
 function loadBridgeWithTestDoubles({
   createCodexTransportImpl,
@@ -1804,6 +1905,7 @@ function createSecureDeviceStateDouble() {
 }
 
 function createFakeCodexTransport({
+  turnsListResult = null,
   threadReadResult = {
     conversationState: {
       turns: [],
@@ -1826,6 +1928,8 @@ function createFakeCodexTransport({
           id: parsed.id,
           result: threadReadResult,
         }));
+      } else if (parsed.method === "thread/turns/list" && turnsListResult) {
+        listeners.message?.(JSON.stringify({ id: parsed.id, result: turnsListResult(parsed.params) }));
       }
     },
     onMessage(handler) {
