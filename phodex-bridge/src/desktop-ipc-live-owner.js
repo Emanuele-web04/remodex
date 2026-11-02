@@ -48,6 +48,8 @@ const {
 } = require("./desktop-ipc-owner-transport");
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
+const DESKTOP_HANDOFF_WRITER_WAIT_MS = 8_000;
+const DESKTOP_HANDOFF_WRITER_POLL_MS = 100;
 const DEFAULT_RECONNECT_MS = 1_500;
 const DEFAULT_SNAPSHOT_DEBOUNCE_MS = 75;
 const DEFAULT_INITIAL_HISTORY_RETRY_MS = 1_000;
@@ -154,13 +156,16 @@ function createDesktopIpcLiveOwner({
   initialHistoryRetryMs = DEFAULT_INITIAL_HISTORY_RETRY_MS,
   initialHistoryMaxAttempts = DEFAULT_INITIAL_HISTORY_MAX_ATTEMPTS,
   liveOwnershipFreshnessMs = DEFAULT_LIVE_OWNERSHIP_FRESHNESS_MS,
+  handoffWriterWaitMs = DESKTOP_HANDOFF_WRITER_WAIT_MS,
+  handoffWriterPollMs = DESKTOP_HANDOFF_WRITER_POLL_MS,
   onFollowerStateChanged = null,
   netModule = net,
   now = () => Date.now(),
   logPrefix = "[remodex]",
 } = {}) {
+  const handoff = createThreadHandoffController({ sendCodexRequest, handoffWriterWaitMs, handoffWriterPollMs });
   if (!enabled || typeof sendCodexRequest !== "function" || typeof sendRawCodexMessage !== "function") {
-    return createDisabledDesktopIpcLiveOwner();
+    return { ...createDisabledDesktopIpcLiveOwner(), ...handoff };
   }
   const sendPhoneNotification = typeof sendApplicationResponse === "function"
     ? sendApplicationResponse
@@ -328,6 +333,12 @@ function createDesktopIpcLiveOwner({
     const message = parsedMessage ?? safeParseJSON(rawMessage);
     if (!message || typeof message !== "object") {
       return;
+    }
+    if (message.method === "thread/closed") {
+      removeOwnedThread(readThreadIdFromParams(message.params), {
+        broadcastRemoval: true,
+        reason: "thread/closed",
+      });
     }
     if (message.method === "account/updated") {
       announcedReadStateThreadIds.clear();
@@ -1415,7 +1426,7 @@ function createDesktopIpcLiveOwner({
       return false;
     }
     const threadId = readConversationIdFromFollowerParams(params);
-    return Boolean(threadId && ownedThreadIds.has(threadId));
+    return Boolean(threadId && ownedThreadIds.has(threadId) && !handoff.isThreadHandoffInProgress(threadId));
   }
 
   async function handleFollowerRequest(envelope) {
@@ -1888,7 +1899,8 @@ function createDesktopIpcLiveOwner({
     if (pendingTurnStartParamsByThreadId.has(threadId)) {
       return true;
     }
-    if ((queuedFollowUpsByThreadId.get(threadId) || []).length > 0) {
+    if (runningQueuedFollowUpThreadIds.has(threadId)
+      || (queuedFollowUpsByThreadId.get(threadId) || []).length > 0) {
       return true;
     }
     const turns = conversations.get(threadId)?.turns || [];
@@ -1916,6 +1928,21 @@ function createDesktopIpcLiveOwner({
     observeInbound,
     observeOutbound,
     stopAll,
+    isThreadHandoffInProgress: handoff.isThreadHandoffInProgress,
+    withThreadHandoff(threadId, openThread) {
+      return handoff.withThreadHandoff(threadId, openThread, (releaseWriter) =>
+        enqueueMutation(threadId, async () => {
+          const resuming = Array.from(pendingThreadResumeRequestIds.values()).includes(threadId);
+          if (resuming || hasActiveLocalTurn(threadId)) {
+            throw desktopHandoffError(
+              "handoff_thread_busy", "Wait for this chat to finish opening and running any follow-ups, then try again."
+            );
+          }
+          await releaseWriter();
+          removeOwnedThread(threadId, { broadcastRemoval: true, reason: "desktop/handoff" });
+        })
+      );
+    },
     // True while the bridge's app-server stream is authoritative for this
     // thread; used to keep fallback mirrors (rollout tail) silent.
     isThreadOwned(threadId) {
@@ -1939,6 +1966,78 @@ function createDesktopIpcLiveOwner({
       return cloneJSON(conversations.get(threadId) || null);
     },
   };
+}
+
+// The live stream owner may have forgotten an idle, unsubscribed thread while
+// Codex still holds its rollout writer. Ask the local app-server directly.
+function createThreadHandoffController({ sendCodexRequest, handoffWriterWaitMs, handoffWriterPollMs }) {
+  const threadsInHandoff = new Set();
+
+  async function releaseWriter(threadId) {
+    const deadline = Date.now() + handoffWriterWaitMs;
+    const request = (method, params) =>
+      sendCodexRequest(method, params, { timeoutMs: Math.max(1, deadline - Date.now()) });
+    async function isLoaded() {
+      const result = await request("thread/loaded/list", {});
+      if (!Array.isArray(result?.data)) throw new Error("Invalid loaded-thread list");
+      return result.data.includes(threadId);
+    }
+
+    try {
+      if (!await isLoaded()) return;
+      const result = await request("thread/read", { threadId, includeTurns: false });
+      if (result?.thread?.id !== threadId) throw new Error("Invalid loaded thread metadata");
+      if (result.thread.status?.type === "active") {
+        throw desktopHandoffError("handoff_thread_busy", "Wait for this run to finish, then try again.");
+      }
+      await request("thread/unsubscribe", { threadId });
+      while (Date.now() < deadline) {
+        if (!await isLoaded()) return;
+        const delayMs = Math.min(handoffWriterPollMs, deadline - Date.now());
+        if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    } catch (error) {
+      if (error?.errorCode) throw error;
+      if (error?.code === -32601) {
+        throw desktopHandoffError(
+          "handoff_writer_release_unsupported", "Update the Codex CLI to hand this chat to Desktop.", error
+        );
+      }
+      throw desktopHandoffError(
+        "handoff_writer_release_failed",
+        "Could not verify that Remodex released this chat. Reopen it in Remodex and try again.",
+        error
+      );
+    }
+
+    throw desktopHandoffError(
+      "handoff_writer_release_failed",
+      "Codex is still holding this chat. Close any other view of it, wait for running work to finish, and try again."
+    );
+  }
+
+  return {
+    isThreadHandoffInProgress(threadId) {
+      return threadsInHandoff.has(threadId);
+    },
+    async withThreadHandoff(threadId, openThread, release = (operation) => operation()) {
+      if (typeof sendCodexRequest !== "function") return openThread();
+      if (threadsInHandoff.has(threadId)) {
+        throw desktopHandoffError("handoff_in_progress", "This chat is already being handed off to Codex Desktop.");
+      }
+      threadsInHandoff.add(threadId);
+      try {
+        await release(() => releaseWriter(threadId));
+        return await openThread();
+      } finally {
+        threadsInHandoff.delete(threadId);
+      }
+    },
+  };
+}
+
+function desktopHandoffError(errorCode, message, cause) {
+  return Object.assign(new Error(message, { cause }), { errorCode });
 }
 
 function createDisabledDesktopIpcLiveOwner() {

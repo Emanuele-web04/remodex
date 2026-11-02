@@ -90,6 +90,10 @@ test("spawn launch plans add the bundled Codex app binary as a fallback on macOS
       ["codex", bundledCodexPath]
     );
     assert.equal(launches[1].description, `\`${bundledCodexPath} app-server\``);
+    assert.deepEqual(launches.map((launch) => launch.args), [
+      ["app-server", "-c", "thread_unload_delay_secs=1"],
+      ["app-server", "-c", "thread_unload_delay_secs=1"],
+    ]);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

@@ -101,6 +101,7 @@ async function handleDesktopMethod(method, params, options = {}) {
         relaunchWaitMs,
         threadMaterializeWaitMs,
         threadMaterializePollMs,
+        withThreadHandoff: options.withThreadHandoff,
       });
     case "desktop/continueOnMac":
       if (platform !== "darwin") {
@@ -123,6 +124,7 @@ async function handleDesktopMethod(method, params, options = {}) {
         relaunchWaitMs,
         threadMaterializeWaitMs,
         threadMaterializePollMs,
+        withThreadHandoff: options.withThreadHandoff,
       });
     case "desktop/wakeDisplay":
       return wakeDisplay({
@@ -139,24 +141,7 @@ async function handleDesktopMethod(method, params, options = {}) {
   }
 }
 
-// Waits for fresh phone-authored chats to materialize locally before deep-linking them on desktop.
-async function continueOnDesktop(
-  params,
-  {
-    platform,
-    bundleId,
-    appPath,
-    executor,
-    env,
-    fsModule,
-    isAppRunning,
-    sleepFn,
-    appBootWaitMs,
-    relaunchWaitMs,
-    threadMaterializeWaitMs,
-    threadMaterializePollMs,
-  }
-) {
+async function continueOnDesktop(params, options) {
   const threadId = resolveThreadId(params);
   if (!threadId) {
     throw desktopError("missing_thread_id", "A thread id is required to continue on desktop.");
@@ -165,6 +150,27 @@ async function continueOnDesktop(
     throw desktopError("invalid_thread_id", "The requested desktop thread id is not valid.");
   }
 
+  const openThread = () => openThreadOnDesktop(threadId, options);
+  return options.withThreadHandoff
+    ? options.withThreadHandoff(threadId, openThread)
+    : openThread();
+}
+
+// Waits for fresh phone-authored chats to materialize locally before deep-linking them on desktop.
+async function openThreadOnDesktop(threadId, {
+  platform,
+  bundleId,
+  appPath,
+  executor,
+  env,
+  fsModule,
+  isAppRunning,
+  sleepFn,
+  appBootWaitMs,
+  relaunchWaitMs,
+  threadMaterializeWaitMs,
+  threadMaterializePollMs,
+}) {
   const targetUrl = `codex://threads/${threadId}`;
   const desktopKnown = isThreadLikelyKnownOnDesktop(threadId, { env, fsModule });
 

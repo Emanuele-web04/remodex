@@ -4404,6 +4404,26 @@ test("live owner releases idle threads on unsubscribe but keeps running ones", a
   assert.equal(owner.isThreadOwned("thread-unsub-running"), true);
 });
 
+test("Desktop handoff cannot unsubscribe a Remodex thread with a pending turn", async (t) => {
+  const owner = createDesktopIpcLiveOwner({
+    socketPath: () => [],
+    async sendCodexRequest(method) { assert.equal(method, "thread/read"); },
+    sendRawCodexMessage() {},
+  });
+  t.after(() => owner.stopAll());
+  owner.observeInbound(JSON.stringify({
+    id: "pending-turn",
+    method: "turn/start",
+    params: { threadId: "thread-running", input: [{ type: "text", text: "keep running" }] },
+  }));
+
+  await assert.rejects(owner.withThreadHandoff("thread-running", () => {
+    assert.fail("Desktop must stay open while the turn is pending");
+  }), { errorCode: "handoff_thread_busy" });
+  assert.equal(owner.isThreadOwned("thread-running"), true);
+  assert.equal(owner.isThreadHandoffInProgress("thread-running"), false);
+});
+
 test("live owner drops cached conversation state when yielding to a peer owner", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-yield-state-");
   const frames = [];

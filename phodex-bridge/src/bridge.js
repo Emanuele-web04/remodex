@@ -791,6 +791,7 @@ function startBridge({
   const bridgeManagedCodexRequestWaiters = new Map();
   const forwardedRequestMethodsById = new Map();
   const pendingLocalThreadCreationRequestsById = new Map();
+  const pendingLocalResumeThreadIds = new Set();
   const relaySanitizedResponseMethodsById = new Map();
   const pendingOpenCodeThreadListRequests = new Map();
   const openCodeThreadCatalog = new Map();
@@ -891,8 +892,14 @@ function startBridge({
         includeTurns: false,
       }),
       async resumeThreadLocally(message) {
-        const result = await sendCodexRequest("thread/resume", message.params);
-        if (isShuttingDown || result?.thread?.id !== message.params?.threadId) return result;
+        if (isDesktopHandoffMutation(message)) {
+          throw new Error("Wait for Desktop handoff to finish before reopening this chat.");
+        }
+        const threadId = message.params?.threadId;
+        pendingLocalResumeThreadIds.add(threadId);
+        const result = await sendCodexRequest("thread/resume", message.params)
+          .finally(() => pendingLocalResumeThreadIds.delete(threadId));
+        if (isShuttingDown || result?.thread?.id !== threadId) return result;
         // The private request uses a bridge-managed RPC id. Reuse the live
         // owner's normal matching-response path with the phone's original id,
         // so only this successful acquisition can claim the local stream.
@@ -903,7 +910,8 @@ function startBridge({
         return result;
       },
       forwardToLocalCodex: (rawMessage) => {
-        if (handleLocalRuntimeSettingsRequest(parseBridgeMessage(rawMessage))) return;
+        const message = parseBridgeMessage(rawMessage);
+        if (rejectDesktopHandoffMutation(message) || handleLocalRuntimeSettingsRequest(message)) return;
         observeDesktopIpcLiveOwnerInbound(rawMessage);
         forwardInboundRequestToCodex(rawMessage);
       },
@@ -1284,6 +1292,7 @@ function startBridge({
     const parsedMessage = parseBridgeMessage(rawMessage);
     // Register history/list response shaping before either runtime can reply.
     rememberForwardedRequestMethod(rawMessage);
+    if (rejectDesktopHandoffMutation(parsedMessage)) return;
     if (parsedMessage?.method === "thread/list"
       && typeof parsedMessage.params?.cursor === "string"
       && parsedMessage.params.cursor.startsWith(OPEN_CODE_THREAD_LIST_CURSOR_PREFIX)) {
@@ -1361,6 +1370,14 @@ function startBridge({
       readBridgePreferences,
       updateBridgePreferences,
       updateBridgePackageAndRestart,
+      withThreadHandoff: desktopIpcLiveOwner ? (threadId, openThread) => {
+        if (pendingLocalResumeThreadIds.has(threadId)) {
+          throw Object.assign(new Error("Wait for this chat to finish reopening, then try again."), {
+            errorCode: "handoff_thread_busy",
+          });
+        }
+        return desktopIpcLiveOwner.withThreadHandoff(threadId, openThread);
+      } : undefined,
     })) {
       return;
     }
@@ -1386,6 +1403,24 @@ function startBridge({
       return;
     }
     forwardInboundRequestToCodex(rawMessage);
+  }
+
+  function isDesktopHandoffMutation(message) {
+    const method = message?.method;
+    if (typeof method !== "string") return false;
+    const threadId = message.params?.threadId || message.params?.thread_id;
+    return desktopIpcLiveOwner?.isThreadHandoffInProgress(threadId)
+      && (method.startsWith("turn/") || method === "review/start"
+        || (method.startsWith("thread/") && !/\/(?:read|list|get)$/.test(method)));
+  }
+
+  function rejectDesktopHandoffMutation(message) {
+    if (!isDesktopHandoffMutation(message)) return false;
+    if (message.id != null) {
+      sendApplicationResponse(createJsonRpcErrorResponse(message.id,
+        new Error("Wait for Desktop handoff to finish before changing this chat."), "handoff_in_progress"));
+    }
+    return true;
   }
 
   function handleLocalRuntimeSettingsRequest(parsedMessage) {
@@ -2296,7 +2331,7 @@ function startBridge({
 
   // Runs bridge-private JSON-RPC calls against the local app-server so token-bearing responses
   // can power bridge features like transcription without ever reaching the phone.
-  function sendCodexRequest(method, params) {
+  function sendCodexRequest(method, params, { timeoutMs = 20_000 } = {}) {
     const requestId = `${BRIDGE_MANAGED_REQUEST_ID_PREFIX}${randomBytes(12).toString("hex")}`;
     const payload = JSON.stringify({
       id: requestId,
@@ -2308,7 +2343,7 @@ function startBridge({
       const timeout = setTimeout(() => {
         bridgeManagedCodexRequestWaiters.delete(requestId);
         reject(new Error(`Codex request timed out: ${method}`));
-      }, 20_000);
+      }, timeoutMs);
 
       bridgeManagedCodexRequestWaiters.set(requestId, {
         method,

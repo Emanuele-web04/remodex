@@ -955,6 +955,7 @@ test("bridge observes held desktop IPC turns only after local fallback", async (
             liveOwnerInbound.push(JSON.parse(rawMessage));
           },
           observeOutbound() {},
+          isThreadHandoffInProgress() { return false; },
           stopAll() {},
         };
       },
