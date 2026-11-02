@@ -528,35 +528,69 @@ function writeFrame(socket, payload, callback) {
 // sockets — reads the same length-prefixed framing; only the dispatch differs.
 // `onOverflow` owns the connection, so it decides how to drop a bogus peer.
 function createFrameReader({ onFrame, onOverflow }) {
-  let buffer = Buffer.alloc(0);
+  const header = Buffer.alloc(FRAME_HEADER_BYTES);
+  let headerOffset = 0;
+  let bodyLength = 0;
+  let bodyOffset = 0;
+  let body = null;
+  let resetVersion = 0;
+
+  function reset() {
+    headerOffset = 0;
+    bodyLength = 0;
+    bodyOffset = 0;
+    body = null;
+    resetVersion += 1;
+  }
 
   return {
     push(chunk) {
-      buffer = Buffer.concat([buffer, chunk]);
-      while (buffer.length >= FRAME_HEADER_BYTES) {
-        const frameLength = buffer.readUInt32LE(0);
-        if (frameLength > MAX_FRAME_BYTES) {
-          buffer = Buffer.alloc(0);
-          onOverflow?.();
-          return;
-        }
-        if (buffer.length < FRAME_HEADER_BYTES + frameLength) {
-          return;
+      const version = resetVersion;
+      let offset = 0;
+      while (offset < chunk.length && version === resetVersion) {
+        if (bodyLength === 0) {
+          const bytes = Math.min(FRAME_HEADER_BYTES - headerOffset, chunk.length - offset);
+          chunk.copy(header, headerOffset, offset, offset + bytes);
+          headerOffset += bytes;
+          offset += bytes;
+          if (headerOffset < FRAME_HEADER_BYTES) return;
+          headerOffset = 0;
+          bodyLength = header.readUInt32LE();
+          if (bodyLength > MAX_FRAME_BYTES) {
+            reset();
+            onOverflow?.();
+            return;
+          }
+          if (bodyLength === 0 || offset === chunk.length) continue;
         }
 
-        const payload = buffer
-          .slice(FRAME_HEADER_BYTES, FRAME_HEADER_BYTES + frameLength)
-          .toString("utf8");
-        buffer = buffer.slice(FRAME_HEADER_BYTES + frameLength);
-        const envelope = safeParseJSON(payload);
-        if (envelope) {
-          onFrame(envelope);
+        const bytes = Math.min(bodyLength - bodyOffset, chunk.length - offset);
+        let payload;
+        if (bodyOffset === 0 && bytes === bodyLength) {
+          payload = chunk.toString("utf8", offset, offset + bytes);
+        } else {
+          const needed = bodyOffset + bytes;
+          if (!body || body.length < needed) {
+            // Grow with received bytes, so a header alone never reserves a large frame.
+            const next = Buffer.allocUnsafe(Math.min(bodyLength, Math.max(needed, (body?.length || 0) * 2)));
+            body?.copy(next, 0, 0, bodyOffset);
+            body = next;
+          }
+          chunk.copy(body, bodyOffset, offset, offset + bytes);
+          bodyOffset = needed;
+          if (bodyOffset === bodyLength) payload = body.toString("utf8", 0, bodyLength);
         }
+        offset += bytes;
+        if (payload === undefined) continue;
+
+        bodyLength = 0;
+        bodyOffset = 0;
+        body = null;
+        const envelope = safeParseJSON(payload);
+        if (envelope) onFrame(envelope);
       }
     },
-    reset() {
-      buffer = Buffer.alloc(0);
-    },
+    reset,
   };
 }
 
