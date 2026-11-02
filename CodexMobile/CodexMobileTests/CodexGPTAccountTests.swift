@@ -710,50 +710,30 @@ final class CodexGPTAccountTests: XCTestCase {
         XCTAssertEqual(Data(base64Encoded: params?["audioBase64"]?.stringValue ?? "") ?? Data(), expectedAudio)
     }
 
-    func testVoiceTranscriptionFallsBackToPhoneUploadWhenBridgeProviderRejectsAuth() async throws {
+    func testVoiceTranscriptionRequiresBridgeUpgradeWhenRPCIsUnavailable() async throws {
         let service = makeService()
         service.isConnected = true
         let clipURL = try makeTemporaryVoiceClipURL()
-        defer {
-            try? FileManager.default.removeItem(at: clipURL)
-            GPTVoiceTranscriptionManager.transcribeOverride = nil
-        }
+        defer { try? FileManager.default.removeItem(at: clipURL) }
 
         var observedMethods: [String] = []
         service.requestTransportOverride = { method, _ in
             observedMethods.append(method)
-            if method == "voice/transcribe" {
-                throw CodexServiceError.rpcError(
-                    RPCError(
-                        code: -32000,
-                        message: "Your ChatGPT login has expired. Sign in again.",
-                        data: .object([
-                            "errorCode": .string("auth_rejected"),
-                        ])
-                    )
+            throw CodexServiceError.rpcError(
+                RPCError(
+                    code: -32600,
+                    message: "Invalid request: unknown variant `voice/transcribe`, expected one of `initialize`, `thread/start`"
                 )
-            }
-
-            XCTAssertEqual(method, "voice/resolveAuth")
-            return RPCMessage(
-                id: .string(UUID().uuidString),
-                result: .object([
-                    "token": .string("Bearer fresh-chatgpt-token"),
-                ]),
-                includeJSONRPC: false
             )
         }
 
-        GPTVoiceTranscriptionManager.transcribeOverride = { data, token in
-            XCTAssertFalse(data.isEmpty)
-            XCTAssertEqual(token, "fresh-chatgpt-token")
-            return "legacy path works"
+        await XCTAssertThrowsErrorAsync({
+            try await service.transcribeVoiceAudioFile(at: clipURL, durationSeconds: 1)
+        }) { error in
+            XCTAssertEqual(service.classifyVoiceFailure(error), .bridgeSessionUnsupported)
         }
-
-        let transcript = try await service.transcribeVoiceAudioFile(at: clipURL, durationSeconds: 1)
-
-        XCTAssertEqual(transcript, "legacy path works")
-        XCTAssertEqual(observedMethods, ["voice/transcribe", "voice/resolveAuth"])
+        XCTAssertFalse(service.supportsBridgeVoiceTranscription)
+        XCTAssertEqual(observedMethods, ["voice/transcribe"])
     }
 
     func testVoiceTranscriptionAuthRejectionMarksAccountAsExpired() async throws {
@@ -842,20 +822,6 @@ final class CodexGPTAccountTests: XCTestCase {
             XCTAssertEqual(error.localizedDescription, "The recorded audio is not a valid WAV file.")
         }
         XCTAssertFalse(didCallBridge)
-    }
-
-    func testUnsupportedVoiceBridgeTranscribeMarksBridgeSessionAsUnsupported() {
-        let service = makeService()
-        let error = CodexServiceError.rpcError(
-            RPCError(
-                code: -32600,
-                message: "Invalid request: unknown variant `voice/transcribe`, expected one of `initialize`, `thread/start`"
-            )
-        )
-
-        XCTAssertTrue(service.consumeUnsupportedVoiceBridgeMethod(error))
-        XCTAssertFalse(service.supportsBridgeVoiceTranscription)
-        XCTAssertEqual(service.classifyVoiceFailure(error), .bridgeSessionUnsupported)
     }
 
     func testResolvedVoiceRecoveryClearsBannerOnceVoiceAuthIsHealthy() {

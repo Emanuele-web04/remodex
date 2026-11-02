@@ -1,5 +1,5 @@
 // FILE: CodexService+Voice.swift
-// Purpose: Transcribes local voice clips through the bridge, with the legacy phone upload as a reliability fallback.
+// Purpose: Transcribes local voice clips through the bridge.
 // Layer: Service
 // Exports: CodexVoiceTranscriptionPreflight, CodexService voice helpers
 // Depends on: Foundation, RPCMessage, JSONValue
@@ -43,7 +43,6 @@ struct CodexVoiceTranscriptionPreflight: Equatable, Sendable {
 }
 
 private struct VoiceTranscriptionRequestPayload: Sendable {
-    let audioData: Data
     let audioBase64: String
     let mimeType: String
     let byteCount: Int
@@ -88,7 +87,7 @@ extension CodexService {
         }
     }
 
-    // Prefers bridge-owned transcription, then falls back to the prior phone-upload flow if the bridge/provider rejects it.
+    // Sends recorded audio through the bridge, which owns the provider credentials.
     func transcribeVoiceAudioFile(
         at url: URL,
         durationSeconds: TimeInterval,
@@ -96,6 +95,9 @@ extension CodexService {
     ) async throws -> String {
         guard isConnected else {
             throw CodexServiceError.disconnected
+        }
+        guard supportsBridgeVoiceTranscription else {
+            throw CodexServiceError.invalidInput("Update the Remodex bridge to use voice transcription.")
         }
 
         let payload = try await Self.prepareVoiceTranscriptionPayload(
@@ -107,30 +109,11 @@ extension CodexService {
             "transcription request prepared duration=\(String(format: "%.1f", payload.durationSeconds))s bytes=\(payload.byteCount)"
         )
 
-        guard supportsBridgeVoiceTranscription else {
-            codexLogVoiceTranscription("bridge transcription unavailable; legacy fallback starting")
-            do {
-                return try await transcribeVoiceDirectlyFromPhone(audioData: payload.audioData, mimeType: payload.mimeType)
-            } catch {
-                handleVoiceTranscriptionTerminalFailure(error)
-                codexLogVoiceTranscription("legacy transcription fallback failed: \(classifyVoiceFailure(error))")
-                throw error
-            }
-        }
-
         do {
             return try await transcribeVoiceViaBridge(payload: payload)
         } catch {
-            let bridgeMethodUnsupported = consumeUnsupportedVoiceBridgeMethod(error)
-            if bridgeMethodUnsupported || shouldAttemptLegacyVoiceUploadFallback(after: error) {
-                codexLogVoiceTranscription("bridge transcription fallback starting: \(classifyVoiceFailure(error))")
-                do {
-                    return try await transcribeVoiceDirectlyFromPhone(audioData: payload.audioData, mimeType: payload.mimeType)
-                } catch {
-                    handleVoiceTranscriptionTerminalFailure(error)
-                    codexLogVoiceTranscription("legacy transcription fallback failed: \(classifyVoiceFailure(error))")
-                    throw error
-                }
+            if consumeUnsupportedVoiceBridgeMethod(error) {
+                throw error
             }
 
             handleVoiceTranscriptionTerminalFailure(error)
@@ -166,53 +149,6 @@ extension CodexService {
         return text
     }
 
-    private func shouldAttemptLegacyVoiceUploadFallback(after error: Error) -> Bool {
-        switch classifyVoiceFailure(error) {
-        case .providerAuthenticationRejected, .bridgeSessionUnsupported:
-            return true
-        default:
-            return false
-        }
-    }
-
-    private func transcribeVoiceDirectlyFromPhone(audioData: Data, mimeType: String) async throws -> String {
-        let token: String
-        do {
-            token = try await resolveVoiceAuthToken()
-        } catch {
-            Task { await refreshGPTAccountState() }
-            throw error
-        }
-
-        do {
-            let transcript = try await GPTVoiceTranscriptionManager.transcribe(
-                audioData: audioData,
-                mimeType: mimeType,
-                token: token
-            )
-            codexLogVoiceTranscription("legacy phone transcription succeeded chars=\(transcript.count)")
-            return transcript
-        } catch GPTVoiceTranscriptionError.authExpired {
-            Task { await refreshGPTAccountState() }
-            let freshToken = try await resolveVoiceAuthToken()
-            do {
-                let transcript = try await GPTVoiceTranscriptionManager.transcribe(
-                    audioData: audioData,
-                    mimeType: mimeType,
-                    token: freshToken
-                )
-                codexLogVoiceTranscription("legacy phone transcription succeeded after refresh chars=\(transcript.count)")
-                return transcript
-            } catch GPTVoiceTranscriptionError.authExpired {
-                markGPTVoiceReauthenticationRequired()
-                throw GPTVoiceTranscriptionError.authExpired
-            }
-        } catch {
-            Task { await refreshGPTAccountState() }
-            throw error
-        }
-    }
-
     private func handleVoiceTranscriptionTerminalFailure(_ error: Error) {
         switch classifyVoiceFailure(error) {
         case .providerAuthenticationRejected, .macReauthenticationRequired:
@@ -220,31 +156,6 @@ extension CodexService {
         default:
             Task { await refreshGPTAccountState() }
         }
-    }
-
-    // Asks the bridge for an ephemeral ChatGPT token over the E2E encrypted channel.
-    private func resolveVoiceAuthToken() async throws -> String {
-        let response: RPCMessage
-        do {
-            response = try await sendRequest(method: "voice/resolveAuth", params: nil)
-        } catch {
-            _ = consumeUnsupportedVoiceBridgeMethod(error)
-            throw error
-        }
-
-        guard let payload = response.result?.objectValue,
-              let rawToken = payload["token"]?.stringValue else {
-            throw CodexServiceError.invalidResponse("voice/resolveAuth did not return a valid token")
-        }
-
-        let token = rawToken
-            .replacingOccurrences(of: #"(?i)^bearer\s+"#, with: "", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !token.isEmpty else {
-            throw CodexServiceError.invalidResponse("voice/resolveAuth did not return a valid token")
-        }
-
-        return token
     }
 
     // Parses chunked WAV metadata instead of assuming the fmt/data chunks sit at fixed offsets.
@@ -271,7 +182,6 @@ extension CodexService {
             }
 
             return VoiceTranscriptionRequestPayload(
-                audioData: audioData,
                 audioBase64: audioData.base64EncodedString(),
                 mimeType: normalizedMimeType,
                 byteCount: audioData.count,

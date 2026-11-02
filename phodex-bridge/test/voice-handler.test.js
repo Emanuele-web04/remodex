@@ -85,21 +85,16 @@ test("voice/transcribe returns transcribed text without exposing auth tokens", a
   assert.doesNotMatch(logText, /Bearer/i);
 });
 
-test("voice/resolveAuth returns a ChatGPT token for legacy phone clients", async () => {
-  const result = await resolveVoiceAuth(async (method, params) => {
-    assert.equal(method, "getAuthStatus");
-    assert.deepEqual(params, {
-      includeToken: true,
-      refreshToken: true,
-    });
-    return {
-      authMethod: "chatgpt",
-      authToken: "chatgpt-token",
-      requiresOpenaiAuth: false,
-    };
-  });
-
-  assert.deepEqual(result, { token: "chatgpt-token" });
+test("legacy voice auth requests receive update guidance without fetching credentials", async () => {
+  let authRequests = 0;
+  await assert.rejects(
+    () => resolveVoiceAuth(async () => {
+      authRequests += 1;
+      return { authMethod: "chatgpt", authToken: "chatgpt-token" };
+    }),
+    { errorCode: "update_required", message: /update.*iPhone/i }
+  );
+  assert.equal(authRequests, 0);
 });
 
 test("voice/transcribe normalizes bearer-prefixed ChatGPT tokens", async () => {
@@ -137,31 +132,6 @@ test("voice/transcribe normalizes bearer-prefixed ChatGPT tokens", async () => {
 
   assert.equal(fetchCalls[0].url, "https://chatgpt.com/backend-api/transcribe");
   assert.equal(fetchCalls[0].options.headers.Authorization, "Bearer chatgpt-token");
-});
-
-test("voice/resolveAuth normalizes bearer-prefixed tokens for legacy clients", async () => {
-  const result = await resolveVoiceAuth(async () => ({
-    authMethod: "chatgpt_auth_tokens",
-    authToken: "Bearer chatgpt-token",
-    requiresOpenaiAuth: false,
-  }));
-
-  assert.deepEqual(result, { token: "chatgpt-token" });
-});
-
-test("voice/resolveAuth rejects API-key auth for legacy direct upload clients", async () => {
-  await assert.rejects(
-    () => resolveVoiceAuth(async () => ({
-      authMethod: "apiKey",
-      authToken: "sk-test",
-      requiresOpenaiAuth: false,
-    })),
-    (error) => {
-      assert.equal(error.errorCode, "not_chatgpt");
-      assert.match(error.message, /ChatGPT account/);
-      return true;
-    }
-  );
 });
 
 test("voice/transcribe retries once after a 401 response", async () => {
