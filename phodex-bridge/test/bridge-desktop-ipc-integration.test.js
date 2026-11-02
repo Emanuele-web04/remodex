@@ -1171,6 +1171,123 @@ test("bridge pages mixed active and archived catalogs without forwarding its cur
     && message.params?.threadId === "opencode:ses_3");
 });
 
+test("endpoint routing delegates only selected extensions and passes through Codex project requests", async (t) => {
+  const relayServer = new WebSocket.Server({ port: 0 });
+  const relayMessages = [];
+  const fakeCodex = createFakeCodexTransport();
+  let relaySocket;
+  let bridge;
+  t.after(() => {
+    bridge?.stop();
+    relaySocket?.close();
+    relayServer.close();
+  });
+  await new Promise((resolve) => relayServer.once("listening", resolve));
+  relayServer.on("connection", (socket) => {
+    relaySocket = socket;
+    socket.on("message", (data) => relayMessages.push(JSON.parse(data.toString("utf8"))));
+  });
+
+  const { readBridgeConfig } = require("../src/codex-desktop-refresher");
+  const config = readBridgeConfig({ env: {
+    REMODEX_RELAY: `ws://127.0.0.1:${relayServer.address().port}`,
+    REMODEX_CODEX_ENDPOINT: "ws://fake-codex",
+    REMODEX_CODEX_ENDPOINT_METHODS: " project/createDirectory, workspace/readImage, workspace/readFile ",
+  } });
+  const { startBridge } = loadBridgeWithTestDoubles({ createCodexTransportImpl: () => fakeCodex });
+  bridge = startBridge({ printPairingQr: false, config });
+  await waitFor(() => relaySocket?.readyState === WebSocket.OPEN);
+
+  const request = (method, params = {}) => {
+    relaySocket.send(JSON.stringify({ id: method, method, params }));
+    return waitForMessage(relayMessages, (message) => message.id === method);
+  };
+  let upstreamRequestId = 0;
+  const upstreamRequest = async (method, params, response, expected = response) => {
+    const id = `upstream-${++upstreamRequestId}`;
+    relaySocket.send(JSON.stringify({ id, method, params }));
+    await waitFor(() => fakeCodex.sent.some((message) => message.id === id)
+      || relayMessages.some((message) => message.id === id));
+    assert.deepEqual(fakeCodex.sent.find((message) => message.id === id), { id, method, params });
+    fakeCodex.emitMessage({ id, ...response });
+    assert.deepEqual(await waitForMessage(relayMessages, (message) => message.id === id), { id, ...expected });
+  };
+
+  await upstreamRequest("project/list", { limit: 2 }, { result: { data: [] } });
+  await upstreamRequest("project/createDirectory", { name: "remote-folder" }, {
+    error: { code: -32601, message: "Method not found" },
+  });
+  await upstreamRequest("workspace/readImage", { path: "/runtime/image.png" }, {
+    result: { dataBase64: "aW1hZ2U=" },
+  });
+  await upstreamRequest("workspace/readImage", { path: "/runtime/image.png", maxPixelDimension: 512 }, {
+    result: { dataBase64: Buffer.alloc(2 * 1024 * 1024 + 1).toString("base64") },
+  }, {
+    error: {
+      code: -32000,
+      message: "This image is too large to send to the phone.",
+      data: { errorCode: "image_too_large" },
+    },
+  });
+  assert.equal((await request("project/validatePath")).error?.data?.errorCode, "missing_path");
+  assert.equal((await request("workspace/readFile")).error?.data?.errorCode, "missing_file_path");
+  fakeCodex.emitMessage({ id: "untracked-image", result: { dataBase64: "a".repeat(12 * 1024 * 1024) } });
+  const oversized = await waitForMessage(relayMessages, (message) => message.id === "untracked-image");
+  assert.equal(oversized.error?.data?.errorCode, "relay_response_too_large");
+  assert.deepEqual(fakeCodex.sent.map((message) => message.method), [
+    "project/list", "project/createDirectory", "workspace/readImage", "workspace/readImage",
+  ]);
+});
+
+test("stock endpoint initializes once before phone requests", async (t) => {
+  const relayServer = new WebSocket.Server({ port: 0 });
+  const messages = [];
+  const fakeCodex = createFakeCodexTransport();
+  let relaySocket;
+  const publishedPairings = [];
+  let bridge;
+  t.after(() => {
+    bridge?.stop();
+    relaySocket?.close();
+    relayServer.close();
+  });
+  await new Promise((resolve) => relayServer.once("listening", resolve));
+  relayServer.on("connection", (socket) => {
+    relaySocket = socket;
+    socket.on("message", (data) => messages.push(JSON.parse(data.toString("utf8"))));
+  });
+  const { readBridgeConfig } = require("../src/codex-desktop-refresher");
+  const config = readBridgeConfig({ env: {
+    REMODEX_RELAY: `ws://127.0.0.1:${relayServer.address().port}`,
+    REMODEX_CODEX_ENDPOINT: "ws://fake-codex",
+    REMODEX_CODEX_ENDPOINT_INITIALIZE: "true",
+  } });
+  const { startBridge } = loadBridgeWithTestDoubles({ createCodexTransportImpl: () => fakeCodex });
+  bridge = startBridge({
+    printPairingQr: false, config,
+    onPairingSession: (pairing) => publishedPairings.push(pairing),
+  });
+
+  await waitFor(() => fakeCodex.sent.length > 0 || relaySocket?.readyState === WebSocket.OPEN);
+  assert.equal(Boolean(relaySocket), false);
+  assert.equal(publishedPairings.length, 0);
+  const initialize = fakeCodex.sent[0];
+  assert.equal(initialize.method, "initialize");
+  assert.equal(initialize.params.capabilities.experimentalApi, true);
+  fakeCodex.emitMessage({ id: initialize.id, result: { userAgent: "codex-test" } });
+  await waitFor(() => relaySocket?.readyState === WebSocket.OPEN);
+  assert.deepEqual(fakeCodex.sent[1], { method: "initialized" });
+  assert.equal(publishedPairings.length, 1);
+  assert.equal(messages.some((message) => message.id === initialize.id), false);
+
+  for (const id of ["first-phone", "reconnected-phone"]) {
+    relaySocket.send(JSON.stringify({ id, method: "initialize" }));
+    const reply = await waitForMessage(messages, (message) => message.id === id);
+    assert.equal(reply.result?.bridgeManaged, true);
+  }
+  assert.deepEqual(fakeCodex.sent.map((message) => message.method), ["initialize", "initialized"]);
+});
+
 test("a timed-out private auth response cannot reach the phone", async (t) => {
   const relayServer = new WebSocket.Server({ port: 0 });
   const messages = [];

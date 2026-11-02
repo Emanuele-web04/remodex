@@ -35,8 +35,8 @@ const { handleDesktopRequest } = require("./desktop-handler");
 const { readDaemonConfig, writeDaemonConfig } = require("./daemon-state");
 const { handleGitRequest } = require("./git-handler");
 const { handleThreadContextRequest } = require("./thread-context-handler");
-const { handleWorkspaceRequest } = require("./workspace-handler");
-const { handleProjectRequest } = require("./project-handler");
+const { handleWorkspaceRequest, workspaceImageResponseFits } = require("./workspace-handler");
+const { handleProjectRequest, isBridgeProjectMethod } = require("./project-handler");
 const { handlePetRequest } = require("./pet-handler");
 const { createNotificationsHandler } = require("./notifications-handler");
 const { createVoiceHandler, resolveVoiceAuth } = require("./voice-handler");
@@ -99,6 +99,7 @@ const { buildApplyPatchFileChangeItem } = require("./apply-patch-changes");
 
 const execFileAsync = promisify(execFile);
 const RELAY_HISTORY_IMAGE_REFERENCE_URL = "remodex://history-image-elided";
+const MAX_ENDPOINT_REPLY_PLAINTEXT_BYTES = 11 * 1024 * 1024;
 const BRIDGE_MANAGED_REQUEST_ID_PREFIX = "bridge-managed-";
 const RELAY_THREAD_PAYLOAD_SOFT_LIMIT_BYTES = 4 * 1024 * 1024;
 const OPEN_CODE_THREAD_LIST_CURSOR_PREFIX = "remodex-opencode-list-v1:";
@@ -721,6 +722,15 @@ function startBridge({
 } = {}) {
   const config = explicitConfig || readBridgeConfig();
   config.keepMacAwakeEnabled = config.keepMacAwakeEnabled === true;
+  const initializeEndpoint = Boolean(config.codexEndpoint) && config.codexEndpointInitialize === true;
+  const endpointMethods = new Set(
+    config.codexEndpoint && Array.isArray(config.codexEndpointMethods)
+      ? config.codexEndpointMethods.filter((method) => isBridgeProjectMethod(method)
+        || method === "thread/contextWindow/read"
+        || method === "thread/generateTitle"
+        || method === "workspace/readImage")
+      : []
+  );
   const bridgeWakeAssertion = createMacOSBridgeWakeAssertion({
     enabled: config.keepMacAwakeEnabled,
   });
@@ -780,13 +790,14 @@ function startBridge({
 
   // Keep the local Codex runtime alive across transient relay disconnects.
   let socket = null;
+  let pairingSession = null;
   let isShuttingDown = false;
   let reconnectAttempt = 0;
   let reconnectTimer = null;
   let relayWatchdog = null;
   let lastRelayActivityAt = 0;
   let lastConnectionStatus = null;
-  let codexLaunchState = config.codexEndpoint ? "connected" : "starting";
+  let codexLaunchState = config.codexEndpoint && !initializeEndpoint ? "connected" : "starting";
   let codexHandshakeState = config.codexEndpoint ? "warm" : "cold";
   const forwardedInitializeRequestIds = new Set();
   const bridgeManagedCodexRequestWaiters = new Map();
@@ -978,7 +989,9 @@ function startBridge({
     lastError: "",
   });
 
-  codex.onError((error) => {
+  codex.onError(handleCodexTransportError);
+
+  function handleCodexTransportError(error) {
     codexLaunchState = "error";
     publishBridgeStatus({
       state: "error",
@@ -995,16 +1008,29 @@ function startBridge({
     }
     console.error(error.message);
     process.exit(1);
-  });
-  // Marks the local Codex runtime as launchable before relay/network recovery updates.
-  codex.onStarted(() => {
-    codexLaunchState = "connected";
-    const lastPublishedBridgeStatus = bridgeStatusPublisher.latest();
-    if (!lastPublishedBridgeStatus) {
-      return;
+  }
+
+  // A stock endpoint initializes once per socket, independently of phone reconnects.
+  codex.onStarted(async () => {
+    if (isShuttingDown) return;
+    if (initializeEndpoint) {
+      try {
+        await sendCodexRequest("initialize", {
+          clientInfo: { name: "remodex", version: bridgePackageVersion },
+          capabilities: { experimentalApi: true },
+        });
+        if (isShuttingDown) return;
+        codex.send(JSON.stringify({ method: "initialized" }));
+      } catch (error) {
+        if (!isShuttingDown) handleCodexTransportError(error);
+        return;
+      }
     }
 
-    publishBridgeStatus(lastPublishedBridgeStatus);
+    codexLaunchState = "connected";
+    const lastPublishedBridgeStatus = bridgeStatusPublisher.latest();
+    if (lastPublishedBridgeStatus) publishBridgeStatus(lastPublishedBridgeStatus);
+    if (initializeEndpoint) beginPairingAndConnectRelay();
   });
 
   function clearReconnectTimer() {
@@ -1201,17 +1227,18 @@ function startBridge({
     });
   }
 
-  const pairingPayload = secureTransport.createPairingPayload();
-  const pairingSession = {
-    pairingPayload,
-    pairingCode: createShortPairingCode({ length: SHORT_PAIRING_CODE_LENGTH }),
-  };
-  onPairingSession?.(pairingSession);
-  if (printPairingQr) {
-    printQR(pairingSession);
+  function beginPairingAndConnectRelay() {
+    pairingSession = {
+      pairingPayload: secureTransport.createPairingPayload(),
+      pairingCode: createShortPairingCode({ length: SHORT_PAIRING_CODE_LENGTH }),
+    };
+    onPairingSession?.(pairingSession);
+    if (printPairingQr) printQR(pairingSession);
+    connectRelay();
   }
+
   pushServiceClient.logUnavailable();
-  connectRelay();
+  if (!initializeEndpoint) beginPairingAndConnectRelay();
 
   codex.onMessage((message) => {
     // Streaming deltas make this the hottest path in the bridge: parse the
@@ -1339,6 +1366,10 @@ function startBridge({
       return;
     }
     if (voiceHandler.handleVoiceRequest(rawMessage, sendApplicationResponse, parsedMessage)) {
+      return;
+    }
+    if (endpointMethods.has(parsedMessage?.method)) {
+      forwardInboundRequestToCodex(rawMessage);
       return;
     }
     if (handleThreadContextRequest(rawMessage, sendApplicationResponse, parsedMessage)) {
@@ -1517,26 +1548,29 @@ function startBridge({
     const outboundMessage = parsedMessage || parseBridgeMessage(rawMessage);
     pushNotificationTracker.handleOutbound(rawMessage, outboundMessage);
     const responseId = outboundMessage?.id;
+    const replyId = config.codexEndpoint && responseId != null
+      && (hasOwn(outboundMessage, "result") || hasOwn(outboundMessage, "error") || hasOwn(outboundMessage, "payload"))
+      ? responseId : null;
     const requestKey = responseId == null ? "" : String(responseId);
     const listRequest = pendingOpenCodeThreadListRequests.get(requestKey);
     const sanitizedMessage = sanitizeRelayBoundCodexMessage(rawMessage, outboundMessage);
     if (!listRequest || !sanitizedMessage) {
-      secureTransport.queueOutboundApplicationMessage(sanitizedMessage, sendRelayWireMessage);
+      queueEndpointBoundResponse(sanitizedMessage, replyId);
       return;
     }
 
     pendingOpenCodeThreadListRequests.delete(requestKey);
     if (safeParseJSON(sanitizedMessage)?.error) {
-      secureTransport.queueOutboundApplicationMessage(sanitizedMessage, sendRelayWireMessage);
+      queueEndpointBoundResponse(sanitizedMessage, replyId);
       return;
     }
-    const sendMerged = () => secureTransport.queueOutboundApplicationMessage(
+    const sendMerged = () => queueEndpointBoundResponse(
       mergeOpenCodeThreadsIntoListResponse(
         sanitizedMessage,
         [...(listRequest.archived ? archivedOpenCodeThreadCatalog : openCodeThreadCatalog).values()],
         listRequest
       ),
-      sendRelayWireMessage
+      replyId
     );
     if (listRequest.cursor) {
       sendMerged();
@@ -1548,6 +1582,17 @@ function startBridge({
       refresh,
       new Promise((resolve) => setTimeout(resolve, timeoutMs)),
     ]).then(sendMerged);
+  }
+
+  function queueEndpointBoundResponse(payload, replyId) {
+    if (replyId != null && payload && Buffer.byteLength(payload) > RELAY_THREAD_PAYLOAD_SOFT_LIMIT_BYTES
+      && Buffer.byteLength(JSON.stringify(payload)) > MAX_ENDPOINT_REPLY_PLAINTEXT_BYTES) {
+      // Keep room for the encrypted base64 envelope under the phone's 16 MiB frame limit.
+      payload = createJsonRpcErrorResponse(
+        replyId, new Error("The Codex endpoint response is too large to send to the phone."), "relay_response_too_large"
+      );
+    }
+    secureTransport.queueOutboundApplicationMessage(payload, sendRelayWireMessage);
   }
 
   function refreshOpenCodeThreadCatalog() {
@@ -1920,7 +1965,15 @@ function startBridge({
         createdAt: Date.now(),
       });
     }
-    if (relaySanitizedRequestMethods.has(method)) {
+    if (method === "workspace/readImage" && endpointMethods.has(method)) {
+      const dimension = parsed.params?.maxPixelDimension || parsed.params?.previewMaxPixelDimension;
+      relaySanitizedResponseMethodsById.set(String(requestId), {
+        method,
+        maxPixelDimension: typeof dimension === "number" || typeof dimension === "string"
+          ? Number(dimension) : undefined,
+        createdAt: Date.now(),
+      });
+    } else if (relaySanitizedRequestMethods.has(method)) {
       const trackedRequest = {
         method,
         isActiveThreadCatalog: method === "thread/list"
@@ -1985,6 +2038,15 @@ function startBridge({
       return normalizedMessage;
     }
     relaySanitizedResponseMethodsById.delete(String(responseId));
+
+    if (trackedRequest.method === "workspace/readImage") {
+      if (!workspaceImageResponseFits(trackedRequest, parsed.result, Buffer.byteLength(normalizedMessage))) {
+        return createJsonRpcErrorResponse(
+          responseId, new Error("This image is too large to send to the phone."), "image_too_large"
+        );
+      }
+      return normalizedMessage;
+    }
 
     if (trackedRequest.method === "thread/list"
       || trackedRequest.method === "thread/read"

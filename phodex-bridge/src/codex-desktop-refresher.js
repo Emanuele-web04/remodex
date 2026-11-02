@@ -767,6 +767,9 @@ function readBridgeConfig({
       ? (persistedKeepMacAwakeEnabled == null ? false : persistedKeepMacAwakeEnabled)
       : explicitKeepMacAwakeEnabled,
     codexEndpoint,
+    codexEndpointInitialize: readOptionalBooleanEnv(["REMODEX_CODEX_ENDPOINT_INITIALIZE"], env) === true,
+    codexEndpointMethods: readFirstDefinedEnv(["REMODEX_CODEX_ENDPOINT_METHODS"], "", env)
+      .split(",").map((method) => method.trim()).filter(Boolean),
     desktopIpcSocketPath: readFirstDefinedEnv(["REMODEX_DESKTOP_IPC_SOCKET"], "", env),
     desktopIpcLiveSyncEnabled,
     // Live sync must not navigate or activate Desktop without an explicit opt-in.
