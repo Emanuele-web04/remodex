@@ -39,10 +39,7 @@ extension CodexService {
         messagePersistence.save(messagesByThread, macDeviceId: normalizedMacDeviceId)
         composerDraftPersistence.save(composerDraftsByThreadID, macDeviceId: normalizedMacDeviceId)
         persistDesktopMirroredRunningSnapshot(macDeviceId: normalizedMacDeviceId)
-        return canPersistAIChangeSets && aiChangeSetPersistence.save(
-            Array(aiChangeSetsByID.values),
-            macDeviceId: normalizedMacDeviceId
-        )
+        return saveMacScopedAIChangeSets(for: normalizedMacDeviceId)
     }
 
     // Loads messages, drafts, and assistant change-set metadata for the provided Mac namespace.
@@ -110,7 +107,45 @@ extension CodexService {
             includeLegacyFallback: includeLegacyFallback
         )
         canPersistAIChangeSets = persistedChangeSets != nil
-        let loadedChangeSets = persistedChangeSets ?? []
+        includeLegacyAIChangeSetFallbackOnRetry = persistedChangeSets == nil && includeLegacyFallback
+        replaceMacScopedAIChangeSets(persistedChangeSets ?? [])
+    }
+
+    @discardableResult
+    func saveMacScopedAIChangeSets(for macDeviceId: String?) -> Bool {
+        var changeSets = Array(aiChangeSetsByID.values)
+        let recovering = !canPersistAIChangeSets
+        if recovering {
+            guard let persisted = aiChangeSetPersistence.load(
+                macDeviceId: macDeviceId,
+                includeLegacyFallback: includeLegacyAIChangeSetFallbackOnRetry
+            ) else {
+                return false
+            }
+            // Current entries win on id collisions and retain precedence in the turn and message indexes.
+            changeSets = persisted.filter { aiChangeSetsByID[$0.id] == nil } + changeSets
+        }
+
+        let sortedChangeSets = changeSets.sorted {
+            if $0.createdAt != $1.createdAt {
+                return $0.createdAt < $1.createdAt
+            }
+            return $0.id < $1.id
+        }
+        guard aiChangeSetPersistence.save(sortedChangeSets, macDeviceId: macDeviceId) else {
+            return false
+        }
+
+        if recovering {
+            replaceMacScopedAIChangeSets(changeSets)
+            canPersistAIChangeSets = true
+            includeLegacyAIChangeSetFallbackOnRetry = false
+            invalidateAssistantRevertStates()
+        }
+        return true
+    }
+
+    private func replaceMacScopedAIChangeSets(_ loadedChangeSets: [AIChangeSet]) {
         aiChangeSetsByID = loadedChangeSets.reduce(into: [:]) { partialResult, changeSet in
             partialResult[changeSet.id] = changeSet
         }
@@ -295,6 +330,7 @@ extension CodexService {
             recentActivityLineByThread.removeAll()
             contextWindowUsageByThread.removeAll()
             canPersistAIChangeSets = false
+            includeLegacyAIChangeSetFallbackOnRetry = false
             aiChangeSetsByID.removeAll()
             aiChangeSetIDByTurnKey.removeAll()
             aiChangeSetIDByAssistantMessageID.removeAll()
@@ -712,8 +748,7 @@ private extension CodexService {
             return (false, pending)
         }
 
-        for sourceDeviceId in mergedSourceIds {
-            aiChangeSetPersistence.delete(macDeviceId: sourceDeviceId)
+        for sourceDeviceId in mergedSourceIds where aiChangeSetPersistence.delete(macDeviceId: sourceDeviceId) {
             pending.remove(sourceDeviceId)
         }
         return (changed, pending)

@@ -638,18 +638,7 @@ private extension CodexService {
     }
 
     func persistAIChangeSets() {
-        guard canPersistAIChangeSets else {
-            return
-        }
-        aiChangeSetPersistence.save(
-            aiChangeSetsByID.values.sorted {
-                if $0.createdAt != $1.createdAt {
-                    return $0.createdAt < $1.createdAt
-                }
-                return $0.id < $1.id
-            },
-            macDeviceId: currentMacScopedPersistenceDeviceId
-        )
+        saveMacScopedAIChangeSets(for: currentMacScopedPersistenceDeviceId)
     }
 
     func latestAssistantMessageId(for threadId: String, turnId: String) -> String? {

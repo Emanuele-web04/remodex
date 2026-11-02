@@ -73,9 +73,15 @@ nonisolated struct AIChangeSetPersistence {
     }
 
     // Removes the scoped change-set cache after a rotated device id has been merged elsewhere.
-    func delete(macDeviceId: String?) {
-        for fileURL in storeURLs(macDeviceId: macDeviceId) {
-            try? FileManager.default.removeItem(at: fileURL)
+    @discardableResult
+    func delete(macDeviceId: String?) -> Bool {
+        do {
+            try FileManager.default.removeItem(at: storeURL(macDeviceId: macDeviceId))
+            return true
+        } catch let error as CocoaError where error.code == .fileNoSuchFile || error.code == .fileReadNoSuchFile {
+            return true
+        } catch {
+            return false
         }
     }
 
