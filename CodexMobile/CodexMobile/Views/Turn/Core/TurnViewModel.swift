@@ -2029,13 +2029,13 @@ final class TurnViewModel {
 
         Task { @MainActor in
             defer { steeringDraftID = nil }
+            var didDispatch = false
 
             do {
                 let fileMentions = confirmedFileMentionPaths(from: draft.rawFileMentions)
                 let stillBusy = await refreshBusyStateIfNeeded(codex: codex, threadID: threadID, wasBusy: true)
                 if stillBusy {
                     let expectedTurnID = try await resolveSteerExpectedTurnID(codex: codex, threadID: threadID)
-                    var didDispatch = false
                     do {
                         try await codex.steerTurn(
                             userInput: draft.text,
@@ -2051,25 +2051,10 @@ final class TurnViewModel {
                         removeQueuedDraft(id: id, codex: codex, threadID: threadID)
                         return
                     } catch {
-                        let serviceError = error as? CodexServiceError
-                        let rpcError: RPCError?
-                        if case .rpcError(let responseError) = serviceError {
-                            rpcError = responseError
-                        } else {
-                            rpcError = nil
-                        }
-                        let errorCode = rpcError?.data?.objectValue?["errorCode"]?.stringValue
-                        guard serviceError?.isDesktopSteerTurnEnded == true else {
-                            if didDispatch && (rpcError == nil || errorCode == "desktop_steer_delivery_unknown"
-                                || rpcError?.message == "Could not continue this Codex Desktop-owned thread from the phone.") {
-                                setQueuePauseState(
-                                    .paused(errorMessage: "Check whether your message arrived before resuming."),
-                                    codex: codex,
-                                    threadID: threadID
-                                )
-                            }
+                        guard (error as? CodexServiceError)?.isDesktopSteerTurnEnded == true else {
                             throw error
                         }
+                        didDispatch = false
 
                         // Desktop rejected the steer before admitting it. Preserve
                         // the draft if a new run is active or idle state is uncertain.
@@ -2092,12 +2077,31 @@ final class TurnViewModel {
                     skillMentions: draft.skillMentions,
                     mentionMentions: draft.mentionMentions,
                     fileMentions: fileMentions,
-                    collaborationMode: draft.collaborationMode
+                    collaborationMode: draft.collaborationMode,
+                    onTurnStartDispatch: { didDispatch = true }
                 )
                 removeQueuedDraft(id: id, codex: codex, threadID: threadID)
             } catch {
                 isAwaitingAssistantResponse = false
-                if (error as? CodexServiceError)?.isDesktopSteerTurnEnded != true {
+                let serviceError = error as? CodexServiceError
+                if didDispatch {
+                    let rpcError: RPCError?
+                    if case .rpcError(let responseError) = serviceError {
+                        rpcError = responseError
+                    } else {
+                        rpcError = nil
+                    }
+                    if rpcError == nil
+                        || rpcError?.data?.objectValue?["errorCode"]?.stringValue == "desktop_steer_delivery_unknown"
+                        || rpcError?.message == "Could not continue this Codex Desktop-owned thread from the phone." {
+                        setQueuePauseState(
+                            .paused(errorMessage: "Check whether your message arrived before resuming."),
+                            codex: codex,
+                            threadID: threadID
+                        )
+                    }
+                }
+                if serviceError?.isDesktopSteerTurnEnded != true {
                     codex.removeLatestFailedUserMessage(
                         threadId: threadID,
                         matchingText: draft.text,

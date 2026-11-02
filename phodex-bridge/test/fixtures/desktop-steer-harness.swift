@@ -23,7 +23,7 @@ enum DeliveryState { case failed }
     func queuedDrafts(codex: CodexService, threadID: String) -> [QueuedTurnDraft] { drafts }
     func removeQueuedDraft(id: String, codex: CodexService, threadID: String) { drafts.removeAll { $0.id == id } }
     func confirmedFileMentionPaths(from paths: [String]) -> [String] { paths }
-    func refreshBusyStateIfNeeded(codex: CodexService, threadID: String, wasBusy: Bool) async -> Bool { wasBusy }
+    func refreshBusyStateIfNeeded(codex: CodexService, threadID: String, wasBusy: Bool) async -> Bool { codex.initiallyBusy }
     func resolveSteerExpectedTurnID(codex: CodexService, threadID: String) async throws -> String? { "old-turn" }
     func setQueuePauseState(_ state: QueuePauseState, codex: CodexService, threadID: String) { paused = true }
 }
@@ -31,9 +31,11 @@ enum DeliveryState { case failed }
 @MainActor final class CodexService {
     var isConnected = true
     var isBusy = true
+    var initiallyBusy = true
     var refreshedBusy: Bool?
     var error: Error?
     var includesMention = false
+    var startError: Error?
     var lastErrorMessage: String?
     var calls: [String] = []
     var rows: [String: String] = [:]
@@ -53,8 +55,10 @@ enum DeliveryState { case failed }
         isBusy = refreshedBusy
         return true
     }
-    func startTurn(userInput: String, threadId: String, attachments: [String], skillMentions: [String], mentionMentions: [String], fileMentions: [String], collaborationMode: String?) async throws {
+    func startTurn(userInput: String, threadId: String, attachments: [String], skillMentions: [String], mentionMentions: [String], fileMentions: [String], collaborationMode: String?, onTurnStartDispatch: (@MainActor () -> Void)? = nil) async throws {
         calls.append("start:\(userInput)")
+        onTurnStartDispatch?()
+        if let startError { throw startError }
     }
     func markMessageDeliveryState(threadId: String, messageId: String, state: DeliveryState) {}
     func removeUserMessage(threadId: String, messageId: String) -> Bool { rows.removeValue(forKey: messageId) != nil }
@@ -92,6 +96,20 @@ enum DeliveryState { case failed }
             precondition(viewModel.drafts.map(\.id) == (scenario.sent ? ["first", "last"] : ["first", "selected", "last"]))
             precondition(viewModel.paused == scenario.paused)
             precondition(service.rows.isEmpty, "The rejected optimistic row must be removed by item ID")
+        }
+        for initiallyBusy in [true, false] {
+            let viewModel = TurnViewModel()
+            let service = CodexService()
+            service.initiallyBusy = initiallyBusy
+            service.error = ended
+            service.refreshedBusy = false
+            service.startError = CodexServiceError.disconnected
+            viewModel.steerQueuedDraft(id: "selected", codex: service, threadID: "thread")
+            while viewModel.steeringDraftID != nil { await Task.yield() }
+            let expected = initiallyBusy ? ["steer:selected", "refresh", "start:selected"] : ["start:selected"]
+            precondition(service.calls == expected)
+            precondition(viewModel.drafts.map(\.id) == ["first", "selected", "last"])
+            precondition(viewModel.paused, "A dispatched fallback with no receipt must pause the queue")
         }
         print("desktop steer checks passed")
     }
