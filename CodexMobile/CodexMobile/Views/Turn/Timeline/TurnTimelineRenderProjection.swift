@@ -906,7 +906,8 @@ enum TurnTimelineRenderProjection {
            isGeneratedImageArtifactAlreadyInFinal(message, finalMessage: finalMessage) {
             return false
         }
-        return isAssistantPriorityArtifactOnly(message)
+        return hasAssistantImagesOutsideFinal(message, finalMessage: finalMessage)
+            || isAssistantPriorityArtifactOnly(message)
     }
 
     private static func isApprovedAutoApprovalReview(_ message: CodexMessage) -> Bool {
@@ -925,6 +926,11 @@ enum TurnTimelineRenderProjection {
             return false
         }
 
+        // Repeated captions do not make a distinct result image a prose replay.
+        if hasAssistantImagesOutsideFinal(message, finalMessage: finalMessage) {
+            return false
+        }
+
         if isCommentaryAssistantPhase(message.assistantPhase),
            isFinalAnswerAssistantPhase(finalMessage.assistantPhase) {
             return false
@@ -940,6 +946,18 @@ enum TurnTimelineRenderProjection {
             return false
         }
         return finalText == candidateText || finalText.contains(candidateText)
+    }
+
+    private static func hasAssistantImagesOutsideFinal(_ message: CodexMessage, finalMessage: CodexMessage?) -> Bool {
+        guard message.role == .assistant, !message.isStreaming,
+              message.text.utf8.count <= largeArtifactTextByteLimit else {
+            return false
+        }
+        let references = AssistantMarkdownImageReferenceParser.references(in: message.text)
+        guard !references.isEmpty else { return false }
+        guard let finalMessage, finalMessage.text.utf8.count <= largeArtifactTextByteLimit else { return true }
+        let finalPaths = Set(AssistantMarkdownImageReferenceParser.references(in: finalMessage.text).map(\.path))
+        return references.contains { !finalPaths.contains($0.path) }
     }
 
     private static func shouldPreserveReplayAsPreviousMessage(
