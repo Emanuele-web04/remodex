@@ -36,7 +36,7 @@ const { readDaemonConfig, writeDaemonConfig } = require("./daemon-state");
 const { handleGitRequest } = require("./git-handler");
 const { handleThreadContextRequest } = require("./thread-context-handler");
 const { handleWorkspaceRequest } = require("./workspace-handler");
-const { handleProjectRequest } = require("./project-handler");
+const { handleProjectRequest, isBridgeProjectMethod } = require("./project-handler");
 const { handlePetRequest } = require("./pet-handler");
 const { createNotificationsHandler } = require("./notifications-handler");
 const { createVoiceHandler, resolveVoiceAuth } = require("./voice-handler");
@@ -719,6 +719,14 @@ function startBridge({
 } = {}) {
   const config = explicitConfig || readBridgeConfig();
   config.keepMacAwakeEnabled = config.keepMacAwakeEnabled === true;
+  const endpointMethods = new Set(
+    config.codexEndpoint && Array.isArray(config.codexEndpointMethods)
+      ? config.codexEndpointMethods.filter((method) => isBridgeProjectMethod(method)
+        || method === "thread/contextWindow/read"
+        || method === "thread/generateTitle"
+        || method === "workspace/readImage")
+      : []
+  );
   const bridgeWakeAssertion = createMacOSBridgeWakeAssertion({
     enabled: config.keepMacAwakeEnabled,
   });
@@ -1337,6 +1345,10 @@ function startBridge({
       return;
     }
     if (voiceHandler.handleVoiceRequest(rawMessage, sendApplicationResponse, parsedMessage)) {
+      return;
+    }
+    if (endpointMethods.has(parsedMessage?.method)) {
+      forwardInboundRequestToCodex(rawMessage);
       return;
     }
     if (handleThreadContextRequest(rawMessage, sendApplicationResponse, parsedMessage)) {

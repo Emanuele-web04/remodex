@@ -256,6 +256,8 @@ test("startMacOSBridgeService kickstarts the launch agent after bootstrap", () =
       HOME: rootDir,
       REMODEX_DEVICE_STATE_DIR: rootDir,
       REMODEX_RELAY: "ws://127.0.0.1:9000/relay",
+      REMODEX_CODEX_ENDPOINT: "ws://127.0.0.1:8080",
+      REMODEX_CODEX_ENDPOINT_METHODS: "thread/generateTitle, project/quickLocations",
       UID: String(TEST_UID),
     };
 
@@ -282,7 +284,10 @@ test("startMacOSBridgeService kickstarts the launch agent after bootstrap", () =
         ["launchctl", "kickstart", "-k", `gui/${TEST_UID}/com.remodex.bridge`],
       ]
     );
-    assert.equal(readDaemonConfig({ env })?.extraRelaySessions, undefined);
+    const config = readDaemonConfig({ env });
+    assert.equal(config?.extraRelaySessions, undefined);
+    assert.equal(config?.codexEndpoint, "ws://127.0.0.1:8080");
+    assert.deepEqual(config?.codexEndpointMethods, ["thread/generateTitle", "project/quickLocations"]);
   });
 });
 

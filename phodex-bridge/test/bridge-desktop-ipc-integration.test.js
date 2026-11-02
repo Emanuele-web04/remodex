@@ -1171,6 +1171,60 @@ test("bridge pages mixed active and archived catalogs without forwarding its cur
     && message.params?.threadId === "opencode:ses_3");
 });
 
+test("endpoint routing delegates only selected extensions and passes through Codex project requests", async (t) => {
+  const relayServer = new WebSocket.Server({ port: 0 });
+  const relayMessages = [];
+  const fakeCodex = createFakeCodexTransport();
+  let relaySocket;
+  let bridge;
+  t.after(() => {
+    bridge?.stop();
+    relaySocket?.close();
+    relayServer.close();
+  });
+  await new Promise((resolve) => relayServer.once("listening", resolve));
+  relayServer.on("connection", (socket) => {
+    relaySocket = socket;
+    socket.on("message", (data) => relayMessages.push(JSON.parse(data.toString("utf8"))));
+  });
+
+  const { readBridgeConfig } = require("../src/codex-desktop-refresher");
+  const config = readBridgeConfig({ env: {
+    REMODEX_RELAY: `ws://127.0.0.1:${relayServer.address().port}`,
+    REMODEX_CODEX_ENDPOINT: "ws://fake-codex",
+    REMODEX_CODEX_ENDPOINT_METHODS: " project/createDirectory, workspace/readImage, workspace/readFile ",
+  } });
+  const { startBridge } = loadBridgeWithTestDoubles({ createCodexTransportImpl: () => fakeCodex });
+  bridge = startBridge({ printPairingQr: false, config });
+  await waitFor(() => relaySocket?.readyState === WebSocket.OPEN);
+
+  const request = (method, params = {}) => {
+    relaySocket.send(JSON.stringify({ id: method, method, params }));
+    return waitForMessage(relayMessages, (message) => message.id === method);
+  };
+  const upstreamRequest = async (method, params, response) => {
+    relaySocket.send(JSON.stringify({ id: method, method, params }));
+    await waitFor(() => fakeCodex.sent.some((message) => message.id === method)
+      || relayMessages.some((message) => message.id === method));
+    assert.deepEqual(fakeCodex.sent.find((message) => message.id === method), { id: method, method, params });
+    fakeCodex.emitMessage({ id: method, ...response });
+    assert.deepEqual(await waitForMessage(relayMessages, (message) => message.id === method), { id: method, ...response });
+  };
+
+  await upstreamRequest("project/list", { limit: 2 }, { result: { data: [] } });
+  await upstreamRequest("project/createDirectory", { name: "remote-folder" }, {
+    error: { code: -32601, message: "Method not found" },
+  });
+  await upstreamRequest("workspace/readImage", { path: "/runtime/image.png" }, {
+    result: { dataBase64: "aW1hZ2U=" },
+  });
+  assert.equal((await request("project/validatePath")).error?.data?.errorCode, "missing_path");
+  assert.equal((await request("workspace/readFile")).error?.data?.errorCode, "missing_file_path");
+  assert.deepEqual(fakeCodex.sent.map((message) => message.method), [
+    "project/list", "project/createDirectory", "workspace/readImage",
+  ]);
+});
+
 test("bridge Activity is opt-in and canonical-only endpoints need no Desktop IPC", async (t) => {
   const relayServer = new WebSocket.Server({ port: 0 });
   const relayMessages = [];

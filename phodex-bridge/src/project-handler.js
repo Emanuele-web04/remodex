@@ -23,6 +23,20 @@ const ROOTLESS_CHAT_SLUG_MAX_LENGTH = 60;
 const ROOTLESS_CHAT_SLUG_FALLBACK = "new-chat";
 const ROOTLESS_CHAT_DEDUP_LIMIT = 50;
 
+const PROJECT_HANDLERS = new Map([
+  ["project/quickLocations", (_params, options) => projectQuickLocations(options)],
+  ["project/projectlessRoots", (_params, options) => projectProjectlessRoots(options)],
+  ["project/listDirectory", projectListDirectory],
+  ["project/searchDirectories", projectSearchDirectories],
+  ["project/validatePath", projectValidatePath],
+  ["project/createDirectory", projectCreateDirectory],
+  ["project/createRootlessChatRoot", projectCreateRootlessChatRoot],
+]);
+
+function isBridgeProjectMethod(method) {
+  return PROJECT_HANDLERS.has(method);
+}
+
 // ─── ENTRY POINT ─────────────────────────────────────────────
 
 function handleProjectRequest(rawMessage, sendResponse) {
@@ -34,7 +48,7 @@ function handleProjectRequest(rawMessage, sendResponse) {
   }
 
   const method = typeof parsed?.method === "string" ? parsed.method.trim() : "";
-  if (!method.startsWith("project/")) {
+  if (!isBridgeProjectMethod(method)) {
     return false;
   }
 
@@ -64,24 +78,11 @@ function handleProjectRequest(rawMessage, sendResponse) {
 }
 
 async function handleProjectMethod(method, params, options = {}) {
-  switch (method) {
-    case "project/quickLocations":
-      return projectQuickLocations(options);
-    case "project/projectlessRoots":
-      return projectProjectlessRoots(options);
-    case "project/listDirectory":
-      return projectListDirectory(params, options);
-    case "project/searchDirectories":
-      return projectSearchDirectories(params, options);
-    case "project/validatePath":
-      return projectValidatePath(params, options);
-    case "project/createDirectory":
-      return projectCreateDirectory(params, options);
-    case "project/createRootlessChatRoot":
-      return projectCreateRootlessChatRoot(params, options);
-    default:
-      throw projectError("unknown_method", `Unknown project method: ${method}`);
+  const handler = PROJECT_HANDLERS.get(method);
+  if (!handler) {
+    throw projectError("unknown_method", `Unknown project method: ${method}`);
   }
+  return handler(params, options);
 }
 
 // ─── Project Methods ─────────────────────────────────────────
@@ -641,6 +642,7 @@ function projectError(errorCode, userMessage) {
 
 module.exports = {
   handleProjectRequest,
+  isBridgeProjectMethod,
   handleProjectMethod,
   projectQuickLocations,
   projectProjectlessRoots,
