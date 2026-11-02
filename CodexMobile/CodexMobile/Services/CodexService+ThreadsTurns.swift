@@ -2080,7 +2080,8 @@ extension CodexService {
         fileMentions: [String] = [],
         shouldAppendUserMessage: Bool = true,
         preAppendedUserMessageID: String? = nil,
-        collaborationMode: CodexCollaborationModeKind? = nil
+        collaborationMode: CodexCollaborationModeKind? = nil,
+        onDispatch: (@MainActor () -> Void)? = nil
     ) async throws {
         let normalizedThreadID = normalizedInterruptIdentifier(threadId) ?? threadId
         let effectiveRequestedCollaborationMode = collaborationModeForOutgoingTurn(
@@ -2183,7 +2184,7 @@ extension CodexService {
             }
 
             do {
-                let response = try await sendRequest(method: "turn/steer", params: .object(params))
+                let response = try await sendRequest(method: "turn/steer", params: .object(params), onDispatch: onDispatch)
                 let resolvedTurnID = extractTurnID(from: response.result) ?? currentExpectedTurnID
                 markMessageDeliveryState(
                     threadId: normalizedThreadID,

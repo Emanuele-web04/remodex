@@ -5191,14 +5191,17 @@ test("desktop IPC follower keeps an expired held mutation behind pending resume 
   assert.equal(transport.state.frames.some((frame) => frame.method === "thread-follower-start-turn"), false);
 });
 
-for (const [desktopError, expectedMessage] of [
+for (const [desktopError, expectedMessage, expectedErrorCode] of [
   ["ActiveTurnNotSteerable: the turn already completed", "ActiveTurnNotSteerable: the turn already completed"],
-  ["request-timeout", "Could not continue this Codex Desktop-owned thread from the phone."],
+  ["Cannot steer conversation stale-steer-task because its active turn already ended",
+    "The active run ended before this message could steer it.", "desktop_steer_turn_ended"],
+  ["request-timeout", "Could not continue this Codex Desktop-owned thread from the phone.", "desktop_steer_delivery_unknown"],
+  [null, "Could not continue this Codex Desktop-owned thread from the phone.", "desktop_steer_delivery_unknown"],
 ]) {
   test(`desktop IPC follower reports steer rejection ${desktopError} without replay`, async (t) => {
     const transport = createFakeIpcTransport({
       onRequest(frame, socket) {
-        if (frame.method !== "thread-follower-steer-turn") return;
+        if (frame.method !== "thread-follower-steer-turn" || !desktopError) return;
         emitFrame(socket, {
           type: "response", requestId: frame.requestId,
           resultType: "error", method: frame.method,
@@ -5225,6 +5228,7 @@ for (const [desktopError, expectedMessage] of [
     await waitFor(() => outbound.some((message) => message.id === "phone-stale-steer"));
     assert.equal(outbound[0].error?.code, -32000);
     assert.equal(outbound[0].error?.message, expectedMessage);
+    assert.equal(outbound[0].error?.data?.errorCode, expectedErrorCode);
     assert.deepEqual(localForwards, []);
     assert.equal(transport.state.frames.filter((frame) => frame.method === "thread-follower-steer-turn").length, 1);
   });
