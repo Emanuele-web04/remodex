@@ -428,6 +428,7 @@ extension CodexService {
             materializedThreadCatalogObservations.removeAll()
             missingThreadCatalogProbeTask?.cancel()
             missingThreadCatalogProbeOffset = 0
+            nextAutomaticMissingThreadProbeAt = nil
             pinnedThreadIDs.removeAll()
             pinnedThreadSnapshotsByRootID.removeAll()
             snapshotOnlyPinnedThreadIDs.removeAll()

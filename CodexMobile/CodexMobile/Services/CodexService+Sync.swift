@@ -193,6 +193,9 @@ extension CodexService {
             reconcileLocalThreadsWithServer(
                 catalog.threads, nameRevision: catalog.nameRevision, deletionScope: catalog.deletionScope
             )
+            if isAppInForeground, catalog.deletionScope != nil {
+                checkMissingCatalogThreads(catalog.threads, throttled: true)
+            }
             debugSyncLog("sync thread/list active=\(catalog.threads.count) local=\(threads.count)")
         } catch {
             // A capped thread/list timing out while the socket still accepts writes is the
@@ -251,6 +254,7 @@ extension CodexService {
             materializedThreadCatalogObservations.removeAll()
             missingThreadCatalogProbeTask?.cancel()
             missingThreadCatalogProbeOffset = 0
+            nextAutomaticMissingThreadProbeAt = nil
         }
 
         // Merge active server threads.
@@ -366,8 +370,12 @@ extension CodexService {
 
     // A capped catalog can only nominate candidates. Verify absence with a
     // metadata read, which also succeeds for an archived Codex chat.
-    func checkMissingCatalogThreads(_ catalog: [CodexThread]) {
+    func checkMissingCatalogThreads(_ catalog: [CodexThread], throttled: Bool = false) {
         guard missingThreadCatalogProbeTask == nil else { return }
+        let now = ContinuousClock.now
+        if throttled, let nextAutomaticMissingThreadProbeAt, now < nextAutomaticMissingThreadProbeAt {
+            return
+        }
         let present = Set(catalog.map(\.id))
         let candidates = threads.compactMap { thread -> (id: String, observation: UUID)? in
             guard thread.syncState == .live, !present.contains(thread.id),
@@ -383,12 +391,13 @@ extension CodexService {
         let count = min(8, candidates.count)
         let probes = (0..<count).map { candidates[(start + $0) % candidates.count] }
         missingThreadCatalogProbeOffset = (start + count) % candidates.count
+        nextAutomaticMissingThreadProbeAt = now + .seconds(20)
 
         missingThreadCatalogProbeTask = Task { @MainActor [weak self] in
             guard let self else { return }
             defer { self.missingThreadCatalogProbeTask = nil }
             for (id, observation) in probes {
-                guard !Task.isCancelled, self.isConnected else { return }
+                guard !Task.isCancelled, self.isConnected, !throttled || self.isAppInForeground else { return }
                 guard self.materializedThreadCatalogObservations[id] == observation,
                       !self.threadHasActiveOrRunningTurn(id) else { continue }
                 do {

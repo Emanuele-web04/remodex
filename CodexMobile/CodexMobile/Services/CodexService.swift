@@ -854,6 +854,7 @@ final class CodexService {
     @ObservationIgnored var materializedThreadCatalogObservations: [String: UUID] = [:]
     @ObservationIgnored var missingThreadCatalogProbeTask: Task<Void, Never>?
     @ObservationIgnored var missingThreadCatalogProbeOffset = 0
+    @ObservationIgnored var nextAutomaticMissingThreadProbeAt: ContinuousClock.Instant?
     @ObservationIgnored var associatedManagedWorktreePathByThreadID: [String: String] = [:]
     @ObservationIgnored var authoritativeProjectPathByThreadID: [String: String] = [:]
     var pinnedThreadIDs: [String] = []
