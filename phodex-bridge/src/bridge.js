@@ -91,6 +91,7 @@ const { createShortPairingCode, SHORT_PAIRING_CODE_LENGTH } = require("./qr");
 const {
   JSONL_OLDER_HANDOFF_CURSOR,
   parseSessionJsonlTurns,
+  readRecentSessionJsonlCwd,
   readRecentSessionJsonlTurns,
   readSessionJsonlMetadataFromFile,
   readThreadTurnsListPageFromSessionJsonl,
@@ -1983,6 +1984,7 @@ function startBridge({
         threadId: method === "thread/turns/list" || method === "thread/read" || method === "thread/resume"
           ? threadIdFromRequestParams(parsed.params)
           : "",
+        explicitResumeCwd: method === "thread/resume" && Boolean(normalizeNonEmptyString(parsed.params?.cwd)),
         createdAt: Date.now(),
       };
       if (method === "thread/turns/list") {
@@ -2055,6 +2057,9 @@ function startBridge({
       forEachThreadRowInResponse(trackedRequest.method, parsed, (thread) => {
         if (thread.runtimeProvider === "opencode") {
           return;
+        }
+        if (!config.codexEndpoint && !trackedRequest.explicitResumeCwd) {
+          reconcileLegacyHomeThreadProject(thread);
         }
         threadRuntimeSettingsStore.attachToThread(thread);
         threadListProvenanceEnricher.attachToThread(thread);
@@ -3803,6 +3808,29 @@ function augmentRelayThreadWithJsonlMetadata(thread, threadId = "") {
     },
     didAugment: true,
   };
+}
+
+function reconcileLegacyHomeThreadProject(thread) {
+  const cwd = normalizeNonEmptyString(thread.cwd);
+  const home = path.resolve(os.homedir());
+  if (!path.isAbsolute(cwd) || path.resolve(cwd) !== home) {
+    return;
+  }
+
+  // Old Remodex chats inherited HOME. Keep that runtime cwd and annotate the
+  // catalog so the phone doesn't present the user's home as a project.
+  if (thread.projectId === null) {
+    thread.metadata = { ...thread.metadata, remodexLegacyProjectlessCwd: cwd };
+    return;
+  }
+
+  const rolloutPath = normalizeNonEmptyString(thread.path) || normalizeNonEmptyString(thread.rolloutPath);
+  if (normalizeNonEmptyString(thread.projectId) && path.isAbsolute(rolloutPath)) {
+    const currentCwd = readRecentSessionJsonlCwd(rolloutPath, thread.id, home);
+    if (currentCwd) {
+      thread.cwd = currentCwd;
+    }
+  }
 }
 
 function readJsonlThreadCwd(threadId) {

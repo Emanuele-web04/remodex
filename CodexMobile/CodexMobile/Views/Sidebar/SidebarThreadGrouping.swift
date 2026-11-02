@@ -186,7 +186,11 @@ enum SidebarThreadGrouping {
         _ thread: CodexThread,
         projectlessRootPaths: [String] = []
     ) -> Bool {
-        thread.normalizedProjectPath == nil
+        let legacyProjectlessPath = CodexThread.normalizedFilesystemProjectPath(
+            thread.metadata?["remodexLegacyProjectlessCwd"]?.stringValue
+        )
+        return thread.normalizedProjectPath == nil
+            || thread.normalizedProjectPath == legacyProjectlessPath
             || isUnderProjectlessRoot(thread.normalizedProjectPath, roots: projectlessRootPaths)
             || isGeneratedCodexProjectlessPath(thread.normalizedProjectPath)
     }

@@ -1171,6 +1171,59 @@ test("bridge pages mixed active and archived catalogs without forwarding its cur
     && message.params?.threadId === "opencode:ses_3");
 });
 
+test("local Codex catalog keeps legacy home chats rootless and repairs a recorded Desktop move", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-desktop-project-");
+  const relayServer = new WebSocket.Server({ port: 0 });
+  const messages = [];
+  const fakeCodex = createFakeCodexTransport();
+  const home = os.homedir();
+  const repo = path.join(tempDir, "moved-project");
+  const rollout = path.join(tempDir, "rollout-moved.jsonl");
+  fs.writeFileSync(rollout, [
+    JSON.stringify({ type: "session_meta", payload: { id: "moved", cwd: home } }),
+    JSON.stringify({ type: "turn_context", payload: { cwd: repo } }),
+    "",
+  ].join("\n"));
+
+  let relaySocket;
+  let bridge;
+  t.after(() => {
+    bridge?.stop();
+    relaySocket?.close();
+    relayServer.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+  await new Promise((resolve) => relayServer.once("listening", resolve));
+  relayServer.on("connection", (socket) => {
+    relaySocket = socket;
+    socket.on("message", (data) => messages.push(JSON.parse(data.toString("utf8"))));
+  });
+  const { startBridge } = loadBridgeWithTestDoubles({ createCodexTransportImpl: () => fakeCodex });
+  bridge = startBridge({
+    printPairingQr: false,
+    config: bridgeTestConfig(relayServer, { desktopIpcSocketPath: socketPath }),
+  });
+  await waitFor(() => relaySocket?.readyState === WebSocket.OPEN);
+  relaySocket.send(JSON.stringify({ id: "catalog", method: "thread/list", params: { limit: 4 } }));
+  await waitFor(() => fakeCodex.sent.some((message) => message.id === "catalog"));
+  fakeCodex.emitMessage({
+    id: "catalog",
+    result: { data: [
+      { id: "legacy", cwd: home, projectId: null },
+      { id: "moved", cwd: home, projectId: "project-id", path: rollout },
+      { id: "gone", cwd: home, projectId: "other", path: path.join(tempDir, "missing.jsonl") },
+      { id: "canonical", cwd: path.join(tempDir, "newer"), projectId: "project-id", path: rollout },
+    ], nextCursor: null },
+  });
+  const result = await waitForMessage(messages, (message) => message.id === "catalog", 1_500);
+  const rows = Object.fromEntries(result.result.data.map((thread) => [thread.id, thread]));
+  assert.equal(rows.legacy.cwd, home);
+  assert.equal(rows.legacy.metadata.remodexLegacyProjectlessCwd, home);
+  assert.equal(rows.moved.cwd, repo);
+  assert.equal(rows.gone.cwd, home);
+  assert.equal(rows.canonical.cwd, path.join(tempDir, "newer"));
+});
+
 test("endpoint routing delegates only selected extensions and passes through Codex project requests", async (t) => {
   const relayServer = new WebSocket.Server({ port: 0 });
   const relayMessages = [];
