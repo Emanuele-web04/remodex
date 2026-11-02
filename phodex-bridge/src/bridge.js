@@ -823,6 +823,7 @@ function startBridge({
   });
   const threadListProvenanceEnricher = createThreadListProvenanceEnricher();
   const worktreeOriginEnricher = createWorktreeOriginEnricher();
+  const legacyProjectCwdByThreadId = new Map();
   const activityProjector = createThreadActivityProjector();
   const activityStore = createThreadActivityStore({
     sendApplicationResponse,
@@ -2059,7 +2060,7 @@ function startBridge({
           return;
         }
         if (!config.codexEndpoint && !trackedRequest.explicitResumeCwd) {
-          reconcileLegacyHomeThreadProject(thread);
+          reconcileLegacyHomeThreadProject(thread, legacyProjectCwdByThreadId);
         }
         threadRuntimeSettingsStore.attachToThread(thread);
         threadListProvenanceEnricher.attachToThread(thread);
@@ -3810,7 +3811,7 @@ function augmentRelayThreadWithJsonlMetadata(thread, threadId = "") {
   };
 }
 
-function reconcileLegacyHomeThreadProject(thread) {
+function reconcileLegacyHomeThreadProject(thread, cwdCache) {
   const cwd = normalizeNonEmptyString(thread.cwd);
   const home = path.resolve(os.homedir());
   if (!path.isAbsolute(cwd) || path.resolve(cwd) !== home) {
@@ -3824,12 +3825,28 @@ function reconcileLegacyHomeThreadProject(thread) {
     return;
   }
 
+  const threadId = normalizeNonEmptyString(thread.id);
   const rolloutPath = normalizeNonEmptyString(thread.path) || normalizeNonEmptyString(thread.rolloutPath);
-  if (normalizeNonEmptyString(thread.projectId) && path.isAbsolute(rolloutPath)) {
-    const currentCwd = readRecentSessionJsonlCwd(rolloutPath, thread.id, home);
-    if (currentCwd) {
-      thread.cwd = currentCwd;
-    }
+  if (!threadId || !normalizeNonEmptyString(thread.projectId) || !path.isAbsolute(rolloutPath)) {
+    return;
+  }
+
+  const stat = statJsonlRollout(rolloutPath);
+  if (!stat?.isFile()) {
+    return;
+  }
+  const cached = cwdCache.get(threadId);
+  const currentCwd = cached?.rolloutPath === rolloutPath && cached.inode === stat.ino
+    && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size
+    ? cached.cwd
+    : readRecentSessionJsonlCwd(rolloutPath, threadId, home);
+  cwdCache.delete(threadId);
+  cwdCache.set(threadId, {
+    rolloutPath, cwd: currentCwd, inode: stat.ino, mtimeMs: stat.mtimeMs, size: stat.size,
+  });
+  evictOldestEntries(cwdCache, 4096);
+  if (currentCwd) {
+    thread.cwd = currentCwd;
   }
 }
 

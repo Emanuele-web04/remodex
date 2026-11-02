@@ -1204,7 +1204,7 @@ test("local Codex catalog keeps legacy home chats rootless and repairs a recorde
     config: bridgeTestConfig(relayServer, { desktopIpcSocketPath: socketPath }),
   });
   await waitFor(() => relaySocket?.readyState === WebSocket.OPEN);
-  relaySocket.send(JSON.stringify({ id: "catalog", method: "thread/list", params: { limit: 4 } }));
+  relaySocket.send(JSON.stringify({ id: "catalog", method: "thread/list", params: { limit: 6 } }));
   await waitFor(() => fakeCodex.sent.some((message) => message.id === "catalog"));
   fakeCodex.emitMessage({
     id: "catalog",
@@ -1213,6 +1213,8 @@ test("local Codex catalog keeps legacy home chats rootless and repairs a recorde
       { id: "moved", cwd: home, projectId: "project-id", path: rollout },
       { id: "gone", cwd: home, projectId: "other", path: path.join(tempDir, "missing.jsonl") },
       { id: "canonical", cwd: path.join(tempDir, "newer"), projectId: "project-id", path: rollout },
+      { id: "wrong-thread", cwd: home, projectId: "other", path: rollout },
+      { id: "directory", cwd: home, projectId: "other", path: tempDir },
     ], nextCursor: null },
   });
   const result = await waitForMessage(messages, (message) => message.id === "catalog", 1_500);
@@ -1222,6 +1224,21 @@ test("local Codex catalog keeps legacy home chats rootless and repairs a recorde
   assert.equal(rows.moved.cwd, repo);
   assert.equal(rows.gone.cwd, home);
   assert.equal(rows.canonical.cwd, path.join(tempDir, "newer"));
+  assert.equal(rows["wrong-thread"].cwd, home);
+  assert.equal(rows.directory.cwd, home);
+
+  const newRepo = path.join(tempDir, "moved-again");
+  fs.appendFileSync(rollout, JSON.stringify({ type: "turn_context", payload: { cwd: newRepo } }) + "\n");
+  relaySocket.send(JSON.stringify({ id: "updated-catalog", method: "thread/list", params: { limit: 1 } }));
+  await waitFor(() => fakeCodex.sent.some((message) => message.id === "updated-catalog"));
+  fakeCodex.emitMessage({
+    id: "updated-catalog",
+    result: { data: [
+      { id: "moved", cwd: home, projectId: "project-id", path: rollout },
+    ], nextCursor: null },
+  });
+  const updated = await waitForMessage(messages, (message) => message.id === "updated-catalog", 1_500);
+  assert.equal(updated.result.data[0].cwd, newRepo);
 });
 
 test("endpoint routing delegates only selected extensions and passes through Codex project requests", async (t) => {
