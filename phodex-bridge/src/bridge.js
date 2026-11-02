@@ -2059,8 +2059,8 @@ function startBridge({
         if (thread.runtimeProvider === "opencode") {
           return;
         }
-        if (!config.codexEndpoint && !trackedRequest.explicitResumeCwd) {
-          reconcileLegacyHomeThreadProject(thread, legacyProjectCwdByThreadId);
+        if (!config.codexEndpoint) {
+          reconcileLegacyHomeThreadProject(thread, legacyProjectCwdByThreadId, trackedRequest.explicitResumeCwd);
         }
         threadRuntimeSettingsStore.attachToThread(thread);
         threadListProvenanceEnricher.attachToThread(thread);
@@ -3726,7 +3726,13 @@ function sanitizeThreadHistoryImagesForRelay(rawMessage, requestMethod, requestC
     : {};
 
   const { turns: sanitizedTurns, didSanitize } = sanitizeRelayHistoryTurns(workingTurns, threadId);
-  const { thread: threadWithJsonlMetadata, didAugment: didAugmentThreadMetadata } = augmentRelayThreadWithJsonlMetadata(workingThread, threadId);
+  // Modern app-server rows carry project ownership. Their current cwd (or the
+  // explicit resume selection) can differ from the rollout's original cwd.
+  const preserveCwd = requestContext.explicitResumeCwd
+    || (hasOwn(workingThread, "projectId") && path.isAbsolute(normalizeNonEmptyString(workingThread.cwd)));
+  const { thread: threadWithJsonlMetadata, didAugment: didAugmentThreadMetadata } = preserveCwd
+    ? { thread: workingThread, didAugment: false }
+    : augmentRelayThreadWithJsonlMetadata(workingThread, threadId);
   const { turns: augmentedTurns, didAugment } = augmentRelayHistoryTurnsWithJsonlArtifacts(
     sanitizedTurns,
     threadId,
@@ -3811,7 +3817,7 @@ function augmentRelayThreadWithJsonlMetadata(thread, threadId = "") {
   };
 }
 
-function reconcileLegacyHomeThreadProject(thread, cwdCache) {
+function reconcileLegacyHomeThreadProject(thread, cwdCache, explicitResumeCwd) {
   const cwd = normalizeNonEmptyString(thread.cwd);
   const home = path.resolve(os.homedir());
   if (!path.isAbsolute(cwd) || path.resolve(cwd) !== home) {
@@ -3820,14 +3826,15 @@ function reconcileLegacyHomeThreadProject(thread, cwdCache) {
 
   // Old Remodex chats inherited HOME. Keep that runtime cwd and annotate the
   // catalog so the phone doesn't present the user's home as a project.
-  if (thread.projectId === null) {
+  if (explicitResumeCwd || normalizeNonEmptyString(thread.projectId)) {
+    thread.metadata = { ...thread.metadata, remodexLegacyProjectlessCwd: null };
+  } else if (thread.projectId === null) {
     thread.metadata = { ...thread.metadata, remodexLegacyProjectlessCwd: cwd };
-    return;
   }
 
   const threadId = normalizeNonEmptyString(thread.id);
   const rolloutPath = normalizeNonEmptyString(thread.path) || normalizeNonEmptyString(thread.rolloutPath);
-  if (!threadId || !normalizeNonEmptyString(thread.projectId) || !path.isAbsolute(rolloutPath)) {
+  if (explicitResumeCwd || !threadId || !normalizeNonEmptyString(thread.projectId) || !path.isAbsolute(rolloutPath)) {
     return;
   }
 
