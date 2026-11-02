@@ -1,8 +1,8 @@
 # Remodex — Data Protection Notice
 
-**Last updated:** March 25, 2026
+**Last updated:** November 3, 2026
 
-This Data Protection Notice explains how the Remodex mobile application ("App"), developed by Emanuele Di Pietro ("Developer", "we", "us", or "our"), handles your information. Remodex is designed to let you control a Codex runtime on your Mac from your iPhone. Most conversation and workspace activity is processed on your paired Mac, but the App Store version can also use developer-operated relay infrastructure to connect your devices.
+This Data Protection Notice explains how the Remodex mobile application ("App"), developed by Emanuele Di Pietro ("Developer", "we", "us", or "our"), handles your information. Remodex is designed to let you control a Codex runtime on your Mac from your iPhone. Your iPhone connects to the bridge on your paired Mac through the relay configured during pairing. Coding requests can also reach the runtime or model provider you configure.
 
 ---
 
@@ -15,7 +15,7 @@ Remodex is a local-first remote companion for Codex on your Mac. In practice, th
 - We do not run analytics, advertising, or cross-app tracking.
 - We do not sell your personal information.
 - After the secure session is established, message contents sent between your iPhone and Mac are end-to-end encrypted.
-- The App Store build may use a developer-operated hosted relay to help your iPhone reach your paired Mac.
+- The relay can run locally or on a server you configure.
 
 ## 2. Information We Collect
 
@@ -23,7 +23,7 @@ Remodex is a local-first remote companion for Codex on your Mac. In practice, th
 
 - **Chat messages and prompts** — Your messages are sent from the iPhone to your paired Mac for processing. After the secure transport handshake is complete, the relay forwards encrypted payloads and cannot read message contents.
 - **Photo attachments** — Images you attach from the camera or photo library are sent to your paired Mac over the secure channel.
-- **Voice recordings** — When you use voice mode, the App records a temporary WAV file on your iPhone and uploads that audio directly from the iPhone to OpenAI/ChatGPT for transcription. The request is authenticated with a ChatGPT token resolved from your paired Mac over the encrypted Remodex channel.
+- **Voice recordings** — When you use voice mode, the App records temporary audio on your iPhone and sends it to the bridge on your paired Mac over the encrypted Remodex connection. The bridge sends the audio to OpenAI/ChatGPT over HTTPS for transcription. It holds the Mac's ChatGPT session token and uses it to authenticate that request.
 - **Git operations** — Commands you initiate from the App, such as commit, pull, push, branch, or status actions, are executed on your paired Mac.
 
 ### 2.2 Information Collected Automatically
@@ -31,7 +31,7 @@ Remodex is a local-first remote companion for Codex on your Mac. In practice, th
 - **Pairing and identity keys** — The App generates cryptographic identity material used for secure pairing and trusted reconnect.
 - **Relay and trusted-device metadata** — The App stores relay session data, trusted Mac identifiers, and reconnect metadata needed to restore a secure connection.
 - **Subscription and purchase state** — We use RevenueCat and Apple to determine whether your Pro entitlement is active. This includes entitlement status and related purchase metadata exposed by those services to the app.
-- **Connection metadata** — If you use a hosted relay, the relay can process network and session metadata needed to route traffic, maintain trusted reconnect, and operate the service.
+- **Connection metadata** — Your configured relay can process the network and session metadata needed to route traffic and restore trusted connections.
 
 ### 2.3 Information We Do Not Collect for Analytics or Advertising
 
@@ -51,7 +51,7 @@ We use the information above only to operate and secure Remodex, including:
 - performing trusted reconnect
 - checking and restoring subscription entitlements
 - transcribing voice input when you explicitly use voice mode
-- maintaining app security, stability, and abuse prevention for the hosted infrastructure
+- maintaining app security, stability, and abuse prevention for relay connections
 
 We do not use your information for advertising, profiling, or resale.
 
@@ -65,36 +65,35 @@ If you are in the European Economic Area, we rely on the following legal bases:
 
 ## 4. Services That Process Data
 
-### 4.1 Developer-Operated Remodex Infrastructure
+### 4.1 Local or Self-Hosted Relay
 
-The App Store build can use developer-operated infrastructure for:
+The relay configured during pairing routes traffic between your iPhone and paired Mac and helps your iPhone locate the current session when reconnecting to a trusted Mac.
 
-- **Hosted relay transport** — to route traffic between your iPhone and paired Mac when direct connectivity is not used
-- **Trusted reconnect resolution** — to help your already-paired iPhone locate the current live session for your trusted Mac
-
-This infrastructure may process:
+The relay may process:
 
 - session identifiers and trusted-device metadata
-- connection metadata such as IP address, timestamps, and route-level request data
+- connection metadata such as IP addresses, timestamps, and route-level request data
 - secure control messages needed to establish the encrypted session
 
-Once the secure session is active, the hosted relay does **not** decrypt your Remodex application payloads.
+Once the secure session is active, the relay forwards encrypted Remodex application payloads without decrypting them.
 
-### 4.2 OpenAI / ChatGPT
+### 4.2 Coding Runtime and Model Providers
 
-When you use voice mode, your audio recording is sent to OpenAI/ChatGPT for speech-to-text transcription.
+Your coding runtime processes prompts, attachments, and the context needed for your coding requests. When the runtime uses a model provider, it can send that data to the provider selected by its settings. If you configure a custom app-server endpoint, the bridge sends runtime requests to that endpoint for processing. Your runtime and provider settings govern those requests. The encryption between your iPhone and Mac covers that connection. Provider and endpoint processing takes place separately.
 
-This is the only instance where your data is processed by a third-party AI service.
+### 4.3 OpenAI / ChatGPT Voice Transcription
+
+When you use voice mode, the bridge on your Mac sends the audio to OpenAI/ChatGPT for speech-to-text transcription.
 
 - Privacy policy: [openai.com/privacy](https://openai.com/privacy)
 
-### 4.3 RevenueCat
+### 4.4 RevenueCat
 
 RevenueCat is used for subscription and entitlement management. RevenueCat may process an anonymous app user identifier, entitlement status, purchase information, device/app metadata, and subscription management URLs.
 
 - Privacy policy: [www.revenuecat.com/privacy](https://www.revenuecat.com/privacy)
 
-### 4.4 Apple
+### 4.5 Apple
 
 Apple provides:
 
@@ -114,17 +113,17 @@ Apple provides:
 
 ### 5.2 On Your Mac
 
-Your paired Mac runs the local bridge and Codex runtime. Chat handling, git operations, and workspace actions are performed there.
+Your paired Mac runs the local bridge. In the default setup, it runs the coding runtime and performs Git and workspace actions. Your runtime configuration can route coding requests to a configured endpoint or model provider.
 
-### 5.3 On Hosted Relay Infrastructure
+### 5.3 On the Configured Relay
 
-When the hosted relay is used, the server side may keep limited operational state such as active session state and trusted reconnect metadata needed to route traffic and restore a secure connection.
+The configured relay may keep limited operational state such as active session state and trusted reconnect metadata needed to route traffic and restore a secure connection.
 
 ### 5.4 In Transit
 
 - The iPhone and Mac establish an end-to-end encrypted session using modern cryptography.
 - The relay can observe connection metadata and secure-session setup traffic, but not encrypted application payloads after the secure session is established.
-- Voice transcription and subscription requests are sent over HTTPS/TLS.
+- The Mac bridge sends voice transcription requests over HTTPS. Subscription requests are also sent over HTTPS.
 
 ## 6. Data Retention
 
@@ -155,7 +154,7 @@ You can manage or cancel your subscription through Apple account settings or thr
 
 Depending on your jurisdiction, you may have rights to access, correct, delete, restrict, or object to the processing of personal information, and to request portability where applicable.
 
-Because Remodex is primarily local-first, much of your data remains under your direct control on your devices. We do not maintain a centralized database of your personal data. Some data may be processed or retained by Apple, RevenueCat, and OpenAI according to their own operational needs and policies.
+Because Remodex is primarily local-first, much of your data remains under your direct control on your devices. We do not maintain a centralized database of your personal data. Some data may be processed or retained by Apple, RevenueCat, OpenAI, or the runtime endpoint or model provider you configure according to their own policies.
 
 ### 8.1 California Notice
 
@@ -167,7 +166,7 @@ The App is not directed to children under 13, or the minimum age required by loc
 
 ## 10. International Transfers
 
-Depending on where you use the App and where service providers or hosted infrastructure are located, data processed by OpenAI, RevenueCat, Apple, or the hosted relay may be handled outside your country of residence.
+Depending on where you use the App and where your configured relay, runtime endpoint, or service providers are located, data may be handled outside your country of residence.
 
 ## 11. Changes to This Policy
 
