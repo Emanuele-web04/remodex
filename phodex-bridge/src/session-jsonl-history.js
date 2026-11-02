@@ -3,6 +3,7 @@
 // including desktop-local timestamp metadata for mobile history rendering.
 
 const fs = require("fs");
+const path = require("path");
 const { buildApplyPatchFileChangeItem } = require("./apply-patch-changes");
 const {
   expandExecWrapperToolCall,
@@ -198,6 +199,47 @@ function readSessionJsonlMetadataFromFile(filePath, {
     };
   } finally {
     fsModule.closeSync(fileHandle);
+  }
+}
+
+// The rollout may retain its original session cwd after Desktop moves a thread.
+function readRecentSessionJsonlCwd(filePath, threadId, originalCwd) {
+  try {
+    const fd = fs.openSync(filePath, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+    try {
+      const stat = fs.fstatSync(fd);
+      if (!stat.isFile()) {
+        return "";
+      }
+      const head = readSessionJsonlRange(fd, 0, Math.min(stat.size, 64 * 1024), fs);
+      const metadata = parseSessionJsonlInitialMetadata(head.toString("utf8"));
+      if (metadata.threadId !== threadId || !path.isAbsolute(metadata.cwd)
+        || path.resolve(metadata.cwd) !== originalCwd) {
+        return "";
+      }
+      const start = Math.max(0, stat.size - 512 * 1024);
+      const tail = alignSessionJsonlTailBuffer(readSessionJsonlRange(fd, start, stat.size - start, fs), start);
+      const rows = tail?.buffer.toString("utf8").split("\n") || [];
+      for (let index = rows.length - 1; index >= 0; index -= 1) {
+        if (!rows[index].includes('"turn_context"')) {
+          continue;
+        }
+        try {
+          const entry = JSON.parse(rows[index]);
+          const cwd = normalizeString(entry?.payload?.cwd);
+          if (entry?.type === "turn_context" && path.isAbsolute(cwd)) {
+            return path.resolve(cwd);
+          }
+        } catch {
+          // An incomplete append can be read on the next catalog request.
+        }
+      }
+      return "";
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return "";
   }
 }
 
@@ -1524,6 +1566,7 @@ module.exports = {
   JSONL_OLDER_HANDOFF_CURSOR,
   parseSessionJsonlMetadata,
   parseSessionJsonlTurns,
+  readRecentSessionJsonlCwd,
   readRecentSessionJsonlTurns,
   readSessionJsonlMetadataFromFile,
   readThreadTurnsListPageFromSessionJsonl,

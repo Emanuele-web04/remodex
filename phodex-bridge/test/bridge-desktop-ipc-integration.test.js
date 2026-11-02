@@ -1172,6 +1172,108 @@ test("bridge pages mixed active and archived catalogs without forwarding its cur
     && message.params?.threadId === "opencode:ses_3");
 });
 
+test("local Codex catalog keeps legacy home chats rootless and repairs a recorded Desktop move", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-desktop-project-");
+  const relayServer = new WebSocket.Server({ port: 0 });
+  const messages = [];
+  const fakeCodex = createFakeCodexTransport();
+  const home = os.homedir();
+  const repo = path.join(tempDir, "moved-project");
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = tempDir;
+  const sessionsDir = path.join(tempDir, "sessions", "2026", "11", "03");
+  fs.mkdirSync(sessionsDir, { recursive: true });
+  const rollout = path.join(sessionsDir, "rollout-2026-11-03T00-00-00-moved.jsonl");
+  fs.writeFileSync(rollout, [
+    JSON.stringify({ type: "session_meta", payload: { id: "moved", cwd: home } }),
+    JSON.stringify({ type: "turn_context", payload: { cwd: repo } }),
+    "",
+  ].join("\n"));
+
+  let relaySocket;
+  let bridge;
+  t.after(() => {
+    bridge?.stop();
+    relaySocket?.close();
+    relayServer.close();
+    if (previousCodexHome == null) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+  await new Promise((resolve) => relayServer.once("listening", resolve));
+  relayServer.on("connection", (socket) => {
+    relaySocket = socket;
+    socket.on("message", (data) => messages.push(JSON.parse(data.toString("utf8"))));
+  });
+  const { startBridge } = loadBridgeWithTestDoubles({ createCodexTransportImpl: () => fakeCodex });
+  bridge = startBridge({
+    printPairingQr: false,
+    config: bridgeTestConfig(relayServer, { desktopIpcSocketPath: socketPath }),
+  });
+  await waitFor(() => relaySocket?.readyState === WebSocket.OPEN);
+  relaySocket.send(JSON.stringify({ id: "catalog", method: "thread/list", params: { limit: 6 } }));
+  await waitFor(() => fakeCodex.sent.some((message) => message.id === "catalog"));
+  fakeCodex.emitMessage({
+    id: "catalog",
+    result: { data: [
+      { id: "legacy", cwd: home, projectId: null },
+      { id: "moved", cwd: home, projectId: "project-id", path: rollout },
+      { id: "gone", cwd: home, projectId: "other", path: path.join(tempDir, "missing.jsonl") },
+      { id: "canonical", cwd: path.join(tempDir, "newer"), projectId: "project-id", path: rollout },
+      { id: "wrong-thread", cwd: home, projectId: "other", path: rollout },
+      { id: "directory", cwd: home, projectId: "other", path: tempDir },
+    ], nextCursor: null },
+  });
+  const result = await waitForMessage(messages, (message) => message.id === "catalog", 1_500);
+  const rows = Object.fromEntries(result.result.data.map((thread) => [thread.id, thread]));
+  assert.equal(rows.legacy.cwd, home);
+  assert.equal(rows.legacy.metadata.remodexLegacyProjectlessCwd, home);
+  assert.equal(rows.moved.cwd, repo);
+  assert.equal(rows.gone.cwd, home);
+  assert.equal(rows.gone.metadata.remodexLegacyProjectlessCwd, null);
+  assert.equal(rows.canonical.cwd, path.join(tempDir, "newer"));
+  assert.equal(rows["wrong-thread"].cwd, home);
+  assert.equal(rows.directory.cwd, home);
+
+  const newRepo = path.join(tempDir, "moved-again");
+  fs.appendFileSync(rollout, JSON.stringify({ type: "turn_context", payload: { cwd: newRepo } }) + "\n");
+  relaySocket.send(JSON.stringify({ id: "updated-catalog", method: "thread/list", params: { limit: 1 } }));
+  await waitFor(() => fakeCodex.sent.some((message) => message.id === "updated-catalog"));
+  fakeCodex.emitMessage({
+    id: "updated-catalog",
+    result: { data: [
+      { id: "moved", cwd: home, projectId: "project-id", path: rollout },
+    ], nextCursor: null },
+  });
+  const updated = await waitForMessage(messages, (message) => message.id === "updated-catalog", 1_500);
+  assert.equal(updated.result.data[0].cwd, newRepo);
+
+  // Establish local ownership so these are ordinary app-server responses,
+  // rather than the follower's legacy conversation-state projection.
+  relaySocket.send(JSON.stringify({ id: "start-local", method: "thread/start", params: { cwd: home } }));
+  await waitFor(() => fakeCodex.sent.some((message) => message.id === "start-local"));
+  fakeCodex.emitMessage({ id: "start-local", result: { thread: { id: "moved", cwd: home, turns: [] } } });
+  await waitForMessage(messages, (message) => message.id === "start-local", 1_500);
+
+  const explicitCwd = path.join(tempDir, "explicit-project");
+  for (const [id, params, serverCwd, expectedCwd] of [
+    ["resume", { threadId: "moved" }, home, newRepo],
+    ["resume-explicit", { threadId: "moved", cwd: explicitCwd }, explicitCwd, explicitCwd],
+  ]) {
+    relaySocket.send(JSON.stringify({ id, method: "thread/resume", params }));
+    await waitFor(() => fakeCodex.sent.some((message) => message.id === id));
+    fakeCodex.emitMessage({
+      id,
+      result: { thread: { id: "moved", cwd: serverCwd, projectId: "project-id", path: rollout, turns: [] } },
+    });
+    const reply = await waitForMessage(messages, (message) => message.id === id, 1_500);
+    assert.equal(reply.result?.thread?.cwd, expectedCwd, JSON.stringify(reply));
+  }
+});
+
 test("endpoint routing delegates only selected extensions and passes through Codex project requests", async (t) => {
   const relayServer = new WebSocket.Server({ port: 0 });
   const relayMessages = [];

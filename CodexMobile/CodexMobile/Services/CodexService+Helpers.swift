@@ -324,13 +324,7 @@ extension CodexService {
             return thread(for: threadId)
         }
 
-        let preferredProjectPath = thread(for: threadId)?.gitWorkingDirectory
-            ?? snapshotThread(threadId: threadId)?.gitWorkingDirectory
-        let resumedThread = try await ensureThreadResumed(
-            threadId: threadId,
-            force: true,
-            preferredProjectPath: preferredProjectPath
-        )
+        let resumedThread = try await ensureThreadResumed(threadId: threadId, force: true)
         let resolvedThread = thread(for: threadId) ?? resumedThread
         if resolvedThread != nil {
             snapshotOnlyPinnedThreadIDs.remove(threadId)

@@ -91,6 +91,7 @@ const { createShortPairingCode, SHORT_PAIRING_CODE_LENGTH } = require("./qr");
 const {
   JSONL_OLDER_HANDOFF_CURSOR,
   parseSessionJsonlTurns,
+  readRecentSessionJsonlCwd,
   readRecentSessionJsonlTurns,
   readSessionJsonlMetadataFromFile,
   readThreadTurnsListPageFromSessionJsonl,
@@ -823,6 +824,7 @@ function startBridge({
   });
   const threadListProvenanceEnricher = createThreadListProvenanceEnricher();
   const worktreeOriginEnricher = createWorktreeOriginEnricher();
+  const legacyProjectCwdByThreadId = new Map();
   const activityProjector = createThreadActivityProjector();
   const activityStore = createThreadActivityStore({
     sendApplicationResponse,
@@ -2016,6 +2018,7 @@ function startBridge({
         threadId: method === "thread/turns/list" || method === "thread/read" || method === "thread/resume"
           ? threadIdFromRequestParams(parsed.params)
           : "",
+        explicitResumeCwd: method === "thread/resume" && Boolean(normalizeNonEmptyString(parsed.params?.cwd)),
         createdAt: Date.now(),
       };
       if (method === "thread/turns/list") {
@@ -2088,6 +2091,9 @@ function startBridge({
       forEachThreadRowInResponse(trackedRequest.method, parsed, (thread) => {
         if (thread.runtimeProvider === "opencode") {
           return;
+        }
+        if (!config.codexEndpoint) {
+          reconcileLegacyHomeThreadProject(thread, legacyProjectCwdByThreadId, trackedRequest.explicitResumeCwd);
         }
         threadRuntimeSettingsStore.attachToThread(thread);
         threadListProvenanceEnricher.attachToThread(thread);
@@ -3744,7 +3750,13 @@ function sanitizeThreadHistoryImagesForRelay(rawMessage, requestMethod, requestC
     : {};
 
   const { turns: sanitizedTurns, didSanitize } = sanitizeRelayHistoryTurns(workingTurns, threadId);
-  const { thread: threadWithJsonlMetadata, didAugment: didAugmentThreadMetadata } = augmentRelayThreadWithJsonlMetadata(workingThread, threadId);
+  // Modern app-server rows carry project ownership. Their current cwd (or the
+  // explicit resume selection) can differ from the rollout's original cwd.
+  const preserveCwd = requestContext.explicitResumeCwd
+    || (hasOwn(workingThread, "projectId") && path.isAbsolute(normalizeNonEmptyString(workingThread.cwd)));
+  const { thread: threadWithJsonlMetadata, didAugment: didAugmentThreadMetadata } = preserveCwd
+    ? { thread: workingThread, didAugment: false }
+    : augmentRelayThreadWithJsonlMetadata(workingThread, threadId);
   const { turns: augmentedTurns, didAugment } = augmentRelayHistoryTurnsWithJsonlArtifacts(
     sanitizedTurns,
     threadId,
@@ -3827,6 +3839,46 @@ function augmentRelayThreadWithJsonlMetadata(thread, threadId = "") {
     },
     didAugment: true,
   };
+}
+
+function reconcileLegacyHomeThreadProject(thread, cwdCache, explicitResumeCwd) {
+  const cwd = normalizeNonEmptyString(thread.cwd);
+  const home = path.resolve(os.homedir());
+  if (!path.isAbsolute(cwd) || path.resolve(cwd) !== home) {
+    return;
+  }
+
+  // Old Remodex chats inherited HOME. Keep that runtime cwd and annotate the
+  // catalog so the phone doesn't present the user's home as a project.
+  if (explicitResumeCwd || normalizeNonEmptyString(thread.projectId)) {
+    thread.metadata = { ...thread.metadata, remodexLegacyProjectlessCwd: null };
+  } else if (thread.projectId === null) {
+    thread.metadata = { ...thread.metadata, remodexLegacyProjectlessCwd: cwd };
+  }
+
+  const threadId = normalizeNonEmptyString(thread.id);
+  const rolloutPath = normalizeNonEmptyString(thread.path) || normalizeNonEmptyString(thread.rolloutPath);
+  if (explicitResumeCwd || !threadId || !normalizeNonEmptyString(thread.projectId) || !path.isAbsolute(rolloutPath)) {
+    return;
+  }
+
+  const stat = statJsonlRollout(rolloutPath);
+  if (!stat?.isFile()) {
+    return;
+  }
+  const cached = cwdCache.get(threadId);
+  const currentCwd = cached?.rolloutPath === rolloutPath && cached.inode === stat.ino
+    && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size
+    ? cached.cwd
+    : readRecentSessionJsonlCwd(rolloutPath, threadId, home);
+  cwdCache.delete(threadId);
+  cwdCache.set(threadId, {
+    rolloutPath, cwd: currentCwd, inode: stat.ino, mtimeMs: stat.mtimeMs, size: stat.size,
+  });
+  evictOldestEntries(cwdCache, 4096);
+  if (currentCwd) {
+    thread.cwd = currentCwd;
+  }
 }
 
 function readJsonlThreadCwd(threadId) {
