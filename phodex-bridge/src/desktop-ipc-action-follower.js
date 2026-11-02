@@ -2532,16 +2532,21 @@ function createDesktopIpcActionFollower({
           forwardToLocalCodex(JSON.stringify(originalMessage));
           return;
         }
-        const definitiveStaleSteer = route.method === "thread-follower-steer-turn"
-          && error?.desktopIpcResponse === true
-          && isDefinitiveStaleSteerError(error.message);
+        const steer = route.method === "thread-follower-steer-turn";
+        const desktopRejectedSteer = steer && error?.desktopIpcResponse === true;
+        const activeTurnEnded = desktopRejectedSteer
+          && /^Cannot steer conversation \S+ because its active turn already ended$/i.test(readString(error.message));
+        const definitiveStaleSteer = desktopRejectedSteer && isDefinitiveStaleSteerError(error.message);
+        const steerErrorCode = activeTurnEnded ? "desktop_steer_turn_ended"
+          : steer && !definitiveStaleSteer ? "desktop_steer_delivery_unknown" : null;
         sendApplicationResponse(JSON.stringify({
           id: originalMessage.id,
           error: {
             code: -32000,
-            message: definitiveStaleSteer
-              ? error.message
+            message: activeTurnEnded ? "The active run ended before this message could steer it."
+              : definitiveStaleSteer ? error.message
               : "Could not continue this Codex Desktop-owned thread from the phone.",
+            ...(steerErrorCode ? { data: { errorCode: steerErrorCode } } : {}),
           },
         }));
       });

@@ -2029,45 +2029,85 @@ final class TurnViewModel {
 
         Task { @MainActor in
             defer { steeringDraftID = nil }
+            var didDispatch = false
 
             do {
+                let fileMentions = confirmedFileMentionPaths(from: draft.rawFileMentions)
                 let stillBusy = await refreshBusyStateIfNeeded(codex: codex, threadID: threadID, wasBusy: true)
-                if !stillBusy {
-                    try await codex.startTurn(
-                        userInput: draft.text,
-                        threadId: threadID,
-                        attachments: draft.attachments,
-                        skillMentions: draft.skillMentions,
-                        mentionMentions: draft.mentionMentions,
-                        fileMentions: confirmedFileMentionPaths(from: draft.rawFileMentions),
-                        collaborationMode: draft.collaborationMode
-                    )
-                    removeQueuedDraft(id: id, codex: codex, threadID: threadID)
-                    return
+                if stillBusy {
+                    let expectedTurnID = try await resolveSteerExpectedTurnID(codex: codex, threadID: threadID)
+                    do {
+                        try await codex.steerTurn(
+                            userInput: draft.text,
+                            threadId: threadID,
+                            expectedTurnId: expectedTurnID,
+                            attachments: draft.attachments,
+                            skillMentions: draft.skillMentions,
+                            mentionMentions: draft.mentionMentions,
+                            fileMentions: fileMentions,
+                            collaborationMode: draft.collaborationMode,
+                            onDispatch: { didDispatch = true }
+                        )
+                        removeQueuedDraft(id: id, codex: codex, threadID: threadID)
+                        return
+                    } catch {
+                        guard (error as? CodexServiceError)?.isDesktopSteerTurnEnded == true else {
+                            throw error
+                        }
+                        didDispatch = false
+
+                        // Desktop rejected the steer before admitting it. Preserve
+                        // the draft if a new run is active or idle state is uncertain.
+                        guard await codex.refreshInFlightTurnState(threadId: threadID),
+                              !isThreadBusy(codex: codex, threadID: threadID),
+                              !Task.isCancelled else {
+                            throw error
+                        }
+                        guard queuedDrafts(codex: codex, threadID: threadID).contains(where: { $0.id == id }) else {
+                            isAwaitingAssistantResponse = false
+                            return
+                        }
+                    }
                 }
 
-                let expectedTurnID = try await resolveSteerExpectedTurnID(
-                    codex: codex,
-                    threadID: threadID
-                )
-                try await codex.steerTurn(
+                try await codex.startTurn(
                     userInput: draft.text,
                     threadId: threadID,
-                    expectedTurnId: expectedTurnID,
                     attachments: draft.attachments,
                     skillMentions: draft.skillMentions,
                     mentionMentions: draft.mentionMentions,
-                    fileMentions: confirmedFileMentionPaths(from: draft.rawFileMentions),
-                    collaborationMode: draft.collaborationMode
+                    fileMentions: fileMentions,
+                    collaborationMode: draft.collaborationMode,
+                    onTurnStartDispatch: { didDispatch = true }
                 )
                 removeQueuedDraft(id: id, codex: codex, threadID: threadID)
             } catch {
                 isAwaitingAssistantResponse = false
-                codex.removeLatestFailedUserMessage(
-                    threadId: threadID,
-                    matchingText: draft.text,
-                    matchingAttachments: draft.attachments
-                )
+                let serviceError = error as? CodexServiceError
+                if didDispatch {
+                    let rpcError: RPCError?
+                    if case .rpcError(let responseError) = serviceError {
+                        rpcError = responseError
+                    } else {
+                        rpcError = nil
+                    }
+                    if rpcError == nil
+                        || rpcError?.data?.objectValue?["errorCode"]?.stringValue == "desktop_steer_delivery_unknown"
+                        || rpcError?.message == "Could not continue this Codex Desktop-owned thread from the phone." {
+                        setQueuePauseState(
+                            .paused(errorMessage: "Check whether your message arrived before resuming."),
+                            codex: codex,
+                            threadID: threadID
+                        )
+                    }
+                }
+                if serviceError?.isDesktopSteerTurnEnded != true {
+                    codex.removeLatestFailedUserMessage(
+                        threadId: threadID,
+                        matchingText: draft.text,
+                        matchingAttachments: draft.attachments
+                    )
+                }
                 codex.lastErrorMessage = codex.userFacingTurnErrorMessageForFooter(from: error)
             }
         }

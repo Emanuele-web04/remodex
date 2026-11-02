@@ -1968,7 +1968,8 @@ extension CodexService {
         fileMentions: [String] = [],
         shouldAppendUserMessage: Bool = true,
         preAppendedUserMessageID: String? = nil,
-        collaborationMode: CodexCollaborationModeKind? = nil
+        collaborationMode: CodexCollaborationModeKind? = nil,
+        onDispatch: (@MainActor () -> Void)? = nil
     ) async throws {
         let normalizedThreadID = normalizedInterruptIdentifier(threadId) ?? threadId
         let effectiveRequestedCollaborationMode = collaborationModeForOutgoingTurn(
@@ -2071,7 +2072,7 @@ extension CodexService {
             }
 
             do {
-                let response = try await sendRequest(method: "turn/steer", params: .object(params))
+                let response = try await sendRequest(method: "turn/steer", params: .object(params), onDispatch: onDispatch)
                 let resolvedTurnID = extractTurnID(from: response.result) ?? currentExpectedTurnID
                 markMessageDeliveryState(
                     threadId: normalizedThreadID,
@@ -2953,7 +2954,13 @@ extension CodexService {
         pendingMessageId: String,
         threadId: String
     ) {
-        markMessageDeliveryState(threadId: threadId, messageId: pendingMessageId, state: .failed)
+        if (error as? CodexServiceError)?.isDesktopSteerTurnEnded == true {
+            // The queued draft owns recovery. Remove only this rejected steer's
+            // optimistic row even when mentions changed its display text.
+            _ = removeUserMessage(threadId: threadId, messageId: pendingMessageId)
+        } else {
+            markMessageDeliveryState(threadId: threadId, messageId: pendingMessageId, state: .failed)
+        }
         lastErrorMessage = userFacingTurnErrorMessageForFooter(from: error)
     }
 
