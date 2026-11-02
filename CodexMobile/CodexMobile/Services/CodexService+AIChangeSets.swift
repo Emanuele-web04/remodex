@@ -9,6 +9,7 @@ import Foundation
 enum AIChangeSetError: LocalizedError {
     case missingWorkingDirectory
     case missingPatch
+    case ledgerUnavailable
     case bridgeError(code: String?, message: String?)
 
     var errorDescription: String? {
@@ -17,6 +18,8 @@ enum AIChangeSetError: LocalizedError {
             return "The selected local folder is not available on this device."
         case .missingPatch:
             return "This response cannot be auto-reverted because no exact patch was captured."
+        case .ledgerUnavailable:
+            return "Change history is temporarily unavailable. Try again."
         case .bridgeError(let code, let message):
             switch code {
             case "missing_patch":
@@ -82,6 +85,14 @@ extension CodexService {
 
         switch changeSet.status {
         case .ready:
+            if let error = revertLedgerAvailabilityError {
+                return AssistantRevertPresentation(
+                    title: "Cannot undo",
+                    isEnabled: false,
+                    helperText: error.localizedDescription,
+                    riskLevel: .blocked
+                )
+            }
             if !hasWorkingDirectory {
                 return AssistantRevertPresentation(
                     title: "Cannot undo",
@@ -152,7 +163,8 @@ extension CodexService {
 
     // Provides the latest finalized patch metadata for UI sheets and action handlers.
     func readyChangeSet(forAssistantMessage message: CodexMessage) -> AIChangeSet? {
-        guard let changeSet = aiChangeSet(forAssistantMessage: message),
+        guard revertLedgerAvailabilityError == nil,
+              let changeSet = aiChangeSet(forAssistantMessage: message),
               changeSet.status == .ready else {
             return nil
         }
@@ -287,14 +299,53 @@ extension CodexService {
 
     // Finalizes the change set once the turn has finished, even if the diff arrives slightly later.
     func noteTurnFinished(threadId: String, turnId: String?) {
-        guard let turnKey = AIChangeSetTurnKey(threadId: threadId, turnId: turnId),
-              let changeSetId = aiChangeSetIDByTurnKey[turnKey] else {
+        guard let turnKey = AIChangeSetTurnKey(threadId: threadId, turnId: turnId) else {
+            return
+        }
+        guard let changeSetId = aiChangeSetIDByTurnKey[turnKey] else {
+            if !canPersistAIChangeSets {
+                persistAIChangeSets()
+            }
             return
         }
 
         finalizeChangeSetIfPossible(changeSetId: changeSetId)
         persistAIChangeSets()
         invalidateAssistantRevertStates()
+    }
+
+    func finalizedChangeSetForTerminalTurn(_ pending: AIChangeSet) -> AIChangeSet? {
+        guard pending.status != .reverted,
+              turnTerminalState(for: pending.turnId, threadId: pending.threadId) != nil else {
+            return nil
+        }
+
+        var changeSet = pending
+        changeSet.repoRoot = changeSet.repoRoot ?? gitWorkingDirectory(for: changeSet.threadId)
+        changeSet.assistantMessageId = changeSet.assistantMessageId ?? latestAssistantMessageId(
+            for: changeSet.threadId,
+            turnId: changeSet.turnId
+        )
+
+        if !hasRevertPatchPayload(changeSet) {
+            changeSet.status = .notRevertable
+            changeSet.unsupportedReasons = ["This response cannot be auto-reverted because no exact patch was captured."]
+        } else if changeSet.source == .fileChangeFallback
+                    && changeSet.fallbackPatchBatches.isEmpty
+                    && changeSet.fallbackPatchCount > 1 {
+            changeSet.status = .notRevertable
+            changeSet.unsupportedReasons = ["This response was captured before ordered patch batches were stored, so it cannot be safely auto-reverted."]
+        } else if !changeSet.unsupportedReasons.isEmpty || changeSet.fileChanges.isEmpty {
+            changeSet.status = .notRevertable
+        } else {
+            changeSet.status = .ready
+        }
+
+        if changeSet.finalizedAt == nil {
+            changeSet.finalizedAt = Date()
+        }
+
+        return changeSet
     }
 
     // Remembers canonical repo roots so repo-scoped safety checks stay consistent across sibling chat folders.
@@ -500,11 +551,12 @@ private extension CodexService {
             )
         }
 
-        changeSet.fallbackPatchCount = changeSet.fallbackPatchBatches.count
-        changeSet.forwardUnifiedPatch = fallbackPatchBatchesForwardPatch(changeSet.fallbackPatchBatches)
-        changeSet.patchHash = AIUnifiedPatchParser.hash(for: fallbackPatchBatchesRevertPatch(changeSet.fallbackPatchBatches))
-        changeSet.fileChanges = mergedFileChanges(from: changeSet.fallbackPatchBatches.flatMap(\.fileChanges))
-        changeSet.unsupportedReasons = Array(Set(changeSet.fallbackPatchBatches.flatMap(\.unsupportedReasons))).sorted()
+        changeSet.refreshFallbackPatchSummary()
+    }
+
+    // An unreadable ledger can still contain earlier batches for a visible turn.
+    var revertLedgerAvailabilityError: AIChangeSetError? {
+        canPersistAIChangeSets ? nil : .ledgerUnavailable
     }
 
     // Chooses the bridge method: aggregate diffs use the legacy single-patch path, fallback batches stay ordered.
@@ -512,6 +564,9 @@ private extension CodexService {
         for changeSet: AIChangeSet,
         normalizedWorkingDirectory: String
     ) throws -> AIRevertBridgeRequest {
+        if let error = revertLedgerAvailabilityError {
+            throw error
+        }
         if changeSet.source == .fileChangeFallback, !changeSet.fallbackPatchBatches.isEmpty {
             let patches = changeSet.fallbackPatchBatches.reversed().map { batch in
                 JSONValue.object([
@@ -550,85 +605,10 @@ private extension CodexService {
         return !changeSet.forwardUnifiedPatch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    func fallbackPatchBatchesForwardPatch(_ batches: [AIPatchBatch]) -> String {
-        batches
-            .map(\.forwardUnifiedPatch)
-            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-            .joined(separator: "\n")
-    }
-
-    func fallbackPatchBatchesRevertPatch(_ batches: [AIPatchBatch]) -> String {
-        batches
-            .reversed()
-            .map(\.forwardUnifiedPatch)
-            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-            .joined(separator: "\n")
-    }
-
-    func mergedFileChanges(from fileChanges: [AIFileChange]) -> [AIFileChange] {
-        var changesByPath: [String: AIFileChange] = [:]
-
-        for change in fileChanges {
-            guard let existing = changesByPath[change.path] else {
-                changesByPath[change.path] = change
-                continue
-            }
-
-            let mergedKind: AIFileChangeKind = existing.kind == change.kind ? existing.kind : .update
-            changesByPath[change.path] = AIFileChange(
-                path: change.path,
-                kind: mergedKind,
-                additions: existing.additions + change.additions,
-                deletions: existing.deletions + change.deletions,
-                isBinary: existing.isBinary || change.isBinary,
-                isRenameOrModeOnly: existing.isRenameOrModeOnly || change.isRenameOrModeOnly,
-                beforeContentHash: existing.beforeContentHash ?? change.beforeContentHash,
-                afterContentHash: change.afterContentHash ?? existing.afterContentHash
-            )
-        }
-
-        return changesByPath.values.sorted { $0.path < $1.path }
-    }
-
     func finalizeChangeSetIfPossible(changeSetId: String) {
-        guard var changeSet = aiChangeSetsByID[changeSetId] else {
+        guard let pending = aiChangeSetsByID[changeSetId],
+              let changeSet = finalizedChangeSetForTerminalTurn(pending) else {
             return
-        }
-
-        guard turnTerminalState(
-            for: changeSet.turnId,
-            threadId: changeSet.threadId
-        ) != nil else {
-            aiChangeSetsByID[changeSetId] = changeSet
-            return
-        }
-
-        guard changeSet.status != .reverted else {
-            return
-        }
-
-        changeSet.repoRoot = changeSet.repoRoot ?? gitWorkingDirectory(for: changeSet.threadId)
-        changeSet.assistantMessageId = changeSet.assistantMessageId ?? latestAssistantMessageId(
-            for: changeSet.threadId,
-            turnId: changeSet.turnId
-        )
-
-        if !hasRevertPatchPayload(changeSet) {
-            changeSet.status = .notRevertable
-            changeSet.unsupportedReasons = ["This response cannot be auto-reverted because no exact patch was captured."]
-        } else if changeSet.source == .fileChangeFallback
-                    && changeSet.fallbackPatchBatches.isEmpty
-                    && changeSet.fallbackPatchCount > 1 {
-            changeSet.status = .notRevertable
-            changeSet.unsupportedReasons = ["This response was captured before ordered patch batches were stored, so it cannot be safely auto-reverted."]
-        } else if !changeSet.unsupportedReasons.isEmpty || changeSet.fileChanges.isEmpty {
-            changeSet.status = .notRevertable
-        } else {
-            changeSet.status = .ready
-        }
-
-        if changeSet.finalizedAt == nil {
-            changeSet.finalizedAt = Date()
         }
 
         aiChangeSetsByID[changeSetId] = changeSet
@@ -638,15 +618,7 @@ private extension CodexService {
     }
 
     func persistAIChangeSets() {
-        aiChangeSetPersistence.save(
-            aiChangeSetsByID.values.sorted {
-                if $0.createdAt != $1.createdAt {
-                    return $0.createdAt < $1.createdAt
-                }
-                return $0.id < $1.id
-            },
-            macDeviceId: currentMacScopedPersistenceDeviceId
-        )
+        saveMacScopedAIChangeSets(for: currentMacScopedPersistenceDeviceId)
     }
 
     func latestAssistantMessageId(for threadId: String, turnId: String) -> String? {

@@ -2,45 +2,86 @@
 // Purpose: Persists assistant-scoped revertable change sets between app launches.
 // Layer: Service
 // Exports: AIChangeSetPersistence
-// Depends on: Foundation, AIChangeSetModels
+// Depends on: Foundation, CryptoKit, AIChangeSetModels, CodexLocalPersistenceKeyProvider
 
+import CryptoKit
 import Foundation
 
 nonisolated struct AIChangeSetPersistence {
+    // Keep the original path so migration can replace the plaintext ledger atomically.
     private let fileName = "codex-ai-change-sets-v1.json"
+    private let encryptedHeader = Data("RMDX-AI-CHANGE-SETS-V2\n".utf8)
 
-    // Loads the stored change-set ledger from disk. Returns an empty array on failure.
-    func load(macDeviceId: String? = nil, includeLegacyFallback: Bool = false) -> [AIChangeSet] {
+    // A missing ledger is empty. An unreadable ledger must not be overwritten with an empty one.
+    func load(macDeviceId: String? = nil, includeLegacyFallback: Bool = false) -> [AIChangeSet]? {
         let decoder = JSONDecoder()
         for fileURL in storeURLs(macDeviceId: macDeviceId, includeLegacyFallback: includeLegacyFallback) {
-            guard let data = try? Data(contentsOf: fileURL) else {
+            let data: Data
+            do {
+                data = try Data(contentsOf: fileURL)
+            } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
                 continue
+            } catch {
+                return nil
             }
 
-            if let decoded = try? decoder.decode([AIChangeSet].self, from: data) {
-                return decoded
+            if data.starts(with: encryptedHeader) {
+                guard let key = CodexLocalPersistenceKeyProvider.durableHistoryKey(),
+                      let sealed = try? AES.GCM.SealedBox(combined: data.dropFirst(encryptedHeader.count)),
+                      let plaintext = try? AES.GCM.open(sealed, using: key) else {
+                    return nil
+                }
+                return try? decoder.decode([AIChangeSet].self, from: plaintext)
             }
+
+            guard let decoded = try? decoder.decode([AIChangeSet].self, from: data) else {
+                return nil
+            }
+            // A temporarily unavailable key or failed write leaves the old ledger intact.
+            writeEncrypted(data, to: fileURL)
+            return decoded
         }
-
         return []
     }
 
-    // Persists the full change-set ledger atomically to keep revert metadata durable.
-    func save(_ value: [AIChangeSet], macDeviceId: String? = nil) {
-        let encoder = JSONEncoder()
-        guard let data = try? encoder.encode(value) else {
-            return
+    @discardableResult
+    func save(_ value: [AIChangeSet], macDeviceId: String? = nil) -> Bool {
+        guard let data = try? JSONEncoder().encode(value) else {
+            return false
+        }
+        return writeEncrypted(data, to: storeURL(macDeviceId: macDeviceId))
+    }
+
+    @discardableResult
+    private func writeEncrypted(_ data: Data, to fileURL: URL) -> Bool {
+        guard let key = CodexLocalPersistenceKeyProvider.durableHistoryKey(),
+              let sealed = try? AES.GCM.seal(data, using: key),
+              let combined = sealed.combined else {
+            return false
         }
 
-        let fileURL = storeURL(macDeviceId: macDeviceId)
-        ensureParentDirectoryExists(for: fileURL)
-        try? data.write(to: fileURL, options: [.atomic])
+        do {
+            try FileManager.default.createDirectory(
+                at: fileURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try (encryptedHeader + combined).write(to: fileURL, options: [.atomic])
+            return true
+        } catch {
+            return false
+        }
     }
 
     // Removes the scoped change-set cache after a rotated device id has been merged elsewhere.
-    func delete(macDeviceId: String?) {
-        for fileURL in storeURLs(macDeviceId: macDeviceId) {
-            try? FileManager.default.removeItem(at: fileURL)
+    @discardableResult
+    func delete(macDeviceId: String?) -> Bool {
+        do {
+            try FileManager.default.removeItem(at: storeURL(macDeviceId: macDeviceId))
+            return true
+        } catch let error as CocoaError where error.code == .fileNoSuchFile || error.code == .fileReadNoSuchFile {
+            return true
+        } catch {
+            return false
         }
     }
 
@@ -74,11 +115,6 @@ nonisolated struct AIChangeSetPersistence {
 
         let legacyURL = rootDirectory.appendingPathComponent(fileName, isDirectory: false)
         return [scopedURL, legacyURL]
-    }
-
-    private func ensureParentDirectoryExists(for fileURL: URL) {
-        let directory = fileURL.deletingLastPathComponent()
-        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     }
 
     private func normalizedMacDeviceId(_ value: String?) -> String? {

@@ -872,6 +872,8 @@ final class CodexService {
     let composerDraftPersistence = CodexComposerDraftPersistence()
     let threadListPersistence = CodexThreadListPersistence()
     let aiChangeSetPersistence = AIChangeSetPersistence()
+    @ObservationIgnored var canPersistAIChangeSets = false
+    @ObservationIgnored var includeLegacyAIChangeSetFallbackOnRetry = false
     let defaults: UserDefaults
     let userNotificationCenter: CodexUserNotificationCentering
     var remoteNotificationRegistrar: CodexRemoteNotificationRegistering?
