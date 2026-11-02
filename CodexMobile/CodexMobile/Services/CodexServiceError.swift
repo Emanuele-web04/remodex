@@ -15,6 +15,11 @@ enum CodexServiceError: LocalizedError {
     case noPendingApproval
     case rpcError(RPCError)
 
+    var isDesktopSteerTurnEnded: Bool {
+        guard case .rpcError(let error) = self else { return false }
+        return error.data?.objectValue?["errorCode"]?.stringValue == "desktop_steer_turn_ended"
+    }
+
     var errorDescription: String? {
         switch self {
         case .invalidServerURL(let value):

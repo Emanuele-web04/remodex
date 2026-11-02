@@ -2051,14 +2051,15 @@ final class TurnViewModel {
                         removeQueuedDraft(id: id, codex: codex, threadID: threadID)
                         return
                     } catch {
+                        let serviceError = error as? CodexServiceError
                         let rpcError: RPCError?
-                        if case .rpcError(let responseError) = error as? CodexServiceError {
+                        if case .rpcError(let responseError) = serviceError {
                             rpcError = responseError
                         } else {
                             rpcError = nil
                         }
                         let errorCode = rpcError?.data?.objectValue?["errorCode"]?.stringValue
-                        guard errorCode == "desktop_steer_turn_ended" else {
+                        guard serviceError?.isDesktopSteerTurnEnded == true else {
                             if didDispatch && (rpcError == nil || errorCode == "desktop_steer_delivery_unknown"
                                 || rpcError?.message == "Could not continue this Codex Desktop-owned thread from the phone.") {
                                 setQueuePauseState(
@@ -2077,11 +2078,6 @@ final class TurnViewModel {
                               !Task.isCancelled else {
                             throw error
                         }
-                        codex.removeLatestFailedUserMessage(
-                            threadId: threadID,
-                            matchingText: draft.text,
-                            matchingAttachments: draft.attachments
-                        )
                         guard queuedDrafts(codex: codex, threadID: threadID).contains(where: { $0.id == id }) else {
                             isAwaitingAssistantResponse = false
                             return
@@ -2101,11 +2097,13 @@ final class TurnViewModel {
                 removeQueuedDraft(id: id, codex: codex, threadID: threadID)
             } catch {
                 isAwaitingAssistantResponse = false
-                codex.removeLatestFailedUserMessage(
-                    threadId: threadID,
-                    matchingText: draft.text,
-                    matchingAttachments: draft.attachments
-                )
+                if (error as? CodexServiceError)?.isDesktopSteerTurnEnded != true {
+                    codex.removeLatestFailedUserMessage(
+                        threadId: threadID,
+                        matchingText: draft.text,
+                        matchingAttachments: draft.attachments
+                    )
+                }
                 codex.lastErrorMessage = codex.userFacingTurnErrorMessageForFooter(from: error)
             }
         }

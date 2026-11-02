@@ -3071,7 +3071,13 @@ extension CodexService {
         pendingMessageId: String,
         threadId: String
     ) {
-        markMessageDeliveryState(threadId: threadId, messageId: pendingMessageId, state: .failed)
+        if (error as? CodexServiceError)?.isDesktopSteerTurnEnded == true {
+            // The queued draft owns recovery. Remove only this rejected steer's
+            // optimistic row even when mentions changed its display text.
+            _ = removeUserMessage(threadId: threadId, messageId: pendingMessageId)
+        } else {
+            markMessageDeliveryState(threadId: threadId, messageId: pendingMessageId, state: .failed)
+        }
         lastErrorMessage = userFacingTurnErrorMessageForFooter(from: error)
     }
 

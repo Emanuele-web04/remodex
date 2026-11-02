@@ -11,6 +11,7 @@ struct QueuedTurnDraft {
     var collaborationMode: String?
 }
 enum QueuePauseState { case paused(errorMessage: String) }
+enum DeliveryState { case failed }
 
 @MainActor final class TurnViewModel {
     var steeringDraftID: String?
@@ -32,15 +33,17 @@ enum QueuePauseState { case paused(errorMessage: String) }
     var isBusy = true
     var refreshedBusy: Bool?
     var error: Error?
+    var includesMention = false
     var lastErrorMessage: String?
     var calls: [String] = []
-    var failedRows = 0
+    var rows: [String: String] = [:]
 
     func steerTurn(userInput: String, threadId: String, expectedTurnId: String?, attachments: [String], skillMentions: [String], mentionMentions: [String], fileMentions: [String], collaborationMode: String?, onDispatch: (@MainActor () -> Void)? = nil) async throws {
         calls.append("steer:\(userInput)")
         onDispatch?()
         if let error {
-            failedRows += 1
+            rows["steered-row"] = includesMention ? userInput + " @plugin" : userInput
+            handleSteerFailure(error, pendingMessageId: "steered-row", threadId: threadId)
             throw error
         }
     }
@@ -53,7 +56,13 @@ enum QueuePauseState { case paused(errorMessage: String) }
     func startTurn(userInput: String, threadId: String, attachments: [String], skillMentions: [String], mentionMentions: [String], fileMentions: [String], collaborationMode: String?) async throws {
         calls.append("start:\(userInput)")
     }
-    func removeLatestFailedUserMessage(threadId: String, matchingText: String, matchingAttachments: [String]) { failedRows -= 1 }
+    func markMessageDeliveryState(threadId: String, messageId: String, state: DeliveryState) {}
+    func removeUserMessage(threadId: String, messageId: String) -> Bool { rows.removeValue(forKey: messageId) != nil }
+    func removeLatestFailedUserMessage(threadId: String, matchingText: String, matchingAttachments: [String]) {
+        if let match = rows.first(where: { $0.value == matchingText }) {
+            rows.removeValue(forKey: match.key)
+        }
+    }
     func userFacingTurnErrorMessageForFooter(from error: Error) -> String? { error.localizedDescription }
 }
 
@@ -71,17 +80,18 @@ enum QueuePauseState { case paused(errorMessage: String) }
             (CodexServiceError.disconnected, false, ["steer:selected"], false, true),
             (nil, nil, ["steer:selected"], true, false),
         ]
-        for scenario in scenarios {
+        for (index, scenario) in scenarios.enumerated() {
             let viewModel = TurnViewModel()
             let service = CodexService()
             service.error = scenario.error
+            service.includesMention = index < 3
             service.refreshedBusy = scenario.refreshedBusy
             viewModel.steerQueuedDraft(id: "selected", codex: service, threadID: "thread")
             while viewModel.steeringDraftID != nil { await Task.yield() }
             precondition(service.calls == scenario.calls, "Expected \(scenario.calls), got \(service.calls)")
             precondition(viewModel.drafts.map(\.id) == (scenario.sent ? ["first", "last"] : ["first", "selected", "last"]))
             precondition(viewModel.paused == scenario.paused)
-            precondition(service.failedRows == 0)
+            precondition(service.rows.isEmpty, "The rejected optimistic row must be removed by item ID")
         }
         print("desktop steer checks passed")
     }

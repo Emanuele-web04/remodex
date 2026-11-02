@@ -16,7 +16,11 @@ test("iOS recovers a definitively ended Desktop steer without replaying uncertai
   const extracted = path.join(directory, "Steer.swift");
   const steer = viewModel.slice(viewModel.indexOf("    func steerQueuedDraft("),
     viewModel.indexOf("    func resumeQueueAndFlushIfPossible("));
-  fs.writeFileSync(extracted, `import Foundation\nextension TurnViewModel {\n${steer}\n}`);
+  const service = fs.readFileSync(path.join(mobile, "Services/CodexService+ThreadsTurns.swift"), "utf8");
+  const failure = service.slice(service.indexOf("    func handleSteerFailure("),
+    service.indexOf("    // Some server versions expect"));
+  fs.writeFileSync(extracted,
+    `import Foundation\nextension TurnViewModel {\n${steer}\n}\nextension CodexService {\n${failure}\n}`);
   const binary = path.join(directory, "desktop-steer");
   execFileSync("xcrun", ["swiftc", "-default-isolation", "MainActor", "-parse-as-library",
     "-module-cache-path", path.join(directory, "cache"),
