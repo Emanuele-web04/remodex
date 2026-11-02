@@ -40,19 +40,28 @@ nonisolated enum TurnDiffRenderingPolicy {
     // Large aggregate changes can still contain a small, inspectable file.
     static func section(for path: String, in body: String) -> String? {
         let separator = "\n\n---\n\n"
+        var result = ""
         var start = body.startIndex
         while start < body.endIndex {
             let boundary = body.range(of: separator, range: start..<body.endIndex)
             let section = body[start..<(boundary?.lowerBound ?? body.endIndex)]
-            let header = section.prefix(while: { !$0.isNewline })
-            if let candidate = PerFileDiffParser.pathFromHeader(String(header)),
-               FileChangePathIdentity.representsSameFile(candidate, path) {
-                return String(section)
+            var candidate: String?
+            body.enumerateSubstrings(in: section.startIndex..<section.endIndex, options: .byLines) {
+                line, _, _, stop in
+                guard let line else { return }
+                candidate = PerFileDiffParser.pathFromHeader(line)
+                stop = candidate != nil || line.trimmingCharacters(in: .whitespaces).hasPrefix("```")
+            }
+            if let candidate, FileChangePathIdentity.representsSameFile(candidate, path) {
+                guard canRenderDetails(String(section)) else { return nil }
+                if !result.isEmpty { result.append(separator) }
+                result.append(contentsOf: section)
+                guard canRenderDetails(result) else { return nil }
             }
             guard let boundary else { break }
             start = boundary.upperBound
         }
-        return nil
+        return result.isEmpty ? nil : result
     }
 }
 
