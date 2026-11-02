@@ -170,6 +170,9 @@ async function handleJSONRoute(req, res, handler) {
     const result = await handler(body);
     return writeJSON(res, 200, result);
   } catch (error) {
+    if (error.status === 413) {
+      res.setHeader("Connection", "close");
+    }
     return writeJSON(res, error.status || 500, {
       ok: false,
       error: error.message || "Internal server error",
@@ -182,21 +185,30 @@ function readJSONBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let totalSize = 0;
+    let bodyTooLarge = false;
 
     req.on("data", (chunk) => {
+      if (bodyTooLarge) {
+        return;
+      }
       totalSize += chunk.length;
       if (totalSize > 64 * 1024) {
+        // Discard the remainder without destroying the socket before the 413 is sent.
+        bodyTooLarge = true;
+        chunks.length = 0;
         reject(Object.assign(new Error("Request body too large"), {
           status: 413,
           code: "body_too_large",
         }));
-        req.destroy();
         return;
       }
       chunks.push(chunk);
     });
 
     req.on("end", () => {
+      if (bodyTooLarge) {
+        return;
+      }
       const rawBody = Buffer.concat(chunks).toString("utf8");
       if (!rawBody.trim()) {
         resolve({});

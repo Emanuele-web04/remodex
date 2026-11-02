@@ -34,6 +34,17 @@ test("health is minimal by default and detailed only when enabled", async () => 
   assert.equal(detailed.push.enabled, false);
 });
 
+test("oversized relay JSON returns a complete 413 response", async () => {
+  await withServer(async ({ port }) => {
+    const response = await fetch(`http://127.0.0.1:${port}/v1/pairing/code/resolve`, {
+      method: "POST",
+      body: " ".repeat(64 * 1024 + 1),
+    });
+    assert.equal(response.status, 413);
+    assert.equal((await response.json()).code, "body_too_large");
+  });
+});
+
 test("detailed health exposes relay pressure counters", async () => {
   await withServer(async ({ port }) => {
     const mac = new WebSocket(`ws://127.0.0.1:${port}/relay/session-health`, {
