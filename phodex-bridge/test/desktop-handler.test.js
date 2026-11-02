@@ -9,6 +9,7 @@ const assert = require("node:assert/strict");
 const path = require("node:path");
 
 const { handleDesktopRequest } = require("../src/desktop-handler");
+const { createDesktopIpcLiveOwner } = require("../src/desktop-ipc-live-owner");
 
 test("desktop handoff detects and relaunches the configured bundle's executable", async () => {
   const appPath = "/test/Custom ChatGPT.app";
@@ -81,6 +82,78 @@ test("desktop handoff skips relaunch when the configured bundle cannot be verifi
     ["open", "-b", "com.openai.codex", "codex://threads/thread-123"],
   ]);
 });
+
+for (const [status, unloads, description] of [
+  ["idle", true, "waits for only the target writer to unload"],
+  ["idle", false, "leaves Desktop running when the writer stays loaded"],
+  ["active", false, "leaves an active runtime subscribed"],
+]) {
+  test(`desktop handoff ${description}`, async () => {
+    const threadId = "thread-handoff";
+    const childId = "active-child";
+    const appPath = "/test/ChatGPT.app";
+    const bundleFiles = [path.join(appPath, "Contents", "Info.plist"), path.join(appPath, "Contents", "MacOS", "ChatGPT")];
+    const events = [];
+    let unsubscribed = false;
+    let running = true;
+    const owner = createDesktopIpcLiveOwner({
+      enabled: false,
+      handoffWriterWaitMs: 50,
+      handoffWriterPollMs: 1,
+      async sendCodexRequest(method, params) {
+        if (method === "thread/loaded/list") {
+          assert.equal(owner.isThreadHandoffInProgress(threadId), true);
+          assert.equal(owner.isThreadHandoffInProgress(childId), false);
+          if (unsubscribed && unloads) {
+            events.push("writer-unloaded");
+            return { data: [childId] };
+          }
+          return { data: [threadId, childId] };
+        }
+        assert.equal(params.threadId, threadId, "the active descendant must be untouched");
+        if (method === "thread/read") return { thread: { id: threadId, status: { type: status } } };
+        assert.equal(method, "thread/unsubscribe");
+        unsubscribed = true;
+        events.push("unsubscribe");
+        return { status: "unsubscribed" };
+      },
+    });
+
+    const response = await new Promise((resolve) => {
+      handleDesktopRequest(JSON.stringify({
+        id: "request-writer",
+        method: "desktop/continueOnMac",
+        params: { threadId },
+      }), (raw) => resolve(JSON.parse(raw)), {
+        platform: "darwin",
+        appPath,
+        fsModule: { existsSync: (candidate) => bundleFiles.includes(candidate) },
+        withThreadHandoff: owner.withThreadHandoff,
+        executor: async (command) => {
+          assert.equal(owner.isThreadHandoffInProgress(threadId), true);
+          if (command === "/usr/bin/plutil") return { stdout: "ChatGPT" };
+          if (command === "pkill") running = false;
+          events.push(command);
+          return { stdout: "", stderr: "" };
+        },
+        isAppRunning: async () => running,
+        sleepFn: async () => {},
+        threadMaterializeWaitMs: 0,
+      });
+    });
+
+    assert.equal(owner.isThreadHandoffInProgress(threadId), false);
+    if (unloads) {
+      assert.equal(response.result?.success, true);
+      assert.deepEqual(events, ["unsubscribe", "writer-unloaded", "pkill", "open", "open"]);
+    } else {
+      const active = status === "active";
+      assert.equal(response.error?.data?.errorCode, active ? "handoff_thread_busy" : "handoff_writer_release_failed");
+      assert.deepEqual(events, active ? [] : ["unsubscribe"]);
+      assert.equal(running, true);
+    }
+  });
+}
 
 test("desktop/continueOnMac boots Codex before deep-linking unknown threads", async () => {
   const executorCalls = [];

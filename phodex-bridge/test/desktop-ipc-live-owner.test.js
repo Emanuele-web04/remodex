@@ -3619,8 +3619,15 @@ test("live owner runs Desktop queued follow-ups between turns", async (t) => {
 test("live owner pauses undecodable queued entries and halts the queue after interrupts", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-queue-guards-");
   const frames = [];
+  // Installed Desktop checks the method version in its IPC client, then
+  // routes queued follow-ups to a renderer only when the host matches.
+  const isCurrentDesktopQueueFrame = (frame) => frame.type === "broadcast"
+    && frame.method === "thread-queued-followups-changed"
+    && frame.version === 2 && frame.params.hostId === "local";
   const codexRequests = [];
   let serverSocket = null;
+  let followerAttached = false;
+  let finishHistoryRead;
 
   const server = net.createServer((socket) => {
     serverSocket = socket;
@@ -3649,8 +3656,14 @@ test("live owner pauses undecodable queued entries and halts the queue after int
   const owner = createDesktopIpcLiveOwner({
     socketPath,
     snapshotDebounceMs: 1,
+    onFollowerStateChanged(_threadId, following) {
+      followerAttached = following;
+    },
     async sendCodexRequest(method, params) {
       codexRequests.push({ method, params });
+      if (method === "thread/read") {
+        return await new Promise((resolve) => { finishHistoryRead = resolve; });
+      }
       return { ok: true };
     },
     sendRawCodexMessage() {},
@@ -3722,8 +3735,7 @@ test("live owner pauses undecodable queued entries and halts the queue after int
 
   const pausedBroadcast = await waitForMessage(
     frames,
-    (frame) => frame.type === "broadcast"
-      && frame.method === "thread-queued-followups-changed"
+    (frame) => isCurrentDesktopQueueFrame(frame)
       && frame.params?.messages?.[0]?.pausedReason === "remodex-unsupported-entry"
   );
   assert.equal(pausedBroadcast.params.messages.length, 2);
@@ -3736,6 +3748,69 @@ test("live owner pauses undecodable queued entries and halts the queue after int
     params: { threadId: "thread-queue-guards" },
   }));
   assert.equal(owner.isThreadOwned("thread-queue-guards"), true);
+
+  const preCloseFrameCount = frames.length;
+  owner.observeOutbound(JSON.stringify({
+    method: "thread/closed",
+    params: { threadId: "thread-queue-guards" },
+  }));
+  assert.equal(owner.isThreadOwned("thread-queue-guards"), false);
+  await waitForMessage(frames, (frame) => frame.params?.change?.conversationState?.remodexRemovalReason === "thread/closed");
+  assert.equal(frames.slice(preCloseFrameCount).some((frame) =>
+    frame.method === "thread-queued-followups-changed" && frame.params.messages.length === 0
+  ), false, "runtime unload must not broadcast a cleared draft queue");
+
+  owner.observeInbound(JSON.stringify({
+    id: "resume-queue-guards", method: "thread/resume",
+    params: { threadId: "thread-queue-guards", excludeTurns: true },
+  }));
+  owner.observeOutbound(JSON.stringify({
+    id: "resume-queue-guards",
+    result: { thread: { id: "thread-queue-guards", turns: [] } },
+  }));
+  writeFrame(serverSocket, {
+    type: "broadcast", sourceClientId: "desktop", version: 1, method: "thread-stream-following-changed",
+    params: { conversationId: "thread-queue-guards", following: true },
+  });
+  await waitFor(() => followerAttached && finishHistoryRead);
+  finishHistoryRead({ thread: {
+    id: "thread-queue-guards",
+    turns: [{ id: "turn-guards-2", items: [], status: "completed" }],
+  } });
+  const restored = await waitForMessage(frames, (frame) =>
+    frames.indexOf(frame) >= preCloseFrameCount && isCurrentDesktopQueueFrame(frame)
+  );
+  assert.deepEqual(restored.params.messages, pausedBroadcast.params.messages);
+  assert.ok(frames.slice(preCloseFrameCount, frames.indexOf(restored)).some((frame) =>
+    frame.method === "thread-stream-state-changed"
+    && frame.sourceClientId === restored.sourceClientId
+    && frame.params.change.type === "snapshot"
+    && frame.params.change.conversationState.turns.some((turn) => turn.turnId === "turn-guards-2")
+  ), "Desktop accepts a queue only after the new owner has announced a snapshot");
+  const legacyRestored = await waitForMessage(frames, (frame) =>
+    frames.indexOf(frame) >= preCloseFrameCount
+    && frame.method === "thread-queued-followups-changed" && frame.version === 1
+  );
+  assert.deepEqual(legacyRestored.params, {
+    conversationId: "thread-queue-guards",
+    messages: restored.params.messages,
+  });
+  assert.equal(codexRequests.filter((request) => request.method === "turn/start").length, 0);
+
+  // An explicit edit can resume the remaining draft without replaying anything on reopen.
+  writeFrame(serverSocket, {
+    type: "request", requestId: "queue-guards-resume", sourceClientId: "desktop", version: 1,
+    method: "thread-follower-set-queued-follow-ups-state",
+    params: {
+      conversationId: "thread-queue-guards",
+      state: { "thread-queue-guards": [restored.params.messages[1]] },
+    },
+  });
+  await waitFor(() => codexRequests.some((request) => request.method === "turn/start"));
+  assert.deepEqual(
+    codexRequests.filter((request) => request.method === "turn/start").map((request) => request.params.input),
+    [[{ type: "text", text: "runnable" }]]
+  );
 });
 
 test("live owner dedupes read-state broadcasts for already-clean threads", async (t) => {
@@ -4402,6 +4477,26 @@ test("live owner releases idle threads on unsubscribe but keeps running ones", a
     params: { threadId: "thread-unsub-running" },
   }));
   assert.equal(owner.isThreadOwned("thread-unsub-running"), true);
+});
+
+test("Desktop handoff cannot unsubscribe a Remodex thread with a pending turn", async (t) => {
+  const owner = createDesktopIpcLiveOwner({
+    socketPath: () => [],
+    async sendCodexRequest(method) { assert.equal(method, "thread/read"); },
+    sendRawCodexMessage() {},
+  });
+  t.after(() => owner.stopAll());
+  owner.observeInbound(JSON.stringify({
+    id: "pending-turn",
+    method: "turn/start",
+    params: { threadId: "thread-running", input: [{ type: "text", text: "keep running" }] },
+  }));
+
+  await assert.rejects(owner.withThreadHandoff("thread-running", () => {
+    assert.fail("Desktop must stay open while the turn is pending");
+  }), { errorCode: "handoff_thread_busy" });
+  assert.equal(owner.isThreadOwned("thread-running"), true);
+  assert.equal(owner.isThreadHandoffInProgress("thread-running"), false);
 });
 
 test("live owner drops cached conversation state when yielding to a peer owner", async (t) => {

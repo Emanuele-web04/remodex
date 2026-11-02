@@ -168,6 +168,10 @@ function createSpawnTransport({ env, appPath, platform, spawnImpl = spawn }) {
   }
 }
 
+// Make explicit Desktop handoff responsive after unsubscribe. Codex unloads
+// only unsubscribed, inactive threads, and this override stays in our child.
+const LOCAL_APP_SERVER_ARGS = ["app-server", "-c", "thread_unload_delay_secs=1"];
+
 // Builds a single, platform-aware launch path so the bridge never "guesses"
 // between multiple commands and accidentally starts duplicate runtimes.
 function createCodexLaunchPlans({
@@ -185,7 +189,7 @@ function createCodexLaunchPlans({
   if (platform === "win32") {
     return [{
       command: env.ComSpec || "cmd.exe",
-      args: ["/d", "/c", "codex app-server"],
+      args: ["/d", "/c", `codex ${LOCAL_APP_SERVER_ARGS.join(" ")}`],
       options: {
         ...sharedOptions,
         windowsHide: true,
@@ -196,7 +200,7 @@ function createCodexLaunchPlans({
 
   const launches = [{
     command: "codex",
-    args: ["app-server"],
+    args: LOCAL_APP_SERVER_ARGS,
     options: sharedOptions,
     description: "`codex app-server`",
   }];
@@ -208,7 +212,7 @@ function createCodexLaunchPlans({
   if (bundledCommand) {
     launches.push({
       command: bundledCommand,
-      args: ["app-server"],
+      args: LOCAL_APP_SERVER_ARGS,
       options: sharedOptions,
       description: `\`${bundledCommand} app-server\``,
     });
