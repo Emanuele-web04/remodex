@@ -210,6 +210,8 @@ function createDesktopIpcLiveOwner({
   // Desktop delegates queued follow-ups to the stream owner: followers push the
   // whole queue state here and expect the owner to run entries between turns.
   const queuedFollowUpsByThreadId = new Map();
+  // Unloading a runtime releases its stream, but its unsent queue survives.
+  const unloadedQueuedFollowUpThreadIds = new Set();
   const runningQueuedFollowUpThreadIds = new Set();
   const announcedReadStateThreadIds = new Set();
   const pendingReadStateByThreadId = new Map();
@@ -339,6 +341,8 @@ function createDesktopIpcLiveOwner({
         broadcastRemoval: true,
         reason: "thread/closed",
       });
+    } else if (message.method === "thread/archived" || message.method === "thread/deleted") {
+      removeOwnedThread(readThreadIdFromParams(message.params), { reason: message.method });
     }
     if (message.method === "account/updated") {
       announcedReadStateThreadIds.clear();
@@ -490,6 +494,7 @@ function createDesktopIpcLiveOwner({
     followerRuntimeOverridesByThreadId.clear();
     pendingThreadArchiveMetadataByThreadId.clear();
     queuedFollowUpsByThreadId.clear();
+    unloadedQueuedFollowUpThreadIds.clear();
     runningQueuedFollowUpThreadIds.clear();
     announcedReadStateThreadIds.clear();
     pendingReadStateByThreadId.clear();
@@ -819,13 +824,15 @@ function createDesktopIpcLiveOwner({
     if (followerClientIdsByThreadId.delete(normalizedThreadId)) {
       onFollowerStateChanged?.(normalizedThreadId, false);
     }
-    // An active-peer takeover can still drop a non-empty queue (hasActiveLocalTurn
-    // only shields idle yields); announce the emptied queue instead of letting
-    // clients keep rendering drafts the bridge will never run.
-    const droppedQueuedFollowUps = (queuedFollowUpsByThreadId.get(normalizedThreadId) || []).length > 0;
-    queuedFollowUpsByThreadId.delete(normalizedThreadId);
-    if (droppedQueuedFollowUps) {
-      broadcastQueuedFollowUps(normalizedThreadId);
+    if (reason === "thread/closed" && queuedFollowUpsByThreadId.has(normalizedThreadId)) {
+      unloadedQueuedFollowUpThreadIds.add(normalizedThreadId);
+    }
+    if (reason === "thread/archive" || reason === "thread/archived" || reason === "thread/deleted"
+      || !unloadedQueuedFollowUpThreadIds.has(normalizedThreadId)) {
+      unloadedQueuedFollowUpThreadIds.delete(normalizedThreadId);
+      if (queuedFollowUpsByThreadId.delete(normalizedThreadId)) {
+        broadcastQueuedFollowUps(normalizedThreadId);
+      }
     }
     runningQueuedFollowUpThreadIds.delete(normalizedThreadId);
     announcedReadStateThreadIds.delete(normalizedThreadId);
@@ -999,13 +1006,13 @@ function createDesktopIpcLiveOwner({
     }
     const params = envelope.params || {};
     const threadId = readString(params.conversationId) || readString(params.conversation_id);
-    if (!threadId || !ownedThreadIds.has(threadId)) {
+    if (!threadId || (!ownedThreadIds.has(threadId) && !queuedFollowUpsByThreadId.has(threadId))) {
       return true;
     }
 
     // Desktop archive is a list-level ownership signal; stop publishing snapshots
     // so archived threads do not immediately reappear from bridge-owned state.
-    removeOwnedThread(threadId);
+    removeOwnedThread(threadId, { reason: "thread/archive" });
     return true;
   }
 
@@ -1291,6 +1298,12 @@ function createDesktopIpcLiveOwner({
     })) {
       streamRevisionsByThreadId.set(threadId, currentRevision + 1);
       lastBroadcastStatesByThreadId.set(threadId, cloneJSON(conversationState));
+      if ((forceSnapshot || !previousState) && unloadedQueuedFollowUpThreadIds.has(threadId)
+        && followerClientIdsByThreadId.has(threadId)) {
+        // The renderer accepts queue updates only from its current stream owner.
+        // Initial history can delay that first snapshot beyond follower attach.
+        broadcastQueuedFollowUps(threadId);
+      }
       return true;
     }
     return false;
@@ -1758,6 +1771,7 @@ function createDesktopIpcLiveOwner({
   // entries between turns; store it, mirror it to every window, and let the
   // turn/completed hook drain it.
   function applyFollowerQueuedFollowUps(conversationId, state) {
+    unloadedQueuedFollowUpThreadIds.delete(conversationId);
     const messages = state && typeof state === "object" && !Array.isArray(state)
       ? cloneJSON(state[conversationId] ?? [])
       : [];
@@ -1778,15 +1792,22 @@ function createDesktopIpcLiveOwner({
   }
 
   function broadcastQueuedFollowUps(conversationId) {
-    ipc.sendBroadcast(THREAD_QUEUED_FOLLOWUPS_CHANGED, {
+    const params = {
       conversationId,
       messages: cloneJSON(queuedFollowUpsByThreadId.get(conversationId) ?? []),
-    });
+    };
+    ipc.sendBroadcast(THREAD_QUEUED_FOLLOWUPS_CHANGED, { ...params, hostId });
+    // The IPC handshake has no method-version negotiation. Desktop filters
+    // broadcasts by exact version, so v1 peers accept only the legacy shape.
+    ipc.sendBroadcast(THREAD_QUEUED_FOLLOWUPS_CHANGED, params, { version: 1 });
   }
 
   function runNextQueuedFollowUp(threadId) {
     const queue = queuedFollowUpsByThreadId.get(threadId);
-    if (!Array.isArray(queue) || queue.length === 0 || runningQueuedFollowUpThreadIds.has(threadId)) {
+    // Reopening only restores the draft UI. Let Desktop confirm its queue
+    // before draining drafts that could have been edited while unloaded.
+    if (!Array.isArray(queue) || queue.length === 0 || runningQueuedFollowUpThreadIds.has(threadId)
+      || unloadedQueuedFollowUpThreadIds.has(threadId)) {
       return;
     }
     runningQueuedFollowUpThreadIds.add(threadId);
@@ -1796,7 +1817,8 @@ function createDesktopIpcLiveOwner({
       // after settings settle, and retry if another refresh changes it while
       // request normalization is awaiting context.
       const entry = queuedFollowUpsByThreadId.get(threadId)?.[0];
-      const canRun = () => ownedThreadIds.has(threadId) && !activeTurnIdForConversation(threadId);
+      const canRun = () => ownedThreadIds.has(threadId)
+        && !unloadedQueuedFollowUpThreadIds.has(threadId) && !activeTurnIdForConversation(threadId);
       if (!entry || entry.pausedReason || !canRun()) return;
       const text = readString(entry.context?.text) || readString(entry.text) || readString(entry.prompt);
       if (!text) {
@@ -1832,7 +1854,10 @@ function createDesktopIpcLiveOwner({
       const sentIndex = currentQueue?.findIndex((candidate) => candidate === entry
         || (readString(entry.id) && candidate.id === entry.id)) ?? -1;
       if (sentIndex >= 0) currentQueue.splice(sentIndex, 1);
-      if (currentQueue?.length === 0) queuedFollowUpsByThreadId.delete(threadId);
+      if (currentQueue?.length === 0) {
+        queuedFollowUpsByThreadId.delete(threadId);
+        unloadedQueuedFollowUpThreadIds.delete(threadId);
+      }
       broadcastQueuedFollowUps(threadId);
     })
       .catch((error) => {

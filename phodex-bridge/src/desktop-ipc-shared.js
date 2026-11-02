@@ -28,7 +28,7 @@ const DESKTOP_IPC_METHOD_VERSIONS = new Map([
   ["thread-unarchived", 1],
   ["thread-owner-discovery", 1],
   ["thread-read-state-changed", 3],
-  ["thread-queued-followups-changed", 1],
+  ["thread-queued-followups-changed", 2],
   ["thread-follower-start-turn", 2],
   ["thread-follower-load-complete-history", 1],
   ["thread-follower-update-thread-settings", 2],

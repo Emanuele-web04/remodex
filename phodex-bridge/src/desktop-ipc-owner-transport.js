@@ -169,7 +169,7 @@ function createDesktopOwnerIpcClient({
       });
   }
 
-  function sendBroadcast(method, params) {
+  function sendBroadcast(method, params, { version = METHOD_VERSION_BY_NAME.get(method) || 1 } = {}) {
     ensureConnected();
     if (!socket || socket.destroyed || !isInitialized) {
       return false;
@@ -185,7 +185,7 @@ function createDesktopOwnerIpcClient({
       method,
       sourceClientId: clientId,
       params: params || {},
-      version: METHOD_VERSION_BY_NAME.get(method) || 1,
+      version,
     };
     return writeEnvelope(envelope);
   }
