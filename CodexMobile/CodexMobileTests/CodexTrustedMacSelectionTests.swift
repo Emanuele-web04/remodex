@@ -300,10 +300,11 @@ final class CodexTrustedMacSelectionTests: XCTestCase {
         XCTAssertEqual(migratedMessages["thread-fresh"]?.first?.text, "fresh")
         XCTAssertEqual(migratedMessages["thread-stale"]?.first?.text, "stale")
         XCTAssertEqual(migratedDrafts["thread-stale"]?.input, "old draft")
-        XCTAssertEqual(migratedChangeSets.first?.id, "change-stale")
+        XCTAssertEqual(migratedChangeSets?.first?.id, "change-stale")
+        XCTAssertEqual(service.aiChangeSetsByID["change-stale"]?.threadId, "thread-stale")
         XCTAssertTrue(service.messagePersistence.load(macDeviceId: staleMacID).isEmpty)
         XCTAssertTrue(service.composerDraftPersistence.load(macDeviceId: staleMacID).isEmpty)
-        XCTAssertTrue(service.aiChangeSetPersistence.load(macDeviceId: staleMacID).isEmpty)
+        XCTAssertEqual(service.aiChangeSetPersistence.load(macDeviceId: staleMacID), [])
     }
 
     func testTrustMacKeepsSpecificDisplayNameWhenIncomingNameIsGeneric() {

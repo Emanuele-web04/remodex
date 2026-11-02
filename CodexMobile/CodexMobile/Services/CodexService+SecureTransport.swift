@@ -519,15 +519,15 @@ extension CodexService {
         } ?? false
 
         // Old bridge resets could rotate ids; collapse those historical records when a fresh QR proves the current one.
-        let migratedScopedState = migrateMacScopedState(
-            from: staleDuplicateRecords.map(\.macDeviceId),
-            to: deviceId
-        )
-        for staleRecord in staleDuplicateRecords {
-            trustedMacRegistry.records.removeValue(forKey: staleRecord.macDeviceId)
+        let staleDeviceIds = staleDuplicateRecords.map(\.macDeviceId)
+        let migratedScopedState = migrateMacScopedState(from: staleDeviceIds, to: deviceId)
+        let changeSetMigration = mergeMacScopedChangeSets(from: staleDeviceIds, to: deviceId)
+        let migratedDeviceIds = staleDeviceIds.filter { !changeSetMigration.pending.contains($0) }
+        for migratedDeviceId in migratedDeviceIds {
+            trustedMacRegistry.records.removeValue(forKey: migratedDeviceId)
         }
         if let normalizedPreviousTrustedMacDeviceId,
-           staleDuplicateRecords.contains(where: { $0.macDeviceId == normalizedPreviousTrustedMacDeviceId }) {
+           migratedDeviceIds.contains(normalizedPreviousTrustedMacDeviceId) {
             clearPreviousTrustedMacDeviceId()
         }
 
@@ -551,6 +551,9 @@ extension CodexService {
         setCurrentTrustedMacDeviceId(deviceId)
         if migratedScopedState {
             loadMacScopedDefaultsState(for: deviceId)
+        }
+        if changeSetMigration.changed {
+            loadMacScopedAIChangeSets(for: deviceId)
         }
         SecureStore.writeString(deviceId, for: CodexSecureKeys.lastTrustedMacDeviceId)
         lastTrustedMacDeviceId = deviceId

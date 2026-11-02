@@ -14,9 +14,15 @@ nonisolated enum CodexLocalPersistenceKeyProvider {
         storage.historyKey()
     }
 
+    // Use this for migrations that must not overwrite existing data with an ephemeral key.
+    static func durableHistoryKey() -> SymmetricKey? {
+        storage.durableHistoryKey()
+    }
+
     private final class Storage: @unchecked Sendable {
         private let lock = NSLock()
         private var cachedHistoryKey: SymmetricKey?
+        private var cachedDurableHistoryKey: SymmetricKey?
 
         func historyKey() -> SymmetricKey {
             lock.lock()
@@ -25,16 +31,35 @@ nonisolated enum CodexLocalPersistenceKeyProvider {
             if let cachedHistoryKey {
                 return cachedHistoryKey
             }
-            if let storedKey = SecureStore.readData(for: CodexSecureKeys.messageHistoryKey) {
-                let key = SymmetricKey(data: storedKey)
-                cachedHistoryKey = key
-                return key
+            let key = loadDurableHistoryKey() ?? SymmetricKey(size: .bits256)
+            cachedHistoryKey = key
+            return key
+        }
+
+        func durableHistoryKey() -> SymmetricKey? {
+            lock.lock()
+            defer { lock.unlock() }
+            return loadDurableHistoryKey()
+        }
+
+        private func loadDurableHistoryKey() -> SymmetricKey? {
+            if let cachedDurableHistoryKey {
+                return cachedDurableHistoryKey
             }
 
-            let key = SymmetricKey(size: .bits256)
-            let keyData = key.withUnsafeBytes { Data($0) }
-            SecureStore.writeData(keyData, for: CodexSecureKeys.messageHistoryKey)
-            cachedHistoryKey = key
+            let keyName = CodexSecureKeys.messageHistoryKey
+            var keyData = SecureStore.readData(for: keyName)
+            if keyData == nil {
+                let candidate = cachedHistoryKey ?? SymmetricKey(size: .bits256)
+                SecureStore.addDataIfAbsent(candidate.withUnsafeBytes { Data($0) }, for: keyName)
+                keyData = SecureStore.readData(for: keyName)
+            }
+
+            guard let storedKey = keyData, storedKey.count == 32 else {
+                return nil
+            }
+            let key = SymmetricKey(data: storedKey)
+            cachedDurableHistoryKey = key
             return key
         }
     }

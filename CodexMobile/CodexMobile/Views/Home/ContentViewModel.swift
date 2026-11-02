@@ -1039,6 +1039,7 @@ extension ContentViewModel {
             codex.loadLocalState(for: macDeviceId)
         } else {
             codex.loadThreadListSnapshot(for: macDeviceId)
+            codex.loadMacScopedAIChangeSets(for: macDeviceId)
         }
         // Manual switches wait for live sync before showing messages so stale per-Mac caches do not flash.
     }

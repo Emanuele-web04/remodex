@@ -33,12 +33,16 @@ extension CodexService {
     }
 
     // Persists the currently loaded local state under the provided Mac namespace.
-    func saveLocalState(for macDeviceId: String?) {
+    @discardableResult
+    func saveLocalState(for macDeviceId: String?) -> Bool {
         let normalizedMacDeviceId = normalizedMacScopedDeviceId(macDeviceId)
         messagePersistence.save(messagesByThread, macDeviceId: normalizedMacDeviceId)
         composerDraftPersistence.save(composerDraftsByThreadID, macDeviceId: normalizedMacDeviceId)
-        aiChangeSetPersistence.save(Array(aiChangeSetsByID.values), macDeviceId: normalizedMacDeviceId)
         persistDesktopMirroredRunningSnapshot(macDeviceId: normalizedMacDeviceId)
+        return canPersistAIChangeSets && aiChangeSetPersistence.save(
+            Array(aiChangeSetsByID.values),
+            macDeviceId: normalizedMacDeviceId
+        )
     }
 
     // Loads messages, drafts, and assistant change-set metadata for the provided Mac namespace.
@@ -87,32 +91,41 @@ extension CodexService {
             removeAllThreadTimelineState()
             restoreRecentDesktopMirroredRunningSnapshot(macDeviceId: normalizedMacDeviceId)
 
-            let loadedChangeSets = aiChangeSetPersistence.load(
-                macDeviceId: normalizedMacDeviceId,
+            loadMacScopedAIChangeSets(
+                for: normalizedMacDeviceId,
                 includeLegacyFallback: includeLegacyFallback
             )
-            aiChangeSetsByID = loadedChangeSets.reduce(into: [:]) { partialResult, changeSet in
-                partialResult[changeSet.id] = changeSet
-            }
-            aiChangeSetIDByTurnKey = loadedChangeSets.reduce(into: [:]) { partialResult, changeSet in
-                guard let turnKey = AIChangeSetTurnKey(
-                    threadId: changeSet.threadId,
-                    turnId: changeSet.turnId
-                ) else {
-                    return
-                }
-                partialResult[turnKey] = changeSet.id
-            }
-            aiChangeSetIDByAssistantMessageID = loadedChangeSets.reduce(into: [:]) { partialResult, changeSet in
-                if let assistantMessageId = changeSet.assistantMessageId {
-                    partialResult[assistantMessageId] = changeSet.id
-                }
-            }
             rehydrateLegacyFallbackChangeSetsFromPersistedMessages()
 
-            if includeLegacyFallback {
-                saveLocalState(for: normalizedMacDeviceId)
+            if includeLegacyFallback, saveLocalState(for: normalizedMacDeviceId) {
                 markLegacyLocalStateFallbackMigrated()
+            }
+        }
+    }
+
+    // Restore the revert ledger independently of cached chat history during a manual Mac switch.
+    func loadMacScopedAIChangeSets(for macDeviceId: String?, includeLegacyFallback: Bool = false) {
+        let persistedChangeSets = aiChangeSetPersistence.load(
+            macDeviceId: macDeviceId,
+            includeLegacyFallback: includeLegacyFallback
+        )
+        canPersistAIChangeSets = persistedChangeSets != nil
+        let loadedChangeSets = persistedChangeSets ?? []
+        aiChangeSetsByID = loadedChangeSets.reduce(into: [:]) { partialResult, changeSet in
+            partialResult[changeSet.id] = changeSet
+        }
+        aiChangeSetIDByTurnKey = loadedChangeSets.reduce(into: [:]) { partialResult, changeSet in
+            guard let turnKey = AIChangeSetTurnKey(
+                threadId: changeSet.threadId,
+                turnId: changeSet.turnId
+            ) else {
+                return
+            }
+            partialResult[turnKey] = changeSet.id
+        }
+        aiChangeSetIDByAssistantMessageID = loadedChangeSets.reduce(into: [:]) { partialResult, changeSet in
+            if let assistantMessageId = changeSet.assistantMessageId {
+                partialResult[assistantMessageId] = changeSet.id
             }
         }
     }
@@ -281,6 +294,7 @@ extension CodexService {
             assistantCompletionFingerprintByThread.removeAll()
             recentActivityLineByThread.removeAll()
             contextWindowUsageByThread.removeAll()
+            canPersistAIChangeSets = false
             aiChangeSetsByID.removeAll()
             aiChangeSetIDByTurnKey.removeAll()
             aiChangeSetIDByAssistantMessageID.removeAll()
@@ -620,7 +634,6 @@ private extension CodexService {
         migratedCaches = mergeMacScopedMessages(from: sourceDeviceIds, to: targetDeviceId) || migratedCaches
         migratedCaches = mergeMacScopedComposerDrafts(from: sourceDeviceIds, to: targetDeviceId) || migratedCaches
         migratedCaches = mergeMacScopedThreadListSnapshots(from: sourceDeviceIds, to: targetDeviceId) || migratedCaches
-        migratedCaches = mergeMacScopedChangeSets(from: sourceDeviceIds, to: targetDeviceId) || migratedCaches
 
         return migratedCaches
     }
@@ -667,28 +680,43 @@ private extension CodexService {
         return true
     }
 
-    func mergeMacScopedChangeSets(from sourceDeviceIds: [String], to targetDeviceId: String) -> Bool {
-        var targetChangeSetsById = aiChangeSetPersistence.load(macDeviceId: targetDeviceId)
-            .reduce(into: [String: AIChangeSet]()) { partialResult, changeSet in
-                partialResult[changeSet.id] = changeSet
-            }
+    func mergeMacScopedChangeSets(
+        from sourceDeviceIds: [String],
+        to targetDeviceId: String
+    ) -> (changed: Bool, pending: Set<String>) {
+        let sourceDeviceIds = uniqueNormalizedMacDeviceIds(sourceDeviceIds).filter { $0 != targetDeviceId }
+        var pending = Set(sourceDeviceIds)
+        guard !pending.isEmpty,
+              let targetChangeSets = aiChangeSetPersistence.load(macDeviceId: targetDeviceId) else {
+            return (false, pending)
+        }
+
+        var targetChangeSetsById = targetChangeSets.reduce(into: [String: AIChangeSet]()) { partialResult, changeSet in
+            partialResult[changeSet.id] = changeSet
+        }
+        var mergedSourceIds: [String] = []
         var changed = false
 
         for sourceDeviceId in sourceDeviceIds {
-            defer { aiChangeSetPersistence.delete(macDeviceId: sourceDeviceId) }
-            for changeSet in aiChangeSetPersistence.load(macDeviceId: sourceDeviceId)
-                where targetChangeSetsById[changeSet.id] == nil {
+            guard let sourceChangeSets = aiChangeSetPersistence.load(macDeviceId: sourceDeviceId) else {
+                continue
+            }
+            for changeSet in sourceChangeSets where targetChangeSetsById[changeSet.id] == nil {
                 targetChangeSetsById[changeSet.id] = changeSet
                 changed = true
             }
+            mergedSourceIds.append(sourceDeviceId)
         }
 
-        guard changed else {
-            return false
+        if changed, !aiChangeSetPersistence.save(Array(targetChangeSetsById.values), macDeviceId: targetDeviceId) {
+            return (false, pending)
         }
 
-        aiChangeSetPersistence.save(Array(targetChangeSetsById.values), macDeviceId: targetDeviceId)
-        return true
+        for sourceDeviceId in mergedSourceIds {
+            aiChangeSetPersistence.delete(macDeviceId: sourceDeviceId)
+            pending.remove(sourceDeviceId)
+        }
+        return (changed, pending)
     }
 
     // Target values win so a current device's fresh settings are not overwritten by stale ids.

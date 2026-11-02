@@ -638,6 +638,9 @@ private extension CodexService {
     }
 
     func persistAIChangeSets() {
+        guard canPersistAIChangeSets else {
+            return
+        }
         aiChangeSetPersistence.save(
             aiChangeSetsByID.values.sorted {
                 if $0.createdAt != $1.createdAt {

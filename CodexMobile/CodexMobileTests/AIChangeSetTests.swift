@@ -9,6 +9,33 @@ import XCTest
 
 @MainActor
 final class AIChangeSetTests: XCTestCase {
+    func testLegacyLedgerMigratesWithoutLeavingPatchTextOnDisk() throws {
+        let macDeviceId = "change-set-migration-\(UUID())"
+        let fileManager = FileManager.default
+        let base = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? fileManager.temporaryDirectory
+        let directory = base
+            .appendingPathComponent(Bundle.main.bundleIdentifier ?? "com.codexmobile.app")
+            .appendingPathComponent("mac")
+            .appendingPathComponent(macDeviceId)
+        let fileURL = directory.appendingPathComponent("codex-ai-change-sets-v1.json")
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: directory) }
+        let changeSet = AIChangeSet(
+            id: "change",
+            threadId: "thread",
+            turnId: "turn",
+            source: .turnDiff,
+            forwardUnifiedPatch: "confidential patch text"
+        )
+        try JSONEncoder().encode([changeSet]).write(to: fileURL)
+
+        XCTAssertEqual(AIChangeSetPersistence().load(macDeviceId: macDeviceId), [changeSet])
+        let encrypted = try Data(contentsOf: fileURL)
+        XCTAssertNil(encrypted.range(of: Data(changeSet.forwardUnifiedPatch.utf8)))
+        XCTAssertEqual(AIChangeSetPersistence().load(macDeviceId: macDeviceId), [changeSet])
+    }
+
     func testUnifiedPatchParserExtractsSingleFileUpdate() {
         let patch = """
         diff --git a/Sources/App.swift b/Sources/App.swift

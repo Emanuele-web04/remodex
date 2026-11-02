@@ -101,6 +101,13 @@ enum SecureStore {
         SecItemAdd(query as CFDictionary, nil)
     }
 
+    // Creates key material without replacing an existing item on a transient read failure.
+    nonisolated static func addDataIfAbsent(_ value: Data, for key: String) {
+        var query = baseQuery(for: key)
+        query[kSecValueData as String] = value
+        SecItemAdd(query as CFDictionary, nil)
+    }
+
     // Convenience wrapper for small Codable payloads kept in Keychain.
     nonisolated static func readCodable<Value: Decodable>(_ type: Value.Type, for key: String) -> Value? {
         guard let data = readData(for: key) else {
