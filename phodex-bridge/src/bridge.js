@@ -99,6 +99,7 @@ const { buildApplyPatchFileChangeItem } = require("./apply-patch-changes");
 
 const execFileAsync = promisify(execFile);
 const RELAY_HISTORY_IMAGE_REFERENCE_URL = "remodex://history-image-elided";
+const MAX_ENDPOINT_REPLY_PLAINTEXT_BYTES = 11 * 1024 * 1024;
 const RELAY_THREAD_PAYLOAD_SOFT_LIMIT_BYTES = 4 * 1024 * 1024;
 const OPEN_CODE_THREAD_LIST_CURSOR_PREFIX = "remodex-opencode-list-v1:";
 const THREAD_LIST_DEFAULT_LIMIT = 100;
@@ -1545,26 +1546,29 @@ function startBridge({
     const outboundMessage = parsedMessage || parseBridgeMessage(rawMessage);
     pushNotificationTracker.handleOutbound(rawMessage, outboundMessage);
     const responseId = outboundMessage?.id;
+    const replyId = config.codexEndpoint && responseId != null
+      && (hasOwn(outboundMessage, "result") || hasOwn(outboundMessage, "error") || hasOwn(outboundMessage, "payload"))
+      ? responseId : null;
     const requestKey = responseId == null ? "" : String(responseId);
     const listRequest = pendingOpenCodeThreadListRequests.get(requestKey);
     const sanitizedMessage = sanitizeRelayBoundCodexMessage(rawMessage, outboundMessage);
     if (!listRequest || !sanitizedMessage) {
-      secureTransport.queueOutboundApplicationMessage(sanitizedMessage, sendRelayWireMessage);
+      queueEndpointBoundResponse(sanitizedMessage, replyId);
       return;
     }
 
     pendingOpenCodeThreadListRequests.delete(requestKey);
     if (safeParseJSON(sanitizedMessage)?.error) {
-      secureTransport.queueOutboundApplicationMessage(sanitizedMessage, sendRelayWireMessage);
+      queueEndpointBoundResponse(sanitizedMessage, replyId);
       return;
     }
-    const sendMerged = () => secureTransport.queueOutboundApplicationMessage(
+    const sendMerged = () => queueEndpointBoundResponse(
       mergeOpenCodeThreadsIntoListResponse(
         sanitizedMessage,
         [...(listRequest.archived ? archivedOpenCodeThreadCatalog : openCodeThreadCatalog).values()],
         listRequest
       ),
-      sendRelayWireMessage
+      replyId
     );
     if (listRequest.cursor) {
       sendMerged();
@@ -1576,6 +1580,17 @@ function startBridge({
       refresh,
       new Promise((resolve) => setTimeout(resolve, timeoutMs)),
     ]).then(sendMerged);
+  }
+
+  function queueEndpointBoundResponse(payload, replyId) {
+    if (replyId != null && payload && Buffer.byteLength(payload) > RELAY_THREAD_PAYLOAD_SOFT_LIMIT_BYTES
+      && Buffer.byteLength(JSON.stringify(payload)) > MAX_ENDPOINT_REPLY_PLAINTEXT_BYTES) {
+      // Keep room for the encrypted base64 envelope under the phone's 16 MiB frame limit.
+      payload = createJsonRpcErrorResponse(
+        replyId, new Error("The Codex endpoint response is too large to send to the phone."), "relay_response_too_large"
+      );
+    }
+    secureTransport.queueOutboundApplicationMessage(payload, sendRelayWireMessage);
   }
 
   function refreshOpenCodeThreadCatalog() {
