@@ -1936,6 +1936,7 @@ function createDesktopIpcActionFollower({
       completedTurnIds,
       startedTurnIds
     );
+    return { completedTurnIds, startedTurnIds };
   }
 
   // iOS tracks one phone-visible active turn per thread. If parallel turn B was
@@ -2024,7 +2025,20 @@ function createDesktopIpcActionFollower({
       // completely different set of item IDs. Treat full snapshots as source
       // baselines: preserve only turn lifecycle, then seed. Item diffs resume
       // on subsequent patches and cannot replay hundreds of old rows.
-      emitDesktopSnapshotLifecycleTransition(threadId, liveState);
+      const { completedTurnIds } = emitDesktopSnapshotLifecycleTransition(threadId, liveState);
+      if (completedTurnIds.size > 0) {
+        // A terminal baseline can contain a final answer never sent as deltas.
+        // Reload canonical history once instead of replaying re-keyed items.
+        sendApplicationResponse(JSON.stringify({
+          method: "thread/replaced",
+          params: {
+            threadId,
+            remodexDesktopMirror: true,
+            remodexDesktopIpcMirror: true,
+            remodexActionSource: DESKTOP_IPC_ACTION_SOURCE,
+          },
+        }));
+      }
       emitNormalizedReviewOverlays(
         threadId,
         normalizedLiveIndexesByThreadId.get(threadId),

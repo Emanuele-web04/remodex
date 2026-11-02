@@ -7071,6 +7071,43 @@ test("desktop IPC follower completes either parallel active turn across normaliz
   );
 });
 
+test("desktop IPC follower repairs final history once after a canonical completion snapshot", async (t) => {
+  const { socketPath, state } = await startInitializedIpcTestServer(t, "remodex-ipc-final-history-");
+  const outbound = [];
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse(message) { outbound.push(JSON.parse(message)); },
+    requestTimeoutMs: 500,
+  });
+  t.after(() => follower.stopAll());
+  const threadId = "final-history-thread";
+  follower.observeInbound(JSON.stringify({ method: "thread/resume", params: { threadId } }));
+  await waitFor(() => state.socket);
+  const snapshot = (status, text) => {
+    const frame = backgroundConversationSnapshot(threadId, status, {
+      turnId: "latest-turn", items: [{ id: "answer", type: "agentMessage", text }],
+    });
+    frame.params.change.conversationState.turnHistory = {
+      kind: "canonical",
+      history: { entitiesByKey: { "turn:older": { turnId: "older", status: "completed", items: [] } }, isComplete: true },
+    };
+    return frame;
+  };
+  writeFrame(state.socket, snapshot("inProgress", "Working"));
+  await waitFor(() => outbound.some((message) => message.method === "thread/replaced"));
+  outbound.length = 0;
+  writeFrame(state.socket, snapshot("completed", "The final result"));
+  await waitFor(() => outbound.some((message) => message.method === "turn/completed"));
+  assert.equal(outbound.filter((message) => message.method === "thread/replaced").length, 1,
+    "terminal snapshot must request canonical final content before seeding it away");
+  assert.equal(outbound.some((message) => message.method?.startsWith("item/")), false,
+    "re-keyed baseline must not replay historical item lifecycles");
+  outbound.length = 0;
+  writeFrame(state.socket, snapshot("completed", "The final result"));
+  await wait(25);
+  assert.deepEqual(outbound, [], "repeated terminal snapshots must not reload history again");
+});
+
 test("desktop IPC follower bootstraps normalized active content produced during reconnect", async (t) => {
   const { socketPath, state } = await startInitializedIpcTestServer(
     t,
