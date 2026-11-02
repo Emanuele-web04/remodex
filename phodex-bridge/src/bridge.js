@@ -100,6 +100,7 @@ const { buildApplyPatchFileChangeItem } = require("./apply-patch-changes");
 const execFileAsync = promisify(execFile);
 const RELAY_HISTORY_IMAGE_REFERENCE_URL = "remodex://history-image-elided";
 const MAX_ENDPOINT_REPLY_PLAINTEXT_BYTES = 11 * 1024 * 1024;
+const BRIDGE_MANAGED_REQUEST_ID_PREFIX = "bridge-managed-";
 const RELAY_THREAD_PAYLOAD_SOFT_LIMIT_BYTES = 4 * 1024 * 1024;
 const OPEN_CODE_THREAD_LIST_CURSOR_PREFIX = "remodex-opencode-list-v1:";
 const THREAD_LIST_DEFAULT_LIMIT = 100;
@@ -114,6 +115,7 @@ const RELAY_TURNS_LIST_BUDGET_RESERVE_MS = 1_000;
 const RELAY_TURNS_LIST_MAX_INITIAL_LIMIT = 5;
 const RELAY_TURNS_LIST_SAFE_RETRY_LIMIT = 5;
 const RELAY_JSONL_TURNS_LIST_CACHE_TTL_MS = 30_000;
+const RELAY_JSONL_LATEST_TURN_MAX_TAIL_BYTES = 512 * 1024;
 const RELAY_JSONL_ARTIFACT_CACHE_TTL_MS = 2_000;
 const RELAY_JSONL_ARTIFACT_CACHE_MAX_ENTRIES = 128;
 // Session cwd is stable for a rollout file, but the same thread can later get a
@@ -1684,16 +1686,34 @@ function startBridge({
     const finalSanitizeContext = buildThreadTurnsListRelaySanitizeContext(request, {
       skipJsonlArtifactAugmentation,
     });
+    let payload = sanitizeThreadHistoryImagesForRelay(
+      JSON.stringify(response),
+      "thread/turns/list",
+      finalSanitizeContext
+    );
+    const params = request.params;
+    if (!skipJsonlArtifactAugmentation && !isEmptyTurnsListResponse(response)
+      && !hasRelayCursor(params.cursor) && params.remodexRequireCanonical !== true
+      && (params.sortDirection == null || params.sortDirection === "desc")
+      && (params.itemsView == null || params.itemsView === "full")
+      && !isThreadTurnStateProbeRequest(request)) {
+      // The normal artifact pass can warm the rollout path even on a cold
+      // first page. Recovery only uses an already known path and a small tail.
+      const merged = maybeBuildJsonlThreadTurnsListFallback(request, parseBridgeJSON(payload));
+      const mergedPayload = merged ? JSON.stringify(merged.response) : "";
+      if (mergedPayload && Buffer.byteLength(mergedPayload) <= RELAY_THREAD_PAYLOAD_SOFT_LIMIT_BYTES) {
+        // The canonical rows already carry their artifacts; only apply relay
+        // sanitization to the combined page without reading them again.
+        finalSanitizeContext.skipJsonlArtifactAugmentation = true;
+        payload = sanitizeThreadHistoryImagesForRelay(mergedPayload, "thread/turns/list", finalSanitizeContext);
+      }
+    }
     relaySanitizedResponseMethodsById.set(String(request.id), {
       method: "thread/turns/list",
       ...finalSanitizeContext,
       createdAt: Date.now(),
     });
-    sendResponse(sanitizeThreadHistoryImagesForRelay(
-      JSON.stringify(response),
-      "thread/turns/list",
-      finalSanitizeContext
-    ));
+    sendResponse(payload);
   }
 
   function maybeBuildJsonlThreadTurnsListFallback(request, response) {
@@ -1728,9 +1748,10 @@ function startBridge({
         : requestedLimit;
       const result = readThreadTurnsListPageFromSessionJsonl(rolloutPath, {
         threadId,
-        limit: firstPageLimit,
+        limit: responseIsEmpty ? firstPageLimit : 1,
         maxLimit: RELAY_TURNS_LIST_MAX_INITIAL_LIMIT,
         cursor: params.cursor,
+        ...(responseIsEmpty ? {} : { maxTailBytes: RELAY_JSONL_LATEST_TURN_MAX_TAIL_BYTES }),
       });
       const turnsKey = findTurnsListResultKey(result);
       if (!turnsKey || result[turnsKey].length === 0) {
@@ -1776,16 +1797,15 @@ function startBridge({
 
   function readCachedJsonlTurnsListRolloutPath(threadId) {
     const cached = jsonlTurnsListRolloutCacheByThread.get(threadId);
-    if (!cached) {
-      return "";
+    if (cached && Date.now() - cached.cachedAt <= RELAY_JSONL_TURNS_LIST_CACHE_TTL_MS) {
+      return cached.rolloutPath;
     }
-    if (Date.now() - cached.cachedAt > RELAY_JSONL_TURNS_LIST_CACHE_TTL_MS) {
-      jsonlTurnsListRolloutCacheByThread.delete(threadId);
-      return "";
-    }
-    // Non-empty app-server pages only consult this positive cache to avoid
-    // walking the sessions tree during ordinary pagination.
-    return cached.rolloutPath;
+    if (cached) jsonlTurnsListRolloutCacheByThread.delete(threadId);
+
+    const key = buildJsonlThreadCacheKey(resolveSessionsRoot(), threadId);
+    return jsonlArtifactItemsCacheByThread.get(key)?.rolloutPath
+      || jsonlThreadCwdCacheByThread.get(key)?.rolloutPath
+      || "";
   }
 
   function hasFreshJsonlTurnsListRolloutMiss(threadId) {
@@ -1844,7 +1864,7 @@ function startBridge({
       case "account/login/openOnMac":
         return openPendingAuthLoginOnMac(params);
       case "voice/resolveAuth":
-        return resolveVoiceAuth(sendCodexRequest);
+        return resolveVoiceAuth();
       default:
         throw new Error(`Unsupported bridge-managed account method: ${method}`);
     }
@@ -2358,7 +2378,7 @@ function startBridge({
   // Runs bridge-private JSON-RPC calls against the local app-server so token-bearing responses
   // can power bridge features like transcription without ever reaching the phone.
   function sendCodexRequest(method, params) {
-    const requestId = `bridge-managed-${randomBytes(12).toString("hex")}`;
+    const requestId = `${BRIDGE_MANAGED_REQUEST_ID_PREFIX}${randomBytes(12).toString("hex")}`;
     const payload = JSON.stringify({
       id: requestId,
       method,
@@ -2397,13 +2417,18 @@ function startBridge({
     }
 
     const responseId = typeof parsed?.id === "string" ? parsed.id : null;
-    if (!responseId) {
+    if (!responseId?.startsWith(BRIDGE_MANAGED_REQUEST_ID_PREFIX)) {
+      return false;
+    }
+    if (typeof parsed.method === "string"
+      && !hasOwn(parsed, "result") && !hasOwn(parsed, "error") && !hasOwn(parsed, "payload")) {
       return false;
     }
 
     const waiter = bridgeManagedCodexRequestWaiters.get(responseId);
     if (!waiter) {
-      return false;
+      // Private replies can carry credentials even after their caller timed out.
+      return true;
     }
 
     bridgeManagedCodexRequestWaiters.delete(responseId);
@@ -3138,25 +3163,15 @@ function isEmptyTurnsListResponse(response) {
   return Boolean(turnsKey) && response.result[turnsKey].length === 0;
 }
 
-// Non-empty app-server pages can be stale for Mac-started runs, so the first page
-// still gets one JSONL lookup when the positive rollout cache is cold.
+// An empty page can justify discovery; the canonical fast path only uses known rollout paths.
 function resolveJsonlTurnsListRolloutPathForFallback({
   threadId,
   responseIsEmpty,
   readCachedPath,
   findAndCachePath,
 }) {
-  if (!threadId || typeof findAndCachePath !== "function") {
-    return "";
-  }
-
-  if (responseIsEmpty) {
-    return findAndCachePath(threadId);
-  }
-
-  return typeof readCachedPath === "function"
-    ? readCachedPath(threadId) || findAndCachePath(threadId)
-    : findAndCachePath(threadId);
+  if (!threadId) return "";
+  return responseIsEmpty ? findAndCachePath?.(threadId) || "" : readCachedPath?.(threadId) || "";
 }
 
 function maybeMergeLatestJsonlTurnIntoTurnsListResponse(request, response, jsonlResult) {
@@ -3178,6 +3193,18 @@ function maybeMergeLatestJsonlTurnIntoTurnsListResponse(request, response, jsonl
     return null;
   }
 
+  const threadId = normalizeNonEmptyString(request.params?.threadId || request.params?.thread_id);
+  const jsonlThreadId = normalizeNonEmptyString(jsonlTurn.threadId || jsonlTurn.thread_id);
+  if (threadId && jsonlThreadId && threadId !== jsonlThreadId) {
+    return null;
+  }
+  const jsonlCreatedAt = threadListTimestamp(jsonlTurn.startedAt ?? jsonlTurn.started_at ?? jsonlTurn.createdAt ?? jsonlTurn.created_at);
+  if (jsonlCreatedAt && responseTurns.some((turn) => (
+    threadListTimestamp(turn.startedAt ?? turn.started_at ?? turn.createdAt ?? turn.created_at) >= jsonlCreatedAt
+  ))) {
+    return null;
+  }
+
   // Keep the canonical page intact. Slicing this back to the requested limit
   // can retain the newer JSONL turn while dropping the canonical cursor anchor,
   // making that canonical turn permanently unreachable.
@@ -3187,8 +3214,9 @@ function maybeMergeLatestJsonlTurnIntoTurnsListResponse(request, response, jsonl
     result: {
       ...responseResult,
       [responseTurnsKey]: mergedTurns,
+      // The cursor still belongs to the complete canonical page. Marking it
+      // provisional would cause iOS to ignore that cursor and force a rebase.
       remodexJsonlMergedLatest: true,
-      remodexJsonlFallback: true,
     },
   };
 }
@@ -3203,10 +3231,27 @@ function shouldMergeLatestJsonlTurn(turn) {
     return true;
   }
 
-  return Array.isArray(turn.items) && turn.items.some((item) => {
+  const items = Array.isArray(turn.items) ? turn.items : [];
+  if (items.some((item) => {
     const type = normalizeHistoryItemToken(item?.type);
     return type === "plan" || type === "filechange";
-  });
+  })) {
+    return true;
+  }
+
+  // A terminal rollout tail needs both sides of a real conversation turn.
+  // Metadata, truncated tails, and commentary alone cannot prove a lost answer.
+  return status === "completed"
+    && !isSyntheticJsonlHistoryTurnId(turnListTurnIdentifier(turn))
+    && items.some((item) => isUserRoleItem(item) && visibleUserPromptText(readUserItemText(item)))
+    && items.some((item) => {
+      const type = normalizeHistoryItemToken(item?.type);
+      const role = normalizeNonEmptyString(item?.role).toLowerCase();
+      const phase = normalizeHistoryItemToken(item?.phase);
+      return (type === "agentmessage" || type === "assistantmessage" || (type === "message" && role === "assistant"))
+        && (!phase || phase === "finalanswer")
+        && Boolean(relayHistoryItemText(item));
+    });
 }
 
 function turnListTurnIdentifier(turn) {

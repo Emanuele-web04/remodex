@@ -10,8 +10,7 @@ const path = require("path");
 const { readDaemonConfig } = require("./daemon-state");
 const { createThreadRolloutActivityWatcher } = require("./rollout-watch");
 
-const DEFAULT_BUNDLE_ID = "com.openai.codex";
-const DEFAULT_APP_PATH = "/Applications/Codex.app";
+const { DEFAULT_CODEX_BUNDLE_ID, resolveCodexAppPath } = require("./codex-desktop-app");
 const DEFAULT_DEBOUNCE_MS = 1200;
 const DEFAULT_FALLBACK_NEW_THREAD_MS = 2_000;
 const DEFAULT_MID_RUN_REFRESH_THROTTLE_MS = 3_000;
@@ -34,8 +33,8 @@ class CodexDesktopRefresher {
     navigationOnly = false,
     debounceMs = DEFAULT_DEBOUNCE_MS,
     refreshCommand = "",
-    bundleId = DEFAULT_BUNDLE_ID,
-    appPath = DEFAULT_APP_PATH,
+    bundleId = DEFAULT_CODEX_BUNDLE_ID,
+    appPath = resolveCodexAppPath({ bundleId }),
     logPrefix = "[remodex]",
     fallbackNewThreadMs = DEFAULT_FALLBACK_NEW_THREAD_MS,
     midRunRefreshThrottleMs = DEFAULT_MID_RUN_REFRESH_THROTTLE_MS,
@@ -745,6 +744,7 @@ function readBridgeConfig({
   const desktopIpcLiveSyncEnabled = explicitDesktopIpcLiveSyncEnabled == null
     ? true
     : explicitDesktopIpcLiveSyncEnabled;
+  const codexBundleId = readFirstDefinedEnv(["REMODEX_CODEX_BUNDLE_ID"], DEFAULT_CODEX_BUNDLE_ID, env);
   return {
     relayUrl,
     pushServiceUrl: readFirstDefinedEnv(
@@ -779,8 +779,14 @@ function readBridgeConfig({
       75
     ),
     refreshCommand,
-    codexBundleId: readFirstDefinedEnv(["REMODEX_CODEX_BUNDLE_ID"], DEFAULT_BUNDLE_ID, env),
-    codexAppPath: DEFAULT_APP_PATH,
+    codexBundleId,
+    codexAppPath: resolveCodexAppPath({
+      appPath: readFirstDefinedEnv(["REMODEX_CODEX_APP_PATH"], "", env),
+      bundleId: codexBundleId,
+      platform,
+      homeDir: env.HOME,
+      fsImpl,
+    }),
   };
 }
 

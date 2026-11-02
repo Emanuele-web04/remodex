@@ -164,6 +164,26 @@ test("readBridgeConfig keeps safe defaults and explicit overrides", () => {
   assert.equal(explicitAutoFollowOffConfig.desktopAutoFollowEnabled, false);
 });
 
+test("readBridgeConfig discovers the current Desktop bundle and honors an explicit path", () => {
+  const modernBundle = "/Applications/ChatGPT.app";
+  const modernBinary = path.join(modernBundle, "Contents", "Resources", "codex-cli", "bin", "codex");
+  const options = {
+    platform: "darwin",
+    fsImpl: {
+      existsSync: () => false,
+      statSync(targetPath) {
+        if (targetPath === modernBinary) return { isFile: () => true };
+        throw new Error("file not found");
+      },
+    },
+  };
+  assert.equal(readBridgeConfig({ ...options, env: {} }).codexAppPath, modernBundle);
+  assert.equal(readBridgeConfig({
+    ...options,
+    env: { REMODEX_CODEX_APP_PATH: "/custom/Codex.app" },
+  }).codexAppPath, "/custom/Codex.app");
+});
+
 test("readBridgeConfig uses only the packaged relay default outside a source checkout", () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-package-"));
   const srcDir = path.join(tempRoot, "src");

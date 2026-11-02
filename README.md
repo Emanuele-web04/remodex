@@ -335,19 +335,16 @@ remodex watch
 
 ## Environment Variables
 
-`REMODEX_RELAY` is optional, but the default depends on how you got Remodex:
-
-- public GitHub/source checkouts stay open-source and self-host friendly, so they do not ship with a hosted relay baked in
-- official published packages may include a default relay at publish time
-- if you are running from source, assume you should use `./run-local-remodex.sh` or set `REMODEX_RELAY` yourself
+Start the local relay and bridge with `./run-local-remodex.sh`, or set `REMODEX_RELAY` to a relay you control. The source checkout does not include a default remote relay.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `REMODEX_RELAY` | empty in source checkouts; optional in published packages | Session base URL used for QR bootstrap, trusted-session resolve, and phone/Mac session routing |
+| `REMODEX_RELAY` | configured by the local launcher, otherwise unset in source checkouts | Session base URL used for QR bootstrap, trusted-session resolve, and phone/Mac session routing |
 | `REMODEX_PUSH_SERVICE_URL` | disabled by default | Optional HTTP base URL for managed push registration/completion |
 | `REMODEX_CODEX_ENDPOINT` | — | Connect to an existing Codex WebSocket instead of spawning a local `codex app-server` |
 | `REMODEX_CODEX_ENDPOINT_INITIALIZE` | `false` | Perform the app-server handshake before connecting to the relay |
 | `REMODEX_CODEX_ENDPOINT_METHODS` | — | Comma-separated Remodex RPCs a custom Codex endpoint handles in place of the local bridge |
+| `REMODEX_CODEX_APP_PATH` | auto-detected on macOS | Override the local ChatGPT or Codex desktop bundle used for the bundled CLI and handoff |
 | `REMODEX_OPENCODE_BIN` | `~/.opencode/bin/opencode` | Path to the local OpenCode executable if installed elsewhere |
 | `REMODEX_DESKTOP_IPC_LIVE_SYNC` | `true` | Broadcast Remodex-owned active threads over the local Codex Desktop / VSCode IPC bus |
 | `REMODEX_DESKTOP_AUTO_FOLLOW` | `false` | Explicitly opt in to opening phone-driven threads in Codex Desktop |

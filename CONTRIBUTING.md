@@ -99,7 +99,9 @@ open CodexMobile.xcodeproj
 2. Pick a target device (physical iPhone or simulator)
 3. Build and run (Cmd+R)
 
-The app uses SwiftUI and the current project target is iOS 18.6. No CocoaPods or SPM dependencies — it's a standalone Xcode project.
+The app uses SwiftUI and the current project target is iOS 18.6.
+
+The Xcode project uses Swift Package Manager for its dependencies, including RevenueCat, Citadel, RemodexTextKit, Runestone, and TreeSitterLanguages. Let Xcode resolve these packages before building. The checked-in [Package.resolved](CodexMobile/CodexMobile.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved) records the resolved package revisions. No CocoaPods setup is required.
 
 ### Testing a full local session
 

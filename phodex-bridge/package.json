@@ -2,6 +2,15 @@
   "name": "remodex",
   "version": "4.0.0",
   "description": "Local bridge between Codex and the Remodex mobile app. Run `remodex up` to start.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Emanuele-web04/remodex.git",
+    "directory": "phodex-bridge"
+  },
+  "homepage": "https://github.com/Emanuele-web04/remodex#readme",
+  "bugs": {
+    "url": "https://github.com/Emanuele-web04/remodex/issues"
+  },
   "main": "src/index.js",
   "bin": {
     "remodex": "bin/remodex.js",

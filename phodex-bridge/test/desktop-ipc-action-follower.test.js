@@ -5191,14 +5191,17 @@ test("desktop IPC follower keeps an expired held mutation behind pending resume 
   assert.equal(transport.state.frames.some((frame) => frame.method === "thread-follower-start-turn"), false);
 });
 
-for (const [desktopError, expectedMessage] of [
+for (const [desktopError, expectedMessage, expectedErrorCode] of [
   ["ActiveTurnNotSteerable: the turn already completed", "ActiveTurnNotSteerable: the turn already completed"],
-  ["request-timeout", "Could not continue this Codex Desktop-owned thread from the phone."],
+  ["Cannot steer conversation stale-steer-task because its active turn already ended",
+    "The active run ended before this message could steer it.", "desktop_steer_turn_ended"],
+  ["request-timeout", "Could not continue this Codex Desktop-owned thread from the phone.", "desktop_steer_delivery_unknown"],
+  [null, "Could not continue this Codex Desktop-owned thread from the phone.", "desktop_steer_delivery_unknown"],
 ]) {
   test(`desktop IPC follower reports steer rejection ${desktopError} without replay`, async (t) => {
     const transport = createFakeIpcTransport({
       onRequest(frame, socket) {
-        if (frame.method !== "thread-follower-steer-turn") return;
+        if (frame.method !== "thread-follower-steer-turn" || !desktopError) return;
         emitFrame(socket, {
           type: "response", requestId: frame.requestId,
           resultType: "error", method: frame.method,
@@ -5225,6 +5228,7 @@ for (const [desktopError, expectedMessage] of [
     await waitFor(() => outbound.some((message) => message.id === "phone-stale-steer"));
     assert.equal(outbound[0].error?.code, -32000);
     assert.equal(outbound[0].error?.message, expectedMessage);
+    assert.equal(outbound[0].error?.data?.errorCode, expectedErrorCode);
     assert.deepEqual(localForwards, []);
     assert.equal(transport.state.frames.filter((frame) => frame.method === "thread-follower-steer-turn").length, 1);
   });
@@ -7069,6 +7073,43 @@ test("desktop IPC follower completes either parallel active turn across normaliz
     )),
     false
   );
+});
+
+test("desktop IPC follower repairs final history once after a canonical completion snapshot", async (t) => {
+  const { socketPath, state } = await startInitializedIpcTestServer(t, "remodex-ipc-final-history-");
+  const outbound = [];
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse(message) { outbound.push(JSON.parse(message)); },
+    requestTimeoutMs: 500,
+  });
+  t.after(() => follower.stopAll());
+  const threadId = "final-history-thread";
+  follower.observeInbound(JSON.stringify({ method: "thread/resume", params: { threadId } }));
+  await waitFor(() => state.socket);
+  const snapshot = (status, text) => {
+    const frame = backgroundConversationSnapshot(threadId, status, {
+      turnId: "latest-turn", items: [{ id: "answer", type: "agentMessage", text }],
+    });
+    frame.params.change.conversationState.turnHistory = {
+      kind: "canonical",
+      history: { entitiesByKey: { "turn:older": { turnId: "older", status: "completed", items: [] } }, isComplete: true },
+    };
+    return frame;
+  };
+  writeFrame(state.socket, snapshot("inProgress", "Working"));
+  await waitFor(() => outbound.some((message) => message.method === "thread/replaced"));
+  outbound.length = 0;
+  writeFrame(state.socket, snapshot("completed", "The final result"));
+  await waitFor(() => outbound.some((message) => message.method === "turn/completed"));
+  assert.equal(outbound.filter((message) => message.method === "thread/replaced").length, 1,
+    "terminal snapshot must request canonical final content before seeding it away");
+  assert.equal(outbound.some((message) => message.method?.startsWith("item/")), false,
+    "re-keyed baseline must not replay historical item lifecycles");
+  outbound.length = 0;
+  writeFrame(state.socket, snapshot("completed", "The final result"));
+  await wait(25);
+  assert.deepEqual(outbound, [], "repeated terminal snapshots must not reload history again");
 });
 
 test("desktop IPC follower bootstraps normalized active content produced during reconnect", async (t) => {

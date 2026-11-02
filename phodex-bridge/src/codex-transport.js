@@ -8,6 +8,7 @@ const { spawn } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const WebSocket = require("ws");
+const { resolveBundledCodexCommand, resolveCodexAppPath } = require("./codex-desktop-app");
 
 function createCodexTransport({
   endpoint = "",
@@ -200,7 +201,10 @@ function createCodexLaunchPlans({
     description: "`codex app-server`",
   }];
 
-  const bundledCommand = buildBundledCodexPath(appPath, { fsImpl, pathImpl });
+  const bundledCommand = resolveBundledCodexCommand(
+    resolveCodexAppPath({ appPath, platform, homeDir: env.HOME, fsImpl }),
+    { fsImpl, pathImpl }
+  );
   if (bundledCommand) {
     launches.push({
       command: bundledCommand,
@@ -211,23 +215,6 @@ function createCodexLaunchPlans({
   }
 
   return launches;
-}
-
-function buildBundledCodexPath(appPath, { fsImpl = fs, pathImpl = path } = {}) {
-  if (typeof appPath !== "string" || !appPath.trim()) {
-    return "";
-  }
-
-  const candidate = pathImpl.join(appPath.trim(), "Contents", "Resources", "codex");
-  return isLaunchableFile(candidate, { fsImpl }) ? candidate : "";
-}
-
-function isLaunchableFile(candidatePath, { fsImpl = fs } = {}) {
-  try {
-    return fsImpl.statSync(candidatePath).isFile();
-  } catch {
-    return false;
-  }
 }
 
 // Stops the exact process tree we launched on Windows so the shell wrapper

@@ -12,6 +12,8 @@ const os = require("node:os");
 const path = require("node:path");
 const {
   buildThreadReadStateContext,
+  createFrameReader,
+  MAX_FRAME_BYTES,
   isContextualUserText,
   isThreadTurnStateProbeRequest,
   resolveDefaultIpcSocketPath,
@@ -21,6 +23,61 @@ const {
   sanitizeUserRoleItem,
   visibleUserPromptText,
 } = require("../src/desktop-ipc-shared");
+
+test("Desktop IPC processes fragmented frames with linear buffer copying", (t) => {
+  const frames = [];
+  const reader = createFrameReader({ onFrame: (frame) => frames.push(frame) });
+  const expected = { text: "é".repeat(64 * 1024) };
+  const body = Buffer.from(JSON.stringify(expected));
+  const header = Buffer.alloc(4);
+  header.writeUInt32LE(body.length);
+
+  let copiedBytes = 0;
+  const concat = Buffer.concat;
+  const copy = Buffer.prototype.copy;
+  t.mock.method(Buffer, "concat", (parts, size) => {
+    copiedBytes += size ?? parts.reduce((total, part) => total + part.length, 0);
+    return concat(parts, size);
+  });
+  t.mock.method(Buffer.prototype, "copy", function (...args) {
+    const copied = copy.apply(this, args);
+    copiedBytes += copied;
+    return copied;
+  });
+
+  reader.push(header.subarray(0, 1));
+  reader.push(header.subarray(1));
+  for (let offset = 0; offset < body.length; offset += 257) {
+    reader.push(body.subarray(offset, offset + 257));
+  }
+
+  assert.deepEqual(frames, [expected]);
+  assert.ok(copiedBytes <= 4 * body.length, `Copied ${copiedBytes} bytes for a ${body.length}-byte frame`);
+});
+
+test("Desktop IPC discards malformed frames and resets after an oversized header", () => {
+  const frames = [];
+  let overflows = 0;
+  const reader = createFrameReader({
+    onFrame: (frame) => frames.push(frame),
+    onOverflow: () => overflows++,
+  });
+  const frame = (body) => {
+    const header = Buffer.alloc(4);
+    header.writeUInt32LE(Buffer.byteLength(body));
+    return Buffer.concat([header, Buffer.from(body)]);
+  };
+  const overLimitHeader = Buffer.alloc(4);
+  overLimitHeader.writeUInt32LE(MAX_FRAME_BYTES + 1);
+  reader.push(Buffer.concat([frame('{"first":true}'), frame("malformed"), frame('{"second":true}')]));
+  reader.push(Buffer.concat([overLimitHeader, frame('{"discard":true}')]));
+  reader.push(frame('{"partial":true}').subarray(0, 8));
+  reader.reset();
+  reader.push(frame('{"next":true}'));
+
+  assert.equal(overflows, 1);
+  assert.deepEqual(frames, [{ first: true }, { second: true }, { next: true }]);
+});
 
 test("Desktop read-state v3 carries account identity without bearer tokens", () => {
   const payload = {

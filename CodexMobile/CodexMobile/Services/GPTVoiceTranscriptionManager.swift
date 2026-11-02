@@ -33,8 +33,6 @@ enum GPTVoiceTranscriptionError: LocalizedError {
     case unableToConfigureAudioSession
     case unableToPrepareAudioEngine
     case unableToCreateOutputFile
-    case transcriptionFailed(String)
-    case authExpired
 
     var errorDescription: String? {
         switch self {
@@ -52,10 +50,6 @@ enum GPTVoiceTranscriptionError: LocalizedError {
             return "Unable to prepare the microphone recorder."
         case .unableToCreateOutputFile:
             return "Unable to create the temporary audio file."
-        case .transcriptionFailed(let message):
-            return message
-        case .authExpired:
-            return "Your ChatGPT login has expired. Sign in again."
         }
     }
 }
@@ -637,84 +631,6 @@ final class GPTVoiceTranscriptionManager: ObservableObject {
     }
 }
 
-// ─── Direct ChatGPT transcription ────────────────────────────────
-
-extension GPTVoiceTranscriptionManager {
-    private static let chatGPTTranscriptionURL = URL(string: "https://chatgpt.com/backend-api/transcribe")!
-    static var transcribeOverride: ((Data, String) async throws -> String)?
-
-    static func transcribe(wavData: Data, token: String) async throws -> String {
-        try await transcribe(audioData: wavData, mimeType: wavMimeType, token: token)
-    }
-
-    static func transcribe(audioData: Data, mimeType: String, token: String) async throws -> String {
-        if let transcribeOverride {
-            return try await transcribeOverride(audioData, token)
-        }
-
-        let normalizedToken = token
-            .replacingOccurrences(of: #"(?i)^bearer\s+"#, with: "", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalizedToken.isEmpty else {
-            throw GPTVoiceTranscriptionError.authExpired
-        }
-
-        let boundary = "Remodex-\(UUID().uuidString)"
-
-        var body = Data()
-        let fileExtension = mimeType == m4aMimeType ? "m4a" : "wav"
-        body.appendUTF8("--\(boundary)\r\n")
-        body.appendUTF8("Content-Disposition: form-data; name=\"file\"; filename=\"voice.\(fileExtension)\"\r\n")
-        body.appendUTF8("Content-Type: \(mimeType)\r\n\r\n")
-        body.append(audioData)
-        body.appendUTF8("\r\n--\(boundary)--\r\n")
-
-        var request = URLRequest(url: chatGPTTranscriptionURL)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(normalizedToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-        request.httpBody = body
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-
-        guard let http = response as? HTTPURLResponse else {
-            throw GPTVoiceTranscriptionError.transcriptionFailed("Invalid HTTP response.")
-        }
-
-        if http.statusCode == 401 || http.statusCode == 403 {
-            throw GPTVoiceTranscriptionError.authExpired
-        }
-
-        guard (200..<300).contains(http.statusCode) else {
-            let serverMessage = extractErrorMessage(from: data)
-            throw GPTVoiceTranscriptionError.transcriptionFailed(
-                serverMessage ?? "Transcription failed (\(http.statusCode))."
-            )
-        }
-
-        return try decodeTranscriptText(from: data)
-    }
-
-    private static func extractErrorMessage(from data: Data) -> String? {
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
-        if let errorObj = json["error"] as? [String: Any], let msg = errorObj["message"] as? String { return msg }
-        return json["message"] as? String
-    }
-
-    private static func decodeTranscriptText(from data: Data) throws -> String {
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw GPTVoiceTranscriptionError.transcriptionFailed("Could not parse transcript response.")
-        }
-        for key in ["text", "transcript"] {
-            if let text = json[key] as? String,
-               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                return text.trimmingCharacters(in: .whitespacesAndNewlines)
-            }
-        }
-        throw GPTVoiceTranscriptionError.transcriptionFailed("Transcript response was empty.")
-    }
-}
-
 // ─── Thread-safe sample collector ────────────────────────────────
 
 // Converts the audio-thread sample stream into one normalized waveform level
@@ -888,12 +804,6 @@ private final class AudioSampleCollector: @unchecked Sendable {
 // ─── Data helpers ────────────────────────────────────────────────
 
 private extension Data {
-    mutating func appendUTF8(_ string: String) {
-        if let data = string.data(using: .utf8) {
-            append(data)
-        }
-    }
-
     mutating func appendLE<T: FixedWidthInteger>(_ value: T) {
         var le = value.littleEndian
         Swift.withUnsafeBytes(of: &le) { append(contentsOf: $0) }
