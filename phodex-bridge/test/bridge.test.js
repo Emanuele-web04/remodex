@@ -1019,7 +1019,7 @@ test("newer JSONL turns never displace the canonical cursor anchor at limit one"
 
 test("completed text-only JSONL turns recover once without replacing the canonical cursor", () => {
   const request = { id: "history", params: { threadId: "thread", limit: 1 } };
-  const canonicalTurn = { id: "older", createdAt: "2026-11-01T10:00:00Z", status: "completed", items: [] };
+  const canonicalTurn = { id: "older", startedAt: Date.parse("2026-11-01T10:00:00Z") / 1000, status: "completed", items: [] };
   const response = { id: request.id, result: { data: [canonicalTurn], nextCursor: "older-page" } };
   const turn = {
     id: "latest", threadId: "thread", createdAt: "2026-11-01T10:01:00Z", status: "completed",

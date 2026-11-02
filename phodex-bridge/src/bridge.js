@@ -3121,9 +3121,9 @@ function maybeMergeLatestJsonlTurnIntoTurnsListResponse(request, response, jsonl
   if (threadId && jsonlThreadId && threadId !== jsonlThreadId) {
     return null;
   }
-  const jsonlCreatedAt = threadListTimestamp(jsonlTurn.createdAt ?? jsonlTurn.created_at);
+  const jsonlCreatedAt = threadListTimestamp(jsonlTurn.startedAt ?? jsonlTurn.started_at ?? jsonlTurn.createdAt ?? jsonlTurn.created_at);
   if (jsonlCreatedAt && responseTurns.some((turn) => (
-    threadListTimestamp(turn.createdAt ?? turn.created_at) >= jsonlCreatedAt
+    threadListTimestamp(turn.startedAt ?? turn.started_at ?? turn.createdAt ?? turn.created_at) >= jsonlCreatedAt
   ))) {
     return null;
   }
