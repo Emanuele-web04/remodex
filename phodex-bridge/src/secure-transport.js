@@ -169,7 +169,7 @@ function createBridgeSecureTransport({
       return;
     }
 
-    if (handshakeMode === HANDSHAKE_MODE_QR_BOOTSTRAP && Date.now() > currentPairingExpiresAt) {
+    if (handshakeMode === HANDSHAKE_MODE_QR_BOOTSTRAP && Date.now() >= currentPairingExpiresAt) {
       sendControlMessage(createSecureError({
         code: "pairing_expired",
         message: "The pairing QR code has expired. Generate a new QR code from the bridge.",
@@ -252,7 +252,6 @@ function createBridgeSecureTransport({
       transcriptBytes,
       expiresAtForTranscript,
     };
-    activeSession = null;
 
     sendControlMessage({
       kind: "serverHello",
@@ -299,6 +298,16 @@ function createBridgeSecureTransport({
       return;
     }
 
+    if (pendingHandshake.handshakeMode === HANDSHAKE_MODE_QR_BOOTSTRAP
+      && Date.now() >= pendingHandshake.expiresAtForTranscript) {
+      pendingHandshake = null;
+      sendControlMessage(createSecureError({
+        code: "pairing_expired",
+        message: "The pairing QR code has expired. Generate a new QR code from the bridge.",
+      }));
+      return;
+    }
+
     const clientAuthTranscript = Buffer.concat([
       pendingHandshake.transcriptBytes,
       encodeLengthPrefixedUTF8("client-auth"),
@@ -317,25 +326,35 @@ function createBridgeSecureTransport({
       return;
     }
 
-    const sharedSecret = diffieHellman({
-      privateKey: createPrivateKey({
-        key: {
-          crv: "X25519",
-          d: base64ToBase64Url(pendingHandshake.macEphemeralPrivateKey),
-          kty: "OKP",
-          x: base64ToBase64Url(pendingHandshake.macEphemeralPublicKey),
-        },
-        format: "jwk",
-      }),
-      publicKey: createPublicKey({
-        key: {
-          crv: "X25519",
-          kty: "OKP",
-          x: base64ToBase64Url(pendingHandshake.phoneEphemeralPublicKey),
-        },
-        format: "jwk",
-      }),
-    });
+    let sharedSecret;
+    try {
+      sharedSecret = diffieHellman({
+        privateKey: createPrivateKey({
+          key: {
+            crv: "X25519",
+            d: base64ToBase64Url(pendingHandshake.macEphemeralPrivateKey),
+            kty: "OKP",
+            x: base64ToBase64Url(pendingHandshake.macEphemeralPublicKey),
+          },
+          format: "jwk",
+        }),
+        publicKey: createPublicKey({
+          key: {
+            crv: "X25519",
+            kty: "OKP",
+            x: base64ToBase64Url(pendingHandshake.phoneEphemeralPublicKey),
+          },
+          format: "jwk",
+        }),
+      });
+    } catch {
+      pendingHandshake = null;
+      sendControlMessage(createSecureError({
+        code: "invalid_phone_ephemeral_key",
+        message: "The iPhone secure key could not be used. Try connecting again.",
+      }));
+      return;
+    }
     const salt = createHash("sha256").update(pendingHandshake.transcriptBytes).digest();
     const infoPrefix = [
       HANDSHAKE_TAG,
