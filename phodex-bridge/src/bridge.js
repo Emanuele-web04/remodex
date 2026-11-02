@@ -35,7 +35,7 @@ const { handleDesktopRequest } = require("./desktop-handler");
 const { readDaemonConfig, writeDaemonConfig } = require("./daemon-state");
 const { handleGitRequest } = require("./git-handler");
 const { handleThreadContextRequest } = require("./thread-context-handler");
-const { handleWorkspaceRequest } = require("./workspace-handler");
+const { handleWorkspaceRequest, workspaceImageResponseFits } = require("./workspace-handler");
 const { handleProjectRequest, isBridgeProjectMethod } = require("./project-handler");
 const { handlePetRequest } = require("./pet-handler");
 const { createNotificationsHandler } = require("./notifications-handler");
@@ -787,6 +787,7 @@ function startBridge({
 
   // Keep the local Codex runtime alive across transient relay disconnects.
   let socket = null;
+  let pairingSession = null;
   let isShuttingDown = false;
   let reconnectAttempt = 0;
   let reconnectTimer = null;
@@ -1008,6 +1009,7 @@ function startBridge({
 
   // A stock endpoint initializes once per socket, independently of phone reconnects.
   codex.onStarted(async () => {
+    if (isShuttingDown) return;
     if (initializeEndpoint) {
       try {
         await sendCodexRequest("initialize", {
@@ -1025,7 +1027,7 @@ function startBridge({
     codexLaunchState = "connected";
     const lastPublishedBridgeStatus = bridgeStatusPublisher.latest();
     if (lastPublishedBridgeStatus) publishBridgeStatus(lastPublishedBridgeStatus);
-    if (initializeEndpoint) connectRelay();
+    if (initializeEndpoint) beginPairingAndConnectRelay();
   });
 
   function clearReconnectTimer() {
@@ -1222,17 +1224,18 @@ function startBridge({
     });
   }
 
-  const pairingPayload = secureTransport.createPairingPayload();
-  const pairingSession = {
-    pairingPayload,
-    pairingCode: createShortPairingCode({ length: SHORT_PAIRING_CODE_LENGTH }),
-  };
-  onPairingSession?.(pairingSession);
-  if (printPairingQr) {
-    printQR(pairingSession);
+  function beginPairingAndConnectRelay() {
+    pairingSession = {
+      pairingPayload: secureTransport.createPairingPayload(),
+      pairingCode: createShortPairingCode({ length: SHORT_PAIRING_CODE_LENGTH }),
+    };
+    onPairingSession?.(pairingSession);
+    if (printPairingQr) printQR(pairingSession);
+    connectRelay();
   }
+
   pushServiceClient.logUnavailable();
-  if (!initializeEndpoint) connectRelay();
+  if (!initializeEndpoint) beginPairingAndConnectRelay();
 
   codex.onMessage((message) => {
     // Streaming deltas make this the hottest path in the bridge: parse the
@@ -1927,7 +1930,15 @@ function startBridge({
         createdAt: Date.now(),
       });
     }
-    if (relaySanitizedRequestMethods.has(method)) {
+    if (method === "workspace/readImage" && endpointMethods.has(method)) {
+      const dimension = parsed.params?.maxPixelDimension || parsed.params?.previewMaxPixelDimension;
+      relaySanitizedResponseMethodsById.set(String(requestId), {
+        method,
+        maxPixelDimension: typeof dimension === "number" || typeof dimension === "string"
+          ? Number(dimension) : undefined,
+        createdAt: Date.now(),
+      });
+    } else if (relaySanitizedRequestMethods.has(method)) {
       const trackedRequest = {
         method,
         isActiveThreadCatalog: method === "thread/list"
@@ -1992,6 +2003,15 @@ function startBridge({
       return normalizedMessage;
     }
     relaySanitizedResponseMethodsById.delete(String(responseId));
+
+    if (trackedRequest.method === "workspace/readImage") {
+      if (!workspaceImageResponseFits(trackedRequest, parsed.result, Buffer.byteLength(normalizedMessage))) {
+        return createJsonRpcErrorResponse(
+          responseId, new Error("This image is too large to send to the phone."), "image_too_large"
+        );
+      }
+      return normalizedMessage;
+    }
 
     if (trackedRequest.method === "thread/list"
       || trackedRequest.method === "thread/read"

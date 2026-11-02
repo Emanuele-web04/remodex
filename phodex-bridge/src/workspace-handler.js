@@ -257,6 +257,16 @@ async function workspaceReadImage(params) {
   };
 }
 
+// Enforce the same limits when a configured endpoint supplies the image bytes.
+function workspaceImageResponseFits(params, result, responseBytes) {
+  const isPreview = normalizedPreviewPixelDimension(params) || result?.mimeType === "image/svg+xml";
+  const limit = isPreview ? MAX_IMAGE_PREVIEW_READ_BYTES : MAX_IMAGE_READ_BYTES;
+  const data = result?.dataBase64;
+  const maxEnvelopeBytes = Math.ceil(limit / 3) * 4 + 64 * 1024;
+  return responseBytes <= maxEnvelopeBytes
+    && (typeof data !== "string" || Buffer.byteLength(data, "base64") <= limit);
+}
+
 function normalizedPreviewPixelDimension(params) {
   const requested = Number(params.maxPixelDimension || params.previewMaxPixelDimension);
   if (!Number.isFinite(requested) || requested <= 0) {
@@ -1379,4 +1389,4 @@ function git(cwd, ...args) {
     });
 }
 
-module.exports = { handleWorkspaceMethod, handleWorkspaceRequest };
+module.exports = { handleWorkspaceMethod, handleWorkspaceRequest, workspaceImageResponseFits };
