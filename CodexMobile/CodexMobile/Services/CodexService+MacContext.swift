@@ -259,6 +259,14 @@ extension CodexService {
                 renamedThreadNameByThreadID = [:]
             }
 
+            let unsyncedNamesKey = macScopedDefaultsKey(Self.unsyncedThreadNamesDefaultsKey, macDeviceId: macDeviceId)
+            if let savedUnsyncedNames = defaults.data(forKey: unsyncedNamesKey),
+               let decodedUnsyncedNames = try? decoder.decode([String: String].self, from: savedUnsyncedNames) {
+                unsyncedThreadNamesByThreadID = decodedUnsyncedNames
+            } else {
+                unsyncedThreadNamesByThreadID = [:]
+            }
+
             if let savedPinnedThreadIDs = defaults.data(
                 forKey: macScopedDefaultsKey(Self.pinnedThreadIDsDefaultsKey, macDeviceId: macDeviceId)
             ),
@@ -412,6 +420,15 @@ extension CodexService {
             planSessionSourceByThread.removeAll()
             forkedFromThreadIDByThreadID.removeAll()
             renamedThreadNameByThreadID.removeAll()
+            unsyncedThreadNamesByThreadID.removeAll()
+            threadNameRevision &+= 1
+            pendingThreadNameWrites.values.forEach { $0.task.cancel() }
+            pendingThreadNameWrites.removeAll()
+            threadCatalogDeletionScope = nil
+            materializedThreadCatalogObservations.removeAll()
+            missingThreadCatalogProbeTask?.cancel()
+            missingThreadCatalogProbeOffset = 0
+            nextAutomaticMissingThreadProbeAt = nil
             pinnedThreadIDs.removeAll()
             pinnedThreadSnapshotsByRootID.removeAll()
             snapshotOnlyPinnedThreadIDs.removeAll()
@@ -429,6 +446,7 @@ extension CodexService {
         migrateLegacyMacScopedDefaultsValue(for: Self.locallyDeletedThreadIDsKey)
         migrateLegacyMacScopedDefaultsValue(for: Self.forkedThreadOriginsDefaultsKey)
         migrateLegacyMacScopedDefaultsValue(for: Self.renamedThreadNamesDefaultsKey)
+        migrateLegacyMacScopedDefaultsValue(for: Self.unsyncedThreadNamesDefaultsKey)
         migrateLegacyMacScopedDefaultsValue(for: Self.pinnedThreadIDsDefaultsKey)
         migrateLegacyMacScopedDefaultsValue(for: Self.pinnedThreadSnapshotsDefaultsKey)
         migrateLegacyMacScopedDefaultsValue(for: Self.associatedManagedWorktreePathsDefaultsKey)
@@ -477,6 +495,12 @@ extension CodexService {
         ) || migratedDefaults
         migratedDefaults = mergeMacScopedDefaultsDataDictionary(
             Self.renamedThreadNamesDefaultsKey,
+            from: sourceDeviceIds,
+            to: targetDeviceId,
+            as: [String: String].self
+        ) || migratedDefaults
+        migratedDefaults = mergeMacScopedDefaultsDataDictionary(
+            Self.unsyncedThreadNamesDefaultsKey,
             from: sourceDeviceIds,
             to: targetDeviceId,
             as: [String: String].self

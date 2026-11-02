@@ -738,7 +738,7 @@ final class CodexService {
     // Increases retry spacing for chats whose first history page remains unavailable.
     @ObservationIgnored var canonicalHistoryReconcileRetryAttemptByThreadID: [String: Int] = [:]
     // Coalesces sidebar/bootstrap thread/list refreshes so launch paths do not duplicate the same fetch.
-    @ObservationIgnored var threadListFetchTaskByLimit: [Int: (id: UUID, task: Task<[CodexThread], Error>)] = [:]
+    @ObservationIgnored var threadListFetchTaskByLimit: [Int: (id: UUID, task: Task<ThreadCatalogSnapshot, Error>)] = [:]
     var isAppInForeground = true
     // Network quality flag: when true, sync and keepalive intervals are stretched to reduce
     // bandwidth usage on constrained connections (Low Data Mode, hotspot tethering).
@@ -847,6 +847,14 @@ final class CodexService {
     @ObservationIgnored var threadTimelineStateByThread: [String: ThreadTimelineState] = [:]
     @ObservationIgnored var forkedFromThreadIDByThreadID: [String: String] = [:]
     @ObservationIgnored var renamedThreadNameByThreadID: [String: String] = [:]
+    @ObservationIgnored var unsyncedThreadNamesByThreadID: [String: String] = [:]
+    @ObservationIgnored var threadNameRevision: UInt64 = 0
+    @ObservationIgnored var pendingThreadNameWrites: [String: (id: UUID, task: Task<Void, Never>)] = [:]
+    @ObservationIgnored var threadCatalogDeletionScope: String?
+    @ObservationIgnored var materializedThreadCatalogObservations: [String: UUID] = [:]
+    @ObservationIgnored var missingThreadCatalogProbeTask: Task<Void, Never>?
+    @ObservationIgnored var missingThreadCatalogProbeOffset = 0
+    @ObservationIgnored var nextAutomaticMissingThreadProbeAt: ContinuousClock.Instant?
     @ObservationIgnored var associatedManagedWorktreePathByThreadID: [String: String] = [:]
     @ObservationIgnored var authoritativeProjectPathByThreadID: [String: String] = [:]
     var pinnedThreadIDs: [String] = []
@@ -889,6 +897,7 @@ final class CodexService {
     static let locallyDeletedThreadIDsKey = "codex.locallyDeletedThreadIDs"
     static let forkedThreadOriginsDefaultsKey = "codex.forkedThreadOrigins"
     static let renamedThreadNamesDefaultsKey = "codex.renamedThreadNames"
+    static let unsyncedThreadNamesDefaultsKey = "codex.unsyncedThreadNames"
     static let pinnedThreadIDsDefaultsKey = "codex.pinnedThreadIDs"
     static let pinnedThreadSnapshotsDefaultsKey = "codex.pinnedThreadSnapshots"
     static let associatedManagedWorktreePathsDefaultsKey = "codex.associatedManagedWorktreePaths"
