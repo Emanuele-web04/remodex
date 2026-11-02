@@ -35,20 +35,6 @@ extension CodexService {
         )
         let accessConfiguration = runtimeAccessConfiguration()
         let initialThreadId = try await resolveThreadID(threadId)
-        let resolvedThreadId = try await sendReviewStartRecoveringThread(
-            request,
-            initialThreadId: initialThreadId,
-            accessConfiguration: accessConfiguration
-        )
-        activeThreadId = resolvedThreadId
-    }
-
-    // Keeps review-start aligned with turn/start by recovering stale archived threads before retrying.
-    private func sendReviewStartRecoveringThread(
-        _ request: ReviewStartRequest,
-        initialThreadId: String,
-        accessConfiguration: RuntimeAccessConfiguration
-    ) async throws -> String {
         do {
             try await prepareThreadRuntimeForReview(
                 threadId: initialThreadId,
@@ -56,33 +42,11 @@ extension CodexService {
             )
         } catch {
             if shouldTreatAsThreadNotFound(error) {
-                return try await continueReviewStart(
-                    request,
-                    fromMissingThreadId: initialThreadId,
-                    removePendingUserMessage: false,
-                    accessConfiguration: accessConfiguration
-                )
+                try handleTurnStartFailure(error, pendingMessageId: "", threadId: initialThreadId)
             }
             throw error
         }
-
-        do {
-            try await sendReviewStart(
-                request,
-                to: initialThreadId,
-            )
-            return initialThreadId
-        } catch {
-            if shouldTreatAsThreadNotFound(error) {
-                return try await continueReviewStart(
-                    request,
-                    fromMissingThreadId: initialThreadId,
-                    removePendingUserMessage: true,
-                    accessConfiguration: accessConfiguration
-                )
-            }
-            throw error
-        }
+        try await sendReviewStart(request, to: initialThreadId)
     }
 
     // Uses the review/start target schema expected by the local Codex runtime.
@@ -117,35 +81,6 @@ extension CodexService {
             "delivery": .string("inline"),
             "target": .object(targetObject),
         ]
-    }
-
-    // Replays the review request onto a continuation thread when the original one no longer exists server-side.
-    private func continueReviewStart(
-        _ request: ReviewStartRequest,
-        fromMissingThreadId missingThreadId: String,
-        removePendingUserMessage: Bool,
-        accessConfiguration: RuntimeAccessConfiguration
-    ) async throws -> String {
-        if removePendingUserMessage {
-            removeLatestFailedUserMessage(
-                threadId: missingThreadId,
-                matchingText: request.promptText,
-                matchingAttachments: []
-            )
-        }
-        handleMissingThread(missingThreadId)
-
-        let continuationThread = try await createContinuationThread(from: missingThreadId)
-        try await prepareThreadRuntimeForReview(
-            threadId: continuationThread.id,
-            accessConfiguration: accessConfiguration
-        )
-        try await sendReviewStart(
-            request,
-            to: continuationThread.id
-        )
-        lastErrorMessage = nil
-        return continuationThread.id
     }
 
     // review/start has no permission fields. A forced resume applies the full
