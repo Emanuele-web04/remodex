@@ -34,7 +34,7 @@ class CodexDesktopRefresher {
     debounceMs = DEFAULT_DEBOUNCE_MS,
     refreshCommand = "",
     bundleId = DEFAULT_CODEX_BUNDLE_ID,
-    appPath = resolveCodexAppPath(),
+    appPath = resolveCodexAppPath({ bundleId }),
     logPrefix = "[remodex]",
     fallbackNewThreadMs = DEFAULT_FALLBACK_NEW_THREAD_MS,
     midRunRefreshThrottleMs = DEFAULT_MID_RUN_REFRESH_THROTTLE_MS,
@@ -744,6 +744,7 @@ function readBridgeConfig({
   const desktopIpcLiveSyncEnabled = explicitDesktopIpcLiveSyncEnabled == null
     ? true
     : explicitDesktopIpcLiveSyncEnabled;
+  const codexBundleId = readFirstDefinedEnv(["REMODEX_CODEX_BUNDLE_ID"], DEFAULT_CODEX_BUNDLE_ID, env);
   return {
     relayUrl,
     pushServiceUrl: readFirstDefinedEnv(
@@ -775,9 +776,10 @@ function readBridgeConfig({
       75
     ),
     refreshCommand,
-    codexBundleId: readFirstDefinedEnv(["REMODEX_CODEX_BUNDLE_ID"], DEFAULT_CODEX_BUNDLE_ID, env),
+    codexBundleId,
     codexAppPath: resolveCodexAppPath({
       appPath: readFirstDefinedEnv(["REMODEX_CODEX_APP_PATH"], "", env),
+      bundleId: codexBundleId,
       platform,
       homeDir: env.HOME,
       fsImpl,

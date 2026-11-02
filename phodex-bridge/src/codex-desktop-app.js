@@ -7,11 +7,13 @@ const LEGACY_CODEX_APP_PATH = "/Applications/Codex.app";
 
 function resolveCodexAppPath({
   appPath,
+  bundleId = DEFAULT_CODEX_BUNDLE_ID,
   platform = process.platform,
   homeDir = os.homedir(),
   fsImpl = fs,
 } = {}) {
   if (typeof appPath === "string" && appPath.trim()) return appPath.trim();
+  if (bundleId !== DEFAULT_CODEX_BUNDLE_ID) return "";
   if (platform !== "darwin") return LEGACY_CODEX_APP_PATH;
 
   const folders = ["/Applications", path.join(homeDir, "Applications")];

@@ -78,6 +78,7 @@ test("desktop handoff detects and relaunches the configured bundle's executable"
   const processPattern = path.join(appPath, "Contents", "MacOS", "ChatGPT") + "([[:space:]].*)?";
   let running = true;
   const processCalls = [];
+  const openCalls = [];
   const response = await new Promise((resolve) => {
     handleDesktopRequest(JSON.stringify({
       id: "current-app",
@@ -94,6 +95,7 @@ test("desktop handoff detects and relaunches the configured bundle's executable"
           if (command === "pkill") running = false;
           else if (!running) throw Object.assign(new Error("not running"), { code: 1 });
         }
+        if (command === "open") openCalls.push(args);
         return { stdout: "" };
       },
       sleepFn: async () => {},
@@ -101,6 +103,10 @@ test("desktop handoff detects and relaunches the configured bundle's executable"
     });
   });
   assert.equal(JSON.parse(response).result?.relaunched, true);
+  assert.deepEqual(openCalls, [
+    ["-a", appPath],
+    ["-a", appPath, "codex://threads/thread-123"],
+  ]);
   assert.deepEqual(processCalls, [
     ["pgrep", "-f", "-x", processPattern.replace(".app", "\\.app")],
     ["pkill", "-f", "-x", processPattern.replace(".app", "\\.app")],

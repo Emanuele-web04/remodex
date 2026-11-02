@@ -67,6 +67,7 @@ async function handleDesktopMethod(method, params, options = {}) {
   const fsModule = options.fsModule || fs;
   const appPath = resolveCodexAppPath({
     appPath: options.appPath,
+    bundleId,
     platform,
     homeDir: env.HOME,
     fsImpl: fsModule,
@@ -205,10 +206,16 @@ async function continueOnDesktop(
     };
   }
 
-  const processArgs = await codexAppProcessArgs(appPath, executor, fsModule);
+  const infoPath = appPath ? path.join(appPath, "Contents", "Info.plist") : null;
+  const installedBundle = Boolean(infoPath && fsModule.existsSync(infoPath));
+  const targetArgs = installedBundle ? ["-a", appPath] : ["-b", bundleId];
+  const openApp = (url) => executor("open", url ? [...targetArgs, url] : targetArgs, {
+    timeout: HANDOFF_TIMEOUT_MS,
+  });
+  const processArgs = await codexAppProcessArgs(appPath, installedBundle ? infoPath : null, executor);
   const checkAppRunning = isAppRunning
     ? () => isAppRunning(appPath)
-    : () => detectRunningCodexApp(processArgs, executor);
+    : () => appPath && detectRunningCodexApp(processArgs, executor);
   const appRunning = await checkAppRunning();
 
   // If Codex.app is already open, explicit handoff should still feel like a
@@ -218,12 +225,10 @@ async function continueOnDesktop(
       // Cold-launch the desktop app first, then deep-link the thread once the
       // router is ready. A single `open codex://threads/...` can land on the
       // default new-chat route when Codex.app is not fully booted yet.
-      await openCodexApp({ bundleId, appPath, executor });
+      await openApp();
       await sleepFn(appBootWaitMs);
       await openWhenThreadReady(threadId, targetUrl, {
-        bundleId,
-        appPath,
-        executor,
+        openApp,
         env,
         fsModule,
         sleepFn,
@@ -251,12 +256,10 @@ async function continueOnDesktop(
   // window before the final deep link is likely to work.
   if (!appRunning) {
     try {
-      await openCodexApp({ bundleId, appPath, executor });
+      await openApp();
       await sleepFn(appBootWaitMs);
       await openWhenThreadReady(threadId, targetUrl, {
-        bundleId,
-        appPath,
-        executor,
+        openApp,
         env,
         fsModule,
         sleepFn,
@@ -282,8 +285,7 @@ async function continueOnDesktop(
 
   try {
     await forceRelaunchCodexApp({
-      bundleId,
-      appPath,
+      openApp,
       executor,
       processArgs,
       checkAppRunning,
@@ -292,9 +294,7 @@ async function continueOnDesktop(
       appBootWaitMs,
     });
     await openWhenThreadReady(threadId, targetUrl, {
-      bundleId,
-      appPath,
-      executor,
+      openApp,
       env,
       fsModule,
       sleepFn,
@@ -429,9 +429,8 @@ function resolveSessionsRootForEnv(env) {
   return resolveSessionsRoot();
 }
 
-async function codexAppProcessArgs(appPath, executor, fsModule) {
-  const infoPath = path.join(appPath, "Contents", "Info.plist");
-  if (fsModule.existsSync(infoPath)) {
+async function codexAppProcessArgs(appPath, infoPath, executor) {
+  if (infoPath) {
     const { stdout } = await executor("/usr/bin/plutil", [
       "-extract", "CFBundleExecutable", "raw", "-o", "-", infoPath,
     ], { timeout: HANDOFF_TIMEOUT_MS }).catch(() => ({}));
@@ -457,30 +456,6 @@ async function detectRunningCodexApp(processArgs, executor) {
   }
 }
 
-async function openCodexTarget(targetUrl, { bundleId, appPath, executor }) {
-  try {
-    await executor("open", ["-b", bundleId, targetUrl], {
-      timeout: HANDOFF_TIMEOUT_MS,
-    });
-  } catch {
-    await executor("open", ["-a", appPath, targetUrl], {
-      timeout: HANDOFF_TIMEOUT_MS,
-    });
-  }
-}
-
-async function openCodexApp({ bundleId, appPath, executor }) {
-  try {
-    await executor("open", ["-b", bundleId], {
-      timeout: HANDOFF_TIMEOUT_MS,
-    });
-  } catch {
-    await executor("open", ["-a", appPath], {
-      timeout: HANDOFF_TIMEOUT_MS,
-    });
-  }
-}
-
 async function openWindowsDeepLink(targetUrl, { executor, env }) {
   await executor(env?.SystemRoot ? path.join(env.SystemRoot, "System32", "rundll32.exe") : "rundll32.exe", [
     "url.dll,FileProtocolHandler",
@@ -501,7 +476,7 @@ async function refreshWindowsCodex(targetUrl, { executor, env, sleepFn, settleMs
 async function openWhenThreadReady(
   threadId,
   targetUrl,
-  { bundleId, appPath, executor, env, fsModule, sleepFn, waitMs, pollMs }
+  { openApp, env, fsModule, sleepFn, waitMs, pollMs }
 ) {
   await waitForThreadMaterialization(threadId, {
     env,
@@ -510,12 +485,11 @@ async function openWhenThreadReady(
     timeoutMs: waitMs,
     pollMs,
   });
-  await openCodexTarget(targetUrl, { bundleId, appPath, executor });
+  await openApp(targetUrl);
 }
 
 async function forceRelaunchCodexApp({
-  bundleId,
-  appPath,
+  openApp,
   executor,
   processArgs,
   checkAppRunning,
@@ -535,7 +509,7 @@ async function forceRelaunchCodexApp({
 
   await waitForAppExit(checkAppRunning);
   await sleepFn(relaunchWaitMs);
-  await openCodexApp({ bundleId, appPath, executor });
+  await openApp();
   await sleepFn(appBootWaitMs);
 }
 
