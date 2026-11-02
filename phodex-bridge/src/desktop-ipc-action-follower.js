@@ -2026,7 +2026,11 @@ function createDesktopIpcActionFollower({
       // baselines: preserve only turn lifecycle, then seed. Item diffs resume
       // on subsequent patches and cannot replay hundreds of old rows.
       const { completedTurnIds } = emitDesktopSnapshotLifecycleTransition(threadId, liveState);
-      if (completedTurnIds.size > 0) {
+      const hasTerminalTurn = (liveState.turns || []).some((turn) => (
+        completedTurnIds.has(turnIdOf(turn))
+          && ["completed", "failed", "interrupted", "cancelled", "canceled"].includes(readString(turn.status).toLowerCase())
+      ));
+      if (hasTerminalTurn) {
         // A terminal baseline can contain a final answer never sent as deltas.
         // Reload canonical history once instead of replaying re-keyed items.
         sendApplicationResponse(JSON.stringify({
