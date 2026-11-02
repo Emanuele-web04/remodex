@@ -223,6 +223,103 @@ struct AIChangeSet: Identifiable, Codable, Hashable, Sendable {
     }
 }
 
+extension AIChangeSet {
+    // A turn can acquire a second id while its saved ledger is unreadable.
+    func reconcilingRecoveredChangeSet(_ earlier: AIChangeSet) -> AIChangeSet {
+        let prefersEarlier = earlier.status == .reverted
+            || (status != .reverted && earlier.recoveryPatchPriority > recoveryPatchPriority)
+        var merged = prefersEarlier ? earlier : self
+        merged.createdAt = min(earlier.createdAt, createdAt)
+        merged.repoRoot = repoRoot ?? earlier.repoRoot
+        merged.assistantMessageId = assistantMessageId ?? earlier.assistantMessageId
+        guard merged.status != .reverted else {
+            return merged
+        }
+
+        var seenHashes: Set<String> = []
+        merged.fallbackPatchBatches = (earlier.recoveryFallbackBatches + recoveryFallbackBatches).filter {
+            seenHashes.insert($0.patchHash).inserted
+        }
+        merged.fallbackPatchCount = merged.fallbackPatchBatches.count
+        if merged.source == .fileChangeFallback, !merged.fallbackPatchBatches.isEmpty {
+            merged.refreshFallbackPatchSummary()
+            if merged.finalizedAt != nil, merged.status != .failed {
+                merged.status = merged.unsupportedReasons.isEmpty && !merged.fileChanges.isEmpty
+                    ? .ready : .notRevertable
+            }
+        }
+        return merged
+    }
+
+    mutating func refreshFallbackPatchSummary() {
+        fallbackPatchCount = fallbackPatchBatches.count
+        let patches = fallbackPatchBatches.map(\.forwardUnifiedPatch)
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        forwardUnifiedPatch = patches.joined(separator: "\n")
+        patchHash = AIUnifiedPatchParser.hash(for: patches.reversed().joined(separator: "\n"))
+        fileChanges = mergedFileChanges(from: fallbackPatchBatches.flatMap(\.fileChanges))
+        unsupportedReasons = Array(Set(fallbackPatchBatches.flatMap(\.unsupportedReasons))).sorted()
+    }
+
+    private var recoveryPatchPriority: Int {
+        guard !forwardUnifiedPatch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !fallbackPatchBatches.isEmpty else {
+            return 0
+        }
+        switch source {
+        case .workspaceCheckpoint: return 3
+        case .turnDiff: return 2
+        case .fileChangeFallback: return 1
+        }
+    }
+
+    private var recoveryFallbackBatches: [AIPatchBatch] {
+        guard fallbackPatchBatches.isEmpty, source == .fileChangeFallback,
+              !forwardUnifiedPatch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return fallbackPatchBatches
+        }
+        // Legacy multi-patch ledgers did not preserve ordering. Keep their
+        // bytes as a single unavailable batch so a later append cannot hide it.
+        var reasons = unsupportedReasons
+        if fallbackPatchCount > 1 {
+            reasons.append("This response was captured before ordered patch batches were stored, so it cannot be safely auto-reverted.")
+        }
+        return [AIPatchBatch(
+            id: id,
+            createdAt: createdAt,
+            forwardUnifiedPatch: forwardUnifiedPatch,
+            patchHash: AIUnifiedPatchParser.hash(for: forwardUnifiedPatch),
+            fileChanges: fileChanges,
+            unsupportedReasons: reasons
+        )]
+    }
+
+    private func mergedFileChanges(from fileChanges: [AIFileChange]) -> [AIFileChange] {
+        var changesByPath: [String: AIFileChange] = [:]
+
+        for change in fileChanges {
+            guard let existing = changesByPath[change.path] else {
+                changesByPath[change.path] = change
+                continue
+            }
+
+            let mergedKind: AIFileChangeKind = existing.kind == change.kind ? existing.kind : .update
+            changesByPath[change.path] = AIFileChange(
+                path: change.path,
+                kind: mergedKind,
+                additions: existing.additions + change.additions,
+                deletions: existing.deletions + change.deletions,
+                isBinary: existing.isBinary || change.isBinary,
+                isRenameOrModeOnly: existing.isRenameOrModeOnly || change.isRenameOrModeOnly,
+                beforeContentHash: existing.beforeContentHash ?? change.beforeContentHash,
+                afterContentHash: change.afterContentHash ?? existing.afterContentHash
+            )
+        }
+
+        return changesByPath.values.sorted { $0.path < $1.path }
+    }
+}
+
 struct RevertConflict: Codable, Hashable, Sendable {
     let path: String
     let message: String

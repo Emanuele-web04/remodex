@@ -114,6 +114,9 @@ extension CodexService {
     @discardableResult
     func saveMacScopedAIChangeSets(for macDeviceId: String?) -> Bool {
         var changeSets = Array(aiChangeSetsByID.values)
+        let chronological: (AIChangeSet, AIChangeSet) -> Bool = {
+            ($0.createdAt, $0.id) < ($1.createdAt, $1.id)
+        }
         let recovering = !canPersistAIChangeSets
         if recovering {
             guard let persisted = aiChangeSetPersistence.load(
@@ -122,16 +125,20 @@ extension CodexService {
             ) else {
                 return false
             }
-            // Current entries win on id collisions and retain precedence in the turn and message indexes.
-            changeSets = persisted.filter { aiChangeSetsByID[$0.id] == nil } + changeSets
+            // Persisted batches precede changes captured after the read failed.
+            var byTurn: [AIChangeSetTurnKey: AIChangeSet] = [:]
+            var unscopedById: [String: AIChangeSet] = [:]
+            for changeSet in persisted.sorted(by: chronological) + changeSets.sorted(by: chronological) {
+                guard let key = AIChangeSetTurnKey(threadId: changeSet.threadId, turnId: changeSet.turnId) else {
+                    unscopedById[changeSet.id] = changeSet
+                    continue
+                }
+                byTurn[key] = byTurn[key].map { changeSet.reconcilingRecoveredChangeSet($0) } ?? changeSet
+            }
+            changeSets = Array(byTurn.values) + Array(unscopedById.values)
         }
 
-        let sortedChangeSets = changeSets.sorted {
-            if $0.createdAt != $1.createdAt {
-                return $0.createdAt < $1.createdAt
-            }
-            return $0.id < $1.id
-        }
+        let sortedChangeSets = changeSets.sorted(by: chronological)
         guard aiChangeSetPersistence.save(sortedChangeSets, macDeviceId: macDeviceId) else {
             return false
         }

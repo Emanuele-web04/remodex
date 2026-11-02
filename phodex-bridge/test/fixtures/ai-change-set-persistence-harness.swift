@@ -62,6 +62,7 @@ struct AIChangeSetPersistenceHarness {
         try require(AIChangeSetPersistence().load(macDeviceId: "source") == [record], "migrated ledger did not round-trip")
 
         try exerciseReadRetry(persistence, ledgerURL(root, "retry"), encrypted, record)
+        try exerciseSameTurnReadRetry(persistence, ledgerURL(root, "same-turn"))
         try exerciseFailedDeletion(persistence, sourceURL, record)
         print("AI change-set ledger recovery checks passed")
     }
@@ -91,6 +92,67 @@ struct AIChangeSetPersistenceHarness {
         try require(Set(reloaded) == Set([existing, captured]), "recovery failed to preserve old and new changes")
         let turn = AIChangeSetTurnKey(threadId: existing.threadId, turnId: existing.turnId)!
         try require(service.aiChangeSetIDByTurnKey[turn] == existing.id, "recovery did not reindex the old change set")
+    }
+
+    private static func exerciseSameTurnReadRetry(_ persistence: AIChangeSetPersistence, _ url: URL) throws {
+        let first = makePatchBatch("before", "middle")
+        let second = makePatchBatch("middle", "after")
+        let persisted = AIChangeSet(
+            id: "older-uuid", threadId: "resumed-thread", turnId: "resumed-turn",
+            source: .fileChangeFallback, forwardUnifiedPatch: first.forwardUnifiedPatch,
+            fallbackPatchCount: 1, fallbackPatchBatches: [first]
+        )
+        let captured = AIChangeSet(
+            id: "new-uuid", threadId: persisted.threadId, turnId: persisted.turnId,
+            assistantMessageId: "answer", finalizedAt: Date(), status: .ready, source: .fileChangeFallback,
+            forwardUnifiedPatch: second.forwardUnifiedPatch,
+            fallbackPatchCount: 2, fallbackPatchBatches: [makePatchBatch("before", "middle"), second]
+        )
+        try require(persistence.save([persisted], macDeviceId: "same-turn"), "could not seed the early patch")
+        let encrypted = try Data(contentsOf: url)
+        try Data("unreadable ledger".utf8).write(to: url)
+
+        let service = CodexService()
+        service.loadMacScopedAIChangeSets(for: "same-turn")
+        service.aiChangeSetsByID[captured.id] = captured
+        try require(!service.saveMacScopedAIChangeSets(for: "same-turn"), "unreadable ledger was overwritten")
+
+        try encrypted.write(to: url)
+        try require(service.saveMacScopedAIChangeSets(for: "same-turn"), "same-turn recovery could not save")
+        let reloaded = persistence.load(macDeviceId: "same-turn") ?? []
+        try require(reloaded.count == 1, "same turn was persisted under two UUIDs")
+        let reconciled = reloaded[0]
+        try require(reconciled.fallbackPatchBatches == [first, second], "recovery lost, reordered, or duplicated patch batches")
+        try require(reconciled.forwardUnifiedPatch == [first.forwardUnifiedPatch, second.forwardUnifiedPatch].joined(separator: "\n"),
+                    "recovery did not rebuild the aggregate patch")
+        let reversedPatch = [second.forwardUnifiedPatch, first.forwardUnifiedPatch].joined(separator: "\n")
+        try require(reconciled.patchHash == AIUnifiedPatchParser.hash(for: reversedPatch),
+                    "recovery changed the order of the revert payload")
+        try require(reconciled.fallbackPatchCount == 2 && reconciled.fileChanges.first?.additions == 2,
+                    "recovery did not rebuild the file-change summary")
+        try require(reconciled.status == .ready, "a finalized, supported revert was no longer available")
+        let turn = AIChangeSetTurnKey(threadId: persisted.threadId, turnId: persisted.turnId)!
+        try require(service.aiChangeSetIDByTurnKey[turn] == reconciled.id
+                    && service.aiChangeSetIDByAssistantMessageID["answer"] == reconciled.id,
+                    "the turn and assistant row must both use the reconciled change set")
+    }
+
+    private static func makePatchBatch(_ before: String, _ after: String) -> AIPatchBatch {
+        let patch = """
+        diff --git a/file.txt b/file.txt
+        --- a/file.txt
+        +++ b/file.txt
+        @@ -1 +1 @@
+        -\(before)
+        +\(after)
+        """
+        let analysis = AIUnifiedPatchParser.analyze(patch)
+        return AIPatchBatch(
+            forwardUnifiedPatch: patch,
+            patchHash: AIUnifiedPatchParser.hash(for: patch),
+            fileChanges: analysis.fileChanges,
+            unsupportedReasons: analysis.unsupportedReasons
+        )
     }
 
     private static func exerciseFailedDeletion(

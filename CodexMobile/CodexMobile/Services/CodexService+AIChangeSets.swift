@@ -500,11 +500,7 @@ private extension CodexService {
             )
         }
 
-        changeSet.fallbackPatchCount = changeSet.fallbackPatchBatches.count
-        changeSet.forwardUnifiedPatch = fallbackPatchBatchesForwardPatch(changeSet.fallbackPatchBatches)
-        changeSet.patchHash = AIUnifiedPatchParser.hash(for: fallbackPatchBatchesRevertPatch(changeSet.fallbackPatchBatches))
-        changeSet.fileChanges = mergedFileChanges(from: changeSet.fallbackPatchBatches.flatMap(\.fileChanges))
-        changeSet.unsupportedReasons = Array(Set(changeSet.fallbackPatchBatches.flatMap(\.unsupportedReasons))).sorted()
+        changeSet.refreshFallbackPatchSummary()
     }
 
     // Chooses the bridge method: aggregate diffs use the legacy single-patch path, fallback batches stay ordered.
@@ -548,46 +544,6 @@ private extension CodexService {
             return true
         }
         return !changeSet.forwardUnifiedPatch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
-    func fallbackPatchBatchesForwardPatch(_ batches: [AIPatchBatch]) -> String {
-        batches
-            .map(\.forwardUnifiedPatch)
-            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-            .joined(separator: "\n")
-    }
-
-    func fallbackPatchBatchesRevertPatch(_ batches: [AIPatchBatch]) -> String {
-        batches
-            .reversed()
-            .map(\.forwardUnifiedPatch)
-            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-            .joined(separator: "\n")
-    }
-
-    func mergedFileChanges(from fileChanges: [AIFileChange]) -> [AIFileChange] {
-        var changesByPath: [String: AIFileChange] = [:]
-
-        for change in fileChanges {
-            guard let existing = changesByPath[change.path] else {
-                changesByPath[change.path] = change
-                continue
-            }
-
-            let mergedKind: AIFileChangeKind = existing.kind == change.kind ? existing.kind : .update
-            changesByPath[change.path] = AIFileChange(
-                path: change.path,
-                kind: mergedKind,
-                additions: existing.additions + change.additions,
-                deletions: existing.deletions + change.deletions,
-                isBinary: existing.isBinary || change.isBinary,
-                isRenameOrModeOnly: existing.isRenameOrModeOnly || change.isRenameOrModeOnly,
-                beforeContentHash: existing.beforeContentHash ?? change.beforeContentHash,
-                afterContentHash: change.afterContentHash ?? existing.afterContentHash
-            )
-        }
-
-        return changesByPath.values.sorted { $0.path < $1.path }
     }
 
     func finalizeChangeSetIfPossible(changeSetId: String) {
