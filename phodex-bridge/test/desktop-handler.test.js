@@ -72,6 +72,42 @@ test("desktop/continueOnMac relaunches Codex for the requested thread", async ()
   }]);
 });
 
+test("desktop handoff detects and relaunches the configured bundle's executable", async () => {
+  const appPath = "/test/Custom ChatGPT.app";
+  const infoPath = path.join(appPath, "Contents", "Info.plist");
+  const processPattern = path.join(appPath, "Contents", "MacOS", "ChatGPT") + "([[:space:]].*)?";
+  let running = true;
+  const processCalls = [];
+  const response = await new Promise((resolve) => {
+    handleDesktopRequest(JSON.stringify({
+      id: "current-app",
+      method: "desktop/continueOnMac",
+      params: { threadId: "thread-123" },
+    }), resolve, {
+      platform: "darwin",
+      appPath,
+      fsModule: { existsSync: (candidate) => candidate === infoPath },
+      executor: async (command, args) => {
+        if (command === "/usr/bin/plutil") return { stdout: "ChatGPT" };
+        if (command === "pgrep" || command === "pkill") {
+          processCalls.push([command, ...args]);
+          if (command === "pkill") running = false;
+          else if (!running) throw Object.assign(new Error("not running"), { code: 1 });
+        }
+        return { stdout: "" };
+      },
+      sleepFn: async () => {},
+      threadMaterializeWaitMs: 0,
+    });
+  });
+  assert.equal(JSON.parse(response).result?.relaunched, true);
+  assert.deepEqual(processCalls, [
+    ["pgrep", "-f", "-x", processPattern.replace(".app", "\\.app")],
+    ["pkill", "-f", "-x", processPattern.replace(".app", "\\.app")],
+    ["pgrep", "-f", "-x", processPattern.replace(".app", "\\.app")],
+  ]);
+});
+
 test("desktop/continueOnMac boots Codex before deep-linking unknown threads", async () => {
   const executorCalls = [];
   const responses = [];

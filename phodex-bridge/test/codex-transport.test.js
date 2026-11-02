@@ -116,10 +116,10 @@ test("spawn launch plans keep the default codex command first even when a bundle
   }
 });
 
-test("spawn transport retries with the bundled Codex binary after an ENOENT launch error", async () => {
+test("spawn transport retries with the current ChatGPT bundle CLI after an ENOENT launch error", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-codex-fallback-"));
-  const appPath = path.join(tempDir, "Codex.app");
-  const bundledCodexPath = path.join(appPath, "Contents", "Resources", "codex");
+  const appPath = path.join(tempDir, "ChatGPT.app");
+  const bundledCodexPath = path.join(appPath, "Contents", "Resources", "codex-cli", "bin", "codex");
   fs.mkdirSync(path.dirname(bundledCodexPath), { recursive: true });
   fs.writeFileSync(bundledCodexPath, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
 

@@ -10,6 +10,7 @@ const os = require("os");
 const path = require("path");
 const { randomBytes } = require("crypto");
 const { promisify } = require("util");
+const { resolveBundledCodexCommand } = require("./codex-desktop-app");
 
 const execFileAsync = promisify(execFile);
 const GIT_TIMEOUT_MS = 30_000;
@@ -1744,24 +1745,6 @@ function resolveCodexExecCommands(codexAppPath) {
     commands.push(bundledCommand);
   }
   return commands;
-}
-
-function resolveBundledCodexCommand(codexAppPath) {
-  const trimmedAppPath = typeof codexAppPath === "string" ? codexAppPath.trim() : "";
-  if (!trimmedAppPath) {
-    return "";
-  }
-
-  const candidate = path.join(trimmedAppPath, "Contents", "Resources", "codex");
-  return isLaunchableFile(candidate) ? candidate : "";
-}
-
-function isLaunchableFile(candidatePath) {
-  try {
-    return fs.statSync(candidatePath).isFile();
-  } catch {
-    return false;
-  }
 }
 
 function shouldRetryCodexExecWithNextCommand(error) {
