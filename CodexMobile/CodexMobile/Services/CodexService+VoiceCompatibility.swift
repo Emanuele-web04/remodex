@@ -81,9 +81,6 @@ extension CodexService {
         let mentionsBridgeVoiceMethod = message.contains("voice/transcribe")
             || message.contains("voice transcribe")
             || message.contains("voice/transcribe`")
-            || message.contains("voice/resolveauth")
-            || message.contains("voice resolveauth")
-            || message.contains("voice/resolveauth`")
 
         guard rpcError.code == -32600 || rpcError.code == -32602 || rpcError.code == -32000 else {
             return mentionsUnsupportedRequest && mentionsBridgeVoiceMethod
@@ -104,10 +101,6 @@ extension CodexService {
              .alreadyRecording,
              .notRecording:
             return .recorderUnavailable
-        case .authExpired:
-            return .macReauthenticationRequired
-        case .transcriptionFailed(let message):
-            return classifyVoiceFailureMessage(message)
         }
     }
 
@@ -175,7 +168,7 @@ extension CodexService {
         }
 
         let normalized = trimmed.lowercased()
-        if (normalized.contains("voice/transcribe") || normalized.contains("voice/resolveauth"))
+        if normalized.contains("voice/transcribe")
             && normalized.contains("unknown variant") {
             return .bridgeSessionUnsupported
         }

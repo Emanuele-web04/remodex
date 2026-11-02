@@ -25,10 +25,8 @@ const PRECONNECT_TIMEOUT_MS = 10_000;
 const VOICE_AUDIO_FORMATS = ["wav", "m4a"];
 const VOICE_WAV_MIME_TYPE = "audio/wav";
 const VOICE_M4A_MIME_TYPE = "audio/mp4";
-// Cloudflare rejects Node's default fetch identity on chatgpt.com with an HTML 403,
-// which used to fail every bridge upload and force the slow phone-direct fallback.
-// If the accepted identity changes again (symptom: transcription turns slow because
-// every upload falls back to the phone), override it without a release via env.
+// The provider can reject Node's default fetch identity. The bridge uses a
+// browser user agent for transcription, with an override for provider changes.
 const VOICE_UPLOAD_USER_AGENT = process.env.REMODEX_VOICE_UPLOAD_USER_AGENT
   || "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15";
 
@@ -580,26 +578,9 @@ function voiceError(errorCode, userMessage, details = {}) {
   return error;
 }
 
-// Serves older phone builds that upload directly to ChatGPT with a Mac-owned token.
-async function resolveVoiceAuth(sendCodexRequest) {
-  if (typeof sendCodexRequest !== "function") {
-    throw voiceError("bridge_not_ready", "Voice transcription is not available right now.");
-  }
-
-  const authStatus = await readVoiceAuthStatus(sendCodexRequest);
-  const authMethod = readString(authStatus?.authMethod);
-  const token = normalizeBearerToken(authStatus?.authToken);
-  const isChatGPT = isChatGPTAuthMethod(authMethod);
-
-  if (isChatGPT && token) {
-    return { token };
-  }
-
-  if (!token) {
-    throw voiceError("token_missing", "No ChatGPT session token available. Sign in to ChatGPT on the Mac.");
-  }
-
-  throw voiceError("not_chatgpt", "Voice transcription requires a ChatGPT account.");
+// Keep the legacy method intercepted so it cannot forward an auth request to the runtime.
+async function resolveVoiceAuth() {
+  throw voiceError("update_required", "Update Remodex on your iPhone to use voice transcription through the bridge.");
 }
 
 module.exports = {
