@@ -1083,7 +1083,11 @@ final class CodexServiceCatchupRecoveryTests: XCTestCase {
         }
 
         await service.performPostConnectSyncPass(preferredThreadId: threadID)
-        for _ in 0..<100 where service.messages(for: threadID).last?.text != "Recovered after reconnect" {
+        for _ in 0..<100 {
+            if service.messages(for: threadID).last?.text == "Recovered after reconnect",
+               !service.threadsNeedingCanonicalHistoryReconcile.contains(threadID) {
+                break
+            }
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
 
@@ -1118,7 +1122,9 @@ final class CodexServiceCatchupRecoveryTests: XCTestCase {
                     includeJSONRPC: false
                 )
             case "thread/turns/list":
-                canonicalHistoryReadCount += 1
+                if params?.objectValue?["limit"]?.intValue == ThreadHistoryHydrationPolicy.initialTurnPageSize {
+                    canonicalHistoryReadCount += 1
+                }
                 return RPCMessage(
                     id: .string(UUID().uuidString),
                     result: .object(["data": .array([]), "nextCursor": .null]),
