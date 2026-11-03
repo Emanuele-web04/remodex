@@ -310,7 +310,7 @@ struct ContentView: View {
             }
             .alert("Enter Pairing Code", isPresented: $isShowingManualPairingEntry) {
                 TextField("AB23CD34EF", text: $manualPairingCode)
-                    .textInputAutocapitalization(.characters)
+                    .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
 
                 Button(isResolvingManualPairingCode ? "Connecting..." : "Enter") {
