@@ -261,7 +261,8 @@ extension CodexService {
                     "id": .string(threadId),
                     "turns": .array(chronologicalTurnsFromDescendingPage(page.turns)),
                 ]
-                let olderMessages = decodeMessagesFromThreadRead(threadId: threadId, threadObject: threadObject)
+                let decodedMessages = decodeMessagesFromThreadRead(threadId: threadId, threadObject: threadObject)
+                let olderMessages = Self.removingReplacedFileChanges(from: decodedMessages[...], using: decodedMessages)
                 registerSubagentThreads(from: olderMessages, parentThreadId: threadId)
 
                 let olderTerminalStates = decodeTurnTerminalStatesFromThreadRead(threadObject)
@@ -723,7 +724,20 @@ extension CodexService {
     ) -> [CodexMessage] {
         let existingItemIDs = Set(existingMessages.compactMap { Self.normalizedHistoryIdentifier($0.itemId) })
         let existingMessageKeys = Set(existingMessages.map(Self.historyMessageKey(for:)))
+        let repairedTurnIDs = Set(olderMessages.compactMap { message -> String? in
+            guard let fallbackId = Self.replacedFileChangeFallbackID(in: message),
+                  existingItemIDs.contains(fallbackId) else {
+                return nil
+            }
+            return Self.normalizedHistoryIdentifier(message.turnId)
+        })
         let filtered = olderMessages.filter { message in
+            // Keep the surrounding canonical rows as ordering anchors when
+            // a native completion replaces a cached fallback in this turn.
+            if let turnId = Self.normalizedHistoryIdentifier(message.turnId),
+               repairedTurnIDs.contains(turnId) {
+                return true
+            }
             if let itemID = Self.normalizedHistoryIdentifier(message.itemId),
                existingItemIDs.contains(itemID) {
                 return false
