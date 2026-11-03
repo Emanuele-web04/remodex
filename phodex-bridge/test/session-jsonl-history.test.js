@@ -1150,6 +1150,56 @@ test("parseSessionJsonlTurns restores desktop custom apply_patch as fileChange",
   }]);
 });
 
+test("parseSessionJsonlTurns pairs wrapped patches with native file-change items in occurrence order", () => {
+  const cwd = "/workspace/project";
+  const actualDiff = "@@ -8 +8 @@\n-old\n\\ No newline at end of file\n+new\n";
+  const wrappedPatch = (callId, filePath, additions = "new") => {
+    const patch = `*** Begin Patch\n*** Update File: ${filePath}\n@@\n-old\n+${additions}\n*** End Patch`;
+    return {
+      type: "response_item",
+      payload: {
+        type: "custom_tool_call",
+        name: "exec",
+        call_id: callId,
+        input: `text(await tools.apply_patch(${JSON.stringify(patch)}));`,
+      },
+    };
+  };
+  const nativeChange = (id, unified_diff) => ({
+    type: "event_msg",
+    payload: {
+      type: "item_completed",
+      item: {
+        id,
+        type: "FileChange",
+        status: "completed",
+        changes: { [`${cwd}/file.txt`]: { type: "update", unified_diff } },
+      },
+    },
+  });
+  const entries = [
+    { type: "session_meta", payload: { id: "thread", cwd } },
+    { type: "event_msg", payload: { type: "task_started", turn_id: "turn" } },
+    wrappedPatch("call-unrelated", "/workspace/other/file.txt"),
+    wrappedPatch("call-distinct", "file.txt", "different"),
+    wrappedPatch("call-matching", `${cwd}/file.txt`),
+    wrappedPatch("call-matching-later", "file.txt"),
+    nativeChange("native-file-change", actualDiff),
+    nativeChange("native-file-change-later", "@@ -42 +42 @@\n-old\n+new\n"),
+  ];
+  const [turn] = parseSessionJsonlTurns(entries.map((entry) => JSON.stringify(entry)).join("\n"));
+
+  assert.deepEqual(turn.items.map((item) => item.id), [
+    "call-unrelated",
+    "call-distinct",
+    "native-file-change",
+    "native-file-change-later",
+  ]);
+  assert.equal(turn.items[2].changes[`${cwd}/file.txt`].unified_diff, actualDiff);
+  assert.equal(turn.items[2].remodexSourceItemKey, "remodex-file-change-fallback:call-matching");
+  assert.equal(turn.items[3].remodexSourceItemKey, "remodex-file-change-fallback:call-matching-later");
+});
+
 test("parseSessionJsonlTurns restores update_plan calls as progress plan items", () => {
   const content = [
     JSON.stringify({

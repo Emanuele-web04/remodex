@@ -456,6 +456,7 @@ function parseSessionJsonlTurns(content, {
   const toolCallsByCallId = new Map();
   const pendingUserMessages = [];
   const assistantAliasOccurrencesByBaseKey = new Map();
+  const pendingPatchFallbacksByTurn = new WeakMap();
 
   const raw = String(content || "");
   let index = -1;
@@ -591,6 +592,20 @@ function parseSessionJsonlTurns(content, {
         });
         if (item) {
           applyHistoryTimeZone(item, sessionTimeZone);
+          const pendingPatches = pendingPatchFallbacksByTurn.get(turn);
+          const patchKey = pendingPatches && fileChangePatchKey(item, sessionCwd);
+          const fallbackIndex = patchKey ? pendingPatches.get(patchKey)?.shift() : undefined;
+          if (fallbackIndex !== undefined) {
+            const fallback = turn.items[fallbackIndex];
+            item.remodexSourceItemKey = `remodex-file-change-fallback:${fallback.id}`;
+            const timestamp = historyItemTimestamp(item, fallback.createdAt);
+            if (timestamp) {
+              item.createdAt = timestamp;
+              item.timestamp = timestamp;
+            }
+            turn.items[fallbackIndex] = item;
+            continue;
+          }
           turn.items.push(item);
         }
         continue;
@@ -662,6 +677,16 @@ function parseSessionJsonlTurns(content, {
           }
           applyHistoryTimeZone(item, sessionTimeZone);
           applyHistoryAssistantSourceAlias(item, turn.id, assistantAliasOccurrencesByBaseKey);
+          if (item.name === "apply_patch" && normalizeHistoryToken(item.type) === "filechange") {
+            const patchKey = fileChangePatchKey(item, sessionCwd);
+            if (patchKey) {
+              const pendingPatches = pendingPatchFallbacksByTurn.get(turn) || new Map();
+              const indices = pendingPatches.get(patchKey) || [];
+              indices.push(turn.items.length);
+              pendingPatches.set(patchKey, indices);
+              pendingPatchFallbacksByTurn.set(turn, pendingPatches);
+            }
+          }
           addHistoryItemToTurn(turn, item);
         }
       }
@@ -673,6 +698,45 @@ function parseSessionJsonlTurns(content, {
   }
 
   return turns.filter((turn) => turn.items.length > 0);
+}
+
+// The apply_patch transcript uses unnumbered hunks and can spell paths
+// relative to the workspace. Match only the same scoped file set and edits
+// so native completion can replace the fallback without losing another patch.
+function fileChangePatchKey(item, cwd) {
+  if (normalizeHistoryToken(item.type) !== "filechange") {
+    return "";
+  }
+  const changes = Array.isArray(item.changes)
+    ? item.changes.map((change) => [change?.path, change])
+    : Object.entries(objectValue(item.changes) || {});
+  const keys = [];
+  for (const [rawPath, change] of changes) {
+    const filePath = normalizeString(rawPath);
+    const kind = normalizeString(change?.kind) || normalizeString(change?.type);
+    const diff = change?.diff ?? change?.unified_diff ?? change?.unifiedDiff;
+    if (!filePath || !kind || typeof diff !== "string"
+      || change?.move_path || change?.movePath) {
+      return "";
+    }
+    let inHunk = false;
+    const edits = [];
+    for (const line of diff.split(/\r?\n/)) {
+      if (line.startsWith("@@")) {
+        inHunk = true;
+      } else if (line.startsWith("diff --git ")) {
+        inHunk = false;
+      } else if (inHunk && (line.startsWith("+") || line.startsWith("-"))) {
+        edits.push(line);
+      }
+    }
+    if (edits.length === 0) {
+      return "";
+    }
+    const scopedPath = path.isAbsolute(cwd) ? path.resolve(cwd, filePath) : path.normalize(filePath);
+    keys.push(JSON.stringify([scopedPath, kind, edits]));
+  }
+  return keys.length > 0 ? JSON.stringify(keys.sort()) : "";
 }
 
 function closeSyntheticHistoryTurn(turnsById, terminal) {

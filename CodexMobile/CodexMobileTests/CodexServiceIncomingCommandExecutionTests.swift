@@ -348,6 +348,64 @@ final class CodexServiceIncomingCommandExecutionTests: XCTestCase {
         XCTAssertEqual(deduplicated[0].kind, .toolActivity)
     }
 
+    func testHistoryMergeRemovesOnlyTheFileChangeFallbackReplacedInItsTurn() throws {
+        let service = makeService()
+        let threadID = "thread"
+        let turnID = "turn"
+        let fallbackID = "call-patch"
+        func cachedFallback(in turnID: String) -> CodexMessage {
+            CodexMessage(
+                threadId: threadID,
+                role: .system,
+                kind: .fileChange,
+                text: "Path: file.txt\nKind: update\nTotals: +1 -1",
+                turnId: turnID,
+                itemId: fallbackID
+            )
+        }
+        let otherTurn = cachedFallback(in: "other-turn")
+        let history = service.decodeMessagesFromThreadRead(
+            threadId: threadID,
+            threadObject: [
+                "turns": .array([
+                    .object([
+                        "id": .string(turnID),
+                        "items": .array([
+                            .object([
+                                "id": .string("native-file-change"),
+                                "type": .string("fileChange"),
+                                "remodexSourceItemKey": .string("remodex-file-change-fallback:\(fallbackID)"),
+                                "changes": .array([
+                                    .object([
+                                        "path": .string("/workspace/project/file.txt"),
+                                        "kind": .string("update"),
+                                        "diff": .string("@@ -8 +8 @@\n-old\n+new"),
+                                    ]),
+                                ]),
+                            ]),
+                        ]),
+                    ]),
+                ]),
+            ]
+        )
+
+        let previous = [otherTurn, cachedFallback(in: turnID)] + history
+        let incoming = [otherTurn, cachedFallback(in: turnID)] + history
+        let mergedHistories = [
+            service.mergeHistoryMessages(previous, incoming),
+            service.mergeHistoryMessages([], incoming),
+            try CodexService.mergeRecentHistoryWindow(
+                previous, incoming, activeThreadIDs: [], runningThreadIDs: [], windowSize: 1
+            ),
+        ]
+
+        for merged in mergedHistories {
+            XCTAssertEqual(merged.map(\.itemId), [fallbackID, "native-file-change"])
+            XCTAssertEqual(merged.first?.id, otherTurn.id)
+            XCTAssertTrue(merged.last?.text.contains("@@ -8 +8 @@") == true)
+        }
+    }
+
     func testHistoryCompletedAtAliasAndTimezoneRestoreMessageTimestamp() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"

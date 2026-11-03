@@ -23,6 +23,12 @@ fileprivate struct CanonicalAssistantTurnKey: Hashable {
     let turnId: String
 }
 
+fileprivate struct HistoryFileChangeIdentity: Hashable {
+    let threadId: String
+    let turnId: String
+    let itemId: String
+}
+
 fileprivate struct CanonicalAssistantSourceKey: Hashable {
     let threadId: String
     let turnId: String
@@ -227,6 +233,7 @@ extension CodexService {
                         threadId: threadId,
                         turnId: turnID,
                         itemId: itemID,
+                        sourceItemKey: sourceItemKey,
                         createdAt: timestamp,
                         timeZoneIdentifier: timeZoneIdentifier
                     )
@@ -936,6 +943,7 @@ extension CodexService {
         runningThreadIDs: Set<String>,
         allowsAsyncUserInput: Bool = true
     ) throws -> [CodexMessage] {
+        let history = removingReplacedFileChanges(from: history[...], using: history)
         if existing.isEmpty {
             // History messages arrive in server order; assign sequential orderIndex values
             // so that the stable sort preserves server-provided chronology.
@@ -953,7 +961,7 @@ extension CodexService {
             return historyMessagesMergingGeneratedImageArtifacts(sorted)
         }
 
-        var merged = existing
+        var merged = removingReplacedFileChanges(from: existing[...], using: history)
 
         // Older builds could persist a read-only connector result as a file-change
         // row merely because its result contained a `diff` field. Once canonical
@@ -1876,6 +1884,38 @@ extension CodexService {
         }
     }
 
+    private nonisolated static func removingReplacedFileChanges(
+        from messages: ArraySlice<CodexMessage>,
+        using history: [CodexMessage]
+    ) -> [CodexMessage] {
+        // The bridge matched these synthesized patch rows to native completions.
+        // Remove fallbacks by their original identity, scoped to the same turn.
+        let fallbackPrefix = "remodex-file-change-fallback:"
+        let replacedFileChanges = Set(history.compactMap { message -> HistoryFileChangeIdentity? in
+            guard message.role == .system, message.kind == .fileChange,
+                  let turnId = normalizedHistoryIdentifier(message.turnId),
+                  let itemId = normalizedHistoryIdentifier(message.itemId),
+                  let sourceKey = message.sourceItemKey, sourceKey.hasPrefix(fallbackPrefix),
+                  let fallbackId = normalizedHistoryIdentifier(String(sourceKey.dropFirst(fallbackPrefix.count))),
+                  fallbackId != itemId else {
+                return nil
+            }
+            return HistoryFileChangeIdentity(threadId: message.threadId, turnId: turnId, itemId: fallbackId)
+        })
+        guard !replacedFileChanges.isEmpty else { return Array(messages) }
+
+        return messages.filter { message in
+            guard message.role == .system, message.kind == .fileChange,
+                  let turnId = normalizedHistoryIdentifier(message.turnId),
+                  let itemId = normalizedHistoryIdentifier(message.itemId) else {
+                return true
+            }
+            return !replacedFileChanges.contains(
+                HistoryFileChangeIdentity(threadId: message.threadId, turnId: turnId, itemId: itemId)
+            )
+        }
+    }
+
     // Keeps running-thread reopen bounded to the recent transcript tail so A/B switching
     // does not repeatedly reconcile the entire chat while output is still streaming.
     nonisolated static func mergeRecentHistoryWindow(
@@ -1905,9 +1945,9 @@ extension CodexService {
         }
 
         let prefixCount = max(existing.count - normalizedWindowSize, 0)
-        let stablePrefix = Array(existing.prefix(prefixCount))
         let recentExisting = Array(existing.suffix(normalizedWindowSize))
         let recentHistory = Array(history.suffix(normalizedWindowSize))
+        let stablePrefix = removingReplacedFileChanges(from: existing.prefix(prefixCount), using: recentHistory)
         let mergedTail = try mergeHistoryMessages(
             recentExisting,
             recentHistory,
