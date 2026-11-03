@@ -261,7 +261,8 @@ extension CodexService {
                     "id": .string(threadId),
                     "turns": .array(chronologicalTurnsFromDescendingPage(page.turns)),
                 ]
-                let olderMessages = decodeMessagesFromThreadRead(threadId: threadId, threadObject: threadObject)
+                let decodedMessages = decodeMessagesFromThreadRead(threadId: threadId, threadObject: threadObject)
+                let olderMessages = Self.removingReplacedFileChanges(from: decodedMessages[...], using: decodedMessages)
                 registerSubagentThreads(from: olderMessages, parentThreadId: threadId)
 
                 let olderTerminalStates = decodeTurnTerminalStatesFromThreadRead(threadObject)
@@ -724,6 +725,11 @@ extension CodexService {
         let existingItemIDs = Set(existingMessages.compactMap { Self.normalizedHistoryIdentifier($0.itemId) })
         let existingMessageKeys = Set(existingMessages.map(Self.historyMessageKey(for:)))
         let filtered = olderMessages.filter { message in
+            // An overlapping native row can still replace a cached patch fallback.
+            if let fallbackId = Self.replacedFileChangeFallbackID(in: message),
+               existingItemIDs.contains(fallbackId) {
+                return true
+            }
             if let itemID = Self.normalizedHistoryIdentifier(message.itemId),
                existingItemIDs.contains(itemID) {
                 return false

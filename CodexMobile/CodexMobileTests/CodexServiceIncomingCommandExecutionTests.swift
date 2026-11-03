@@ -348,49 +348,46 @@ final class CodexServiceIncomingCommandExecutionTests: XCTestCase {
         XCTAssertEqual(deduplicated[0].kind, .toolActivity)
     }
 
-    func testHistoryMergeRemovesOnlyTheFileChangeFallbackReplacedInItsTurn() throws {
+    func testHistoryMergeRemovesOnlyTheFileChangeFallbackReplacedInItsTurn() async throws {
         let service = makeService()
         let threadID = "thread"
         let turnID = "turn"
         let fallbackID = "call-patch"
-        func cachedFallback(in turnID: String) -> CodexMessage {
+        func cachedFallback(in turnID: String, itemID: String) -> CodexMessage {
             CodexMessage(
                 threadId: threadID,
                 role: .system,
                 kind: .fileChange,
                 text: "Path: file.txt\nKind: update\nTotals: +1 -1",
                 turnId: turnID,
-                itemId: fallbackID
+                itemId: itemID
             )
         }
-        let otherTurn = cachedFallback(in: "other-turn")
-        let history = service.decodeMessagesFromThreadRead(
-            threadId: threadID,
-            threadObject: [
-                "turns": .array([
-                    .object([
-                        "id": .string(turnID),
-                        "items": .array([
-                            .object([
-                                "id": .string("native-file-change"),
-                                "type": .string("fileChange"),
-                                "remodexSourceItemKey": .string("remodex-file-change-fallback:\(fallbackID)"),
-                                "changes": .array([
-                                    .object([
-                                        "path": .string("/workspace/project/file.txt"),
-                                        "kind": .string("update"),
-                                        "diff": .string("@@ -8 +8 @@\n-old\n+new"),
-                                    ]),
-                                ]),
-                            ]),
+        let otherTurn = cachedFallback(in: "other-turn", itemID: "other-file-change")
+        let nativeTurn: JSONValue = .object([
+            "id": .string(turnID),
+            "items": .array([
+                .object([
+                    "id": .string("native-file-change"),
+                    "type": .string("fileChange"),
+                    "remodexSourceItemKey": .string("remodex-file-change-fallback:\(fallbackID)"),
+                    "changes": .array([
+                        .object([
+                            "path": .string("/workspace/project/file.txt"),
+                            "kind": .string("update"),
+                            "diff": .string("@@ -8 +8 @@\n-old\n+new"),
                         ]),
                     ]),
                 ]),
-            ]
+            ]),
+        ])
+        let history = service.decodeMessagesFromThreadRead(
+            threadId: threadID,
+            threadObject: ["turns": .array([nativeTurn])]
         )
 
-        let previous = [otherTurn, cachedFallback(in: turnID)] + history
-        let incoming = [otherTurn, cachedFallback(in: turnID)] + history
+        let previous = [otherTurn, cachedFallback(in: turnID, itemID: fallbackID)] + history
+        let incoming = [otherTurn, cachedFallback(in: turnID, itemID: fallbackID)] + history
         let mergedHistories = [
             service.mergeHistoryMessages(previous, incoming),
             service.mergeHistoryMessages([], incoming),
@@ -400,10 +397,27 @@ final class CodexServiceIncomingCommandExecutionTests: XCTestCase {
         ]
 
         for merged in mergedHistories {
-            XCTAssertEqual(merged.map(\.itemId), [fallbackID, "native-file-change"])
+            XCTAssertEqual(merged.map(\.itemId), ["other-file-change", "native-file-change"])
             XCTAssertEqual(merged.first?.id, otherTurn.id)
             XCTAssertTrue(merged.last?.text.contains("@@ -8 +8 @@") == true)
         }
+
+        service.messagesByThread[threadID] = previous
+        service.olderThreadHistoryCursorByThreadID[threadID] = .string("older")
+        service.requestTransportOverride = { method, params in
+            XCTAssertEqual(method, "thread/turns/list")
+            XCTAssertEqual(params?.objectValue?["cursor"], .string("older"))
+            return RPCMessage(
+                id: .string("file-change-page"),
+                result: .object(["data": .array([nativeTurn]), "nextCursor": .null]),
+                includeJSONRPC: false
+            )
+        }
+
+        await service.loadOlderThreadHistoryPage(threadId: threadID)
+
+        XCTAssertEqual(service.messages(for: threadID).map(\.itemId), ["other-file-change", "native-file-change"])
+        XCTAssertNil(service.olderHistoryLoadErrorByThreadID[threadID])
     }
 
     func testHistoryCompletedAtAliasAndTimezoneRestoreMessageTimestamp() {

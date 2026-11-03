@@ -23,7 +23,7 @@ fileprivate struct CanonicalAssistantTurnKey: Hashable {
     let turnId: String
 }
 
-fileprivate struct HistoryFileChangeIdentity: Hashable {
+fileprivate nonisolated struct HistoryFileChangeIdentity: Hashable {
     let threadId: String
     let turnId: String
     let itemId: String
@@ -1884,20 +1884,27 @@ extension CodexService {
         }
     }
 
-    private nonisolated static func removingReplacedFileChanges(
+    nonisolated static func replacedFileChangeFallbackID(in message: CodexMessage) -> String? {
+        let prefix = "remodex-file-change-fallback:"
+        guard message.role == .system, message.kind == .fileChange,
+              let itemId = normalizedHistoryIdentifier(message.itemId),
+              let sourceKey = message.sourceItemKey, sourceKey.hasPrefix(prefix),
+              let fallbackId = normalizedHistoryIdentifier(String(sourceKey.dropFirst(prefix.count))),
+              fallbackId != itemId else {
+            return nil
+        }
+        return fallbackId
+    }
+
+    nonisolated static func removingReplacedFileChanges(
         from messages: ArraySlice<CodexMessage>,
         using history: [CodexMessage]
     ) -> [CodexMessage] {
         // The bridge matched these synthesized patch rows to native completions.
         // Remove fallbacks by their original identity, scoped to the same turn.
-        let fallbackPrefix = "remodex-file-change-fallback:"
         let replacedFileChanges = Set(history.compactMap { message -> HistoryFileChangeIdentity? in
-            guard message.role == .system, message.kind == .fileChange,
-                  let turnId = normalizedHistoryIdentifier(message.turnId),
-                  let itemId = normalizedHistoryIdentifier(message.itemId),
-                  let sourceKey = message.sourceItemKey, sourceKey.hasPrefix(fallbackPrefix),
-                  let fallbackId = normalizedHistoryIdentifier(String(sourceKey.dropFirst(fallbackPrefix.count))),
-                  fallbackId != itemId else {
+            guard let turnId = normalizedHistoryIdentifier(message.turnId),
+                  let fallbackId = replacedFileChangeFallbackID(in: message) else {
                 return nil
             }
             return HistoryFileChangeIdentity(threadId: message.threadId, turnId: turnId, itemId: fallbackId)
