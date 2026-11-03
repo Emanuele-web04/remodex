@@ -78,6 +78,8 @@ struct MyDevicesSettingsSheet: View {
 
                 Section {
                     addConnectionRow
+                    Button("Pair with Code", systemImage: "keyboard", action: handlePairWithCode)
+                        .disabled(isSwitchingMac)
                 }
             }
             .listStyle(.insetGrouped)
