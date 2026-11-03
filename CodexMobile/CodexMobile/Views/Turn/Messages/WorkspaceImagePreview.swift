@@ -552,6 +552,10 @@ private struct WorkspaceTextFileViewerScreen: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var isShowingCopiedConfirmation = false
     @State private var copyResetTask: Task<Void, Never>?
+    @State private var sharedFile: WorkspaceTextFileShare?
+    @State private var isShowingShareSheet = false
+    @State private var shareErrorMessage = ""
+    @State private var isShowingShareError = false
 
     private var content: String {
         file.content ?? ""
@@ -601,10 +605,47 @@ private struct WorkspaceTextFileViewerScreen: View {
                         RemodexIcon.image(systemName: isShowingCopiedConfirmation ? "checkmark" : "doc.on.doc")
                     }
                     .accessibilityLabel("Copy file contents")
+
+                    Button {
+                        shareFile()
+                    } label: {
+                        RemodexIcon.image(systemName: "square.and.arrow.up")
+                            .frame(minWidth: 44, minHeight: 44)
+                    }
+                    .accessibilityLabel("Share file")
+                    .accessibilityHint("Save to Files or send a copy to another app")
+                    .disabled(file.content == nil || isShowingShareSheet)
                 }
+            }
+            .sheet(isPresented: $isShowingShareSheet, onDismiss: removeSharedFile) {
+                if let sharedFile {
+                    WorkspaceTextFileShareSheet(fileURL: sharedFile.fileURL)
+                }
+            }
+            .alert("Unable to Share File", isPresented: $isShowingShareError) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(shareErrorMessage)
             }
             .onDisappear { copyResetTask?.cancel() }
         }
+    }
+
+    private func shareFile() {
+        guard let content = file.content else { return }
+        do {
+            removeSharedFile()
+            sharedFile = try WorkspaceTextFileShare(fileName: file.fileName, content: content)
+            isShowingShareSheet = true
+        } catch {
+            shareErrorMessage = error.localizedDescription
+            isShowingShareError = true
+        }
+    }
+
+    private func removeSharedFile() {
+        sharedFile?.removeTemporaryFile()
+        sharedFile = nil
     }
 
     private func copyFileContents() {
