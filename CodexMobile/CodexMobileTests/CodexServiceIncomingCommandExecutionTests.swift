@@ -402,21 +402,40 @@ final class CodexServiceIncomingCommandExecutionTests: XCTestCase {
             XCTAssertTrue(merged.last?.text.contains("@@ -8 +8 @@") == true)
         }
 
-        service.messagesByThread[threadID] = previous
+        let request: JSONValue = .object([
+            "id": .string("request"),
+            "type": .string("userMessage"),
+            "content": .array([.object(["type": .string("text"), "text": .string("Edit file.txt")])]),
+        ])
+        let reply: JSONValue = .object([
+            "id": .string("reply"),
+            "type": .string("agentMessage"),
+            "text": .string("Done"),
+        ])
+        var completeTurn = try XCTUnwrap(nativeTurn.objectValue)
+        let nativeItems = try XCTUnwrap(completeTurn["items"]?.arrayValue)
+        completeTurn["items"] = .array([request] + nativeItems + [reply])
+        let completeHistory = service.decodeMessagesFromThreadRead(
+            threadId: threadID,
+            threadObject: ["turns": .array([.object(completeTurn)])]
+        )
+        var fallback = cachedFallback(in: turnID, itemID: fallbackID)
+        fallback.orderIndex = completeHistory[1].orderIndex
+        service.messagesByThread[threadID] = [completeHistory[0], fallback, completeHistory[2]]
         service.olderThreadHistoryCursorByThreadID[threadID] = .string("older")
         service.requestTransportOverride = { method, params in
             XCTAssertEqual(method, "thread/turns/list")
             XCTAssertEqual(params?.objectValue?["cursor"], .string("older"))
             return RPCMessage(
                 id: .string("file-change-page"),
-                result: .object(["data": .array([nativeTurn]), "nextCursor": .null]),
+                result: .object(["data": .array([.object(completeTurn)]), "nextCursor": .null]),
                 includeJSONRPC: false
             )
         }
 
         await service.loadOlderThreadHistoryPage(threadId: threadID)
 
-        XCTAssertEqual(service.messages(for: threadID).map(\.itemId), ["other-file-change", "native-file-change"])
+        XCTAssertEqual(service.messages(for: threadID).map(\.itemId), ["request", "native-file-change", "reply"])
         XCTAssertNil(service.olderHistoryLoadErrorByThreadID[threadID])
     }
 
