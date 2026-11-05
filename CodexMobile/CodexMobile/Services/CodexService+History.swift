@@ -1615,12 +1615,18 @@ extension CodexService {
             resolvedSegmentByGroup[groupKey] = canonicalNeighbourSegment ?? segmentBeforePending
         }
 
-        var groupKeysBySegment: [Int: [String]] = [:]
-        for groupKey in orderedGroupKeys {
-            let segment = min(
+        // Cached turn blocks can already be out of order after live/history
+        // reconciliation. Keep the occupied gaps around uncovered rows, but
+        // assign those gaps in canonical turn order. Reusing each group's old
+        // gap would otherwise preserve an inverted timeline on every refresh.
+        let orderedSegments = orderedGroupKeys.map { groupKey in
+            min(
                 max(resolvedSegmentByGroup[groupKey] ?? uncoveredMessages.count, 0),
                 uncoveredMessages.count
             )
+        }.sorted()
+        var groupKeysBySegment: [Int: [String]] = [:]
+        for (groupKey, segment) in zip(orderedGroupKeys, orderedSegments) {
             groupKeysBySegment[segment, default: []].append(groupKey)
         }
 

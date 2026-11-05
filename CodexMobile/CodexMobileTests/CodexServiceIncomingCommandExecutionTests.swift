@@ -4175,6 +4175,83 @@ final class CodexServiceIncomingCommandExecutionTests: XCTestCase {
         XCTAssertEqual(merged.map(\.id), ["assistant-1", "pending-user-2"])
     }
 
+    func testCanonicalPageRepairsInvertedCachedTurnsAcrossUncoveredRows() {
+        var messages = [
+            historyOrderRow("latest-user", turn: "latest", order: 1, role: .user),
+            historyOrderRow("latest-final", turn: "latest", order: 2),
+            historyOrderRow("local-only", turn: "uncovered", order: 3),
+            historyOrderRow("older-user", turn: "older", order: 4, role: .user),
+            historyOrderRow("older-final", turn: "older", order: 5),
+        ]
+        let originalIDs = Set(messages.map(\.id))
+        let canonicalOrder = ["older-user": 1, "older-final": 2, "latest-user": 3, "latest-final": 4]
+
+        CodexService.applyCanonicalHistoryOrder(
+            to: &messages,
+            canonicalOrderByMessageID: canonicalOrder,
+            originalMessageIDs: originalIDs
+        )
+
+        XCTAssertEqual(messages.filter { canonicalOrder[$0.id] != nil }.map(\.id),
+                       ["older-user", "older-final", "latest-user", "latest-final"])
+        XCTAssertEqual(messages.last?.id, "latest-final")
+        XCTAssertEqual(messages.map(\.id),
+                       ["older-user", "older-final", "local-only", "latest-user", "latest-final"])
+        XCTAssertEqual(Set(messages.map(\.id)), originalIDs)
+
+        let repairedIDs = messages.map(\.id)
+        CodexService.applyCanonicalHistoryOrder(
+            to: &messages,
+            canonicalOrderByMessageID: canonicalOrder,
+            originalMessageIDs: originalIDs
+        )
+        XCTAssertEqual(messages.map(\.id), repairedIDs)
+    }
+
+    func testCanonicalRepairPreservesConsistentPartialPageFences() {
+        var messages = [
+            historyOrderRow("older", turn: "older", order: 1),
+            historyOrderRow("uncovered", turn: "middle", order: 2),
+            historyOrderRow("latest", turn: "latest", order: 3),
+        ]
+        let originalIDs = Set(messages.map(\.id))
+        CodexService.applyCanonicalHistoryOrder(
+            to: &messages,
+            canonicalOrderByMessageID: ["older": 1, "latest": 2],
+            originalMessageIDs: originalIDs
+        )
+        XCTAssertEqual(messages.map(\.id), ["older", "uncovered", "latest"])
+    }
+
+    func testRepairKeepsPendingNextPromptAfterCompletedTurns() {
+        var pending = historyOrderRow("pending", turn: "next", order: 4, role: .user)
+        pending.deliveryState = .pending
+        var messages = [
+            historyOrderRow("latest", turn: "latest", order: 1),
+            historyOrderRow("uncovered", turn: "middle", order: 2),
+            historyOrderRow("older", turn: "older", order: 3),
+            pending,
+        ]
+        let originalIDs = Set(messages.map(\.id))
+        CodexService.applyCanonicalHistoryOrder(
+            to: &messages,
+            canonicalOrderByMessageID: ["older": 1, "latest": 2],
+            originalMessageIDs: originalIDs
+        )
+        XCTAssertEqual(messages.map(\.id), ["older", "uncovered", "latest", "pending"])
+        XCTAssertEqual(messages.last?.deliveryState, .pending)
+    }
+
+    private func historyOrderRow(
+        _ id: String,
+        turn: String,
+        order: Int,
+        role: CodexMessageRole = .assistant
+    ) -> CodexMessage {
+        CodexMessage(id: id, threadId: "history-order-test", role: role, text: id,
+                     turnId: turn, itemId: id, orderIndex: order)
+    }
+
     func testCanonicalRepairKeepsUncoveredMiddleTurnBetweenCoveredTurns() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"
