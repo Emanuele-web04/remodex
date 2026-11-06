@@ -1402,12 +1402,22 @@ extension CodexService {
                 resumedThread = decodedThread
 
                 if let threadObject = threadValue.objectValue {
+                    let suppressedAssistantItemIDs = Self.suppressedAssistantItemIDs(from: threadObject)
+                    if !suppressedAssistantItemIDs.isEmpty {
+                        removeSuppressedAssistantItems(
+                            threadId: threadId,
+                            itemIDs: suppressedAssistantItemIDs
+                        )
+                    }
                     if didRequestExcludedTurns,
                        threadObject["turns"]?.arrayValue?.isEmpty == false {
                         markTurnPaginationUnsupportedForCurrentRuntime()
                         didRequestExcludedTurns = false
                     }
-                    let historyMessages = decodeMessagesFromThreadRead(threadId: threadId, threadObject: threadObject)
+                    let historyMessages = Self.removingSuppressedAssistantItems(
+                        decodeMessagesFromThreadRead(threadId: threadId, threadObject: threadObject),
+                        itemIDs: suppressedAssistantItemIDs
+                    )
                     registerSubagentThreads(from: historyMessages, parentThreadId: threadId)
                     if !historyMessages.isEmpty {
                         didReceiveEmbeddedHistory = true
@@ -1416,7 +1426,10 @@ extension CodexService {
                             threadId: threadId,
                             decodedMessageCount: historyMessages.count
                         )
-                        let existingMessages = messagesByThread[threadId] ?? []
+                        let existingMessages = Self.removingSuppressedAssistantItems(
+                            messagesByThread[threadId] ?? [],
+                            itemIDs: suppressedAssistantItemIDs
+                        )
                         let activeThreadIDs = Set(activeTurnIdByThread.keys)
                         let activeTurnIDs = Set(activeTurnIdByThread.values)
                         let runningIDs = runningThreadIDs
@@ -1431,13 +1444,17 @@ extension CodexService {
                         if usedRecentWindow {
                             markThreadNeedingCanonicalHistoryReconcile(threadId)
                         }
-                        let merged = try await mergeHistoryMessagesOffMainActor(
+                        var merged = try await mergeHistoryMessagesOffMainActor(
                             existing: existingMessages,
                             history: historyMessages,
                             activeThreadIDs: activeThreadIDs,
                             activeTurnIDs: activeTurnIDs,
                             runningThreadIDs: runningIDs,
                             preferRecentWindow: usedRecentWindow
+                        )
+                        merged = Self.removingSuppressedAssistantItems(
+                            merged,
+                            itemIDs: suppressedAssistantItemIDs
                         )
                         guard !Task.isCancelled,
                               isPerThreadRefreshCurrent(for: threadId, generation: refreshGeneration) else {

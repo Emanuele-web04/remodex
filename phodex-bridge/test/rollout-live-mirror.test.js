@@ -16,6 +16,34 @@ const {
   isDesktopRolloutOrigin,
 } = require("../src/rollout-live-mirror");
 
+test("compaction handoff is not replayed as a final answer across accounting records", async (t) => {
+  const summary = "## Current progress\nInternal handoff, not a user reply.";
+  const { homeDir, rolloutPath } = createTemporaryRolloutHome({
+    threadId: "thread-compaction", originator: "Codex Desktop", source: "desktop",
+    lines: [
+      taskStarted("root-turn"), userMessage("Continue development"),
+      responseMessage(summary, "final_answer", "internal-summary", "internal-turn"),
+      JSON.stringify({ type: "token_usage_record", payload: {} }),
+      JSON.stringify({ type: "event_msg", payload: { type: "token_count" } }),
+      JSON.stringify({ type: "compacted", payload: { message: summary } }),
+      responseMessage("Development complete.", "final_answer", "real-final", "internal-turn"),
+    ],
+  });
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = homeDir;
+  t.after(() => { restoreCodexHome(previousCodexHome); fs.rmSync(homeDir, { recursive: true, force: true }); });
+  const outbound = [];
+  const controller = createRolloutLiveMirrorController({
+    sendApplicationResponse: (message) => outbound.push(JSON.parse(message)), pollIntervalMs: 5,
+  });
+  t.after(() => controller.stopAll());
+  controller.observeInbound(JSON.stringify({ method: "thread/resume", params: { threadId: "thread-compaction" } }));
+  await wait(30);
+  appendRolloutLines(rolloutPath, [JSON.stringify({ type: "event_msg", payload: { type: "task_complete", turn_id: "root-turn" } })]);
+  await wait(20);
+  assert.deepEqual(outbound.filter((e) => e.method === "codex/event/agent_message").map((e) => e.params.message), ["Development complete."]);
+});
+
 test("desktop-origin active runs replay thinking and exec command activity on resume", async (t) => {
   const { homeDir, rolloutPath } = createTemporaryRolloutHome({
     threadId: "thread-desktop",
@@ -1374,12 +1402,15 @@ test("desktop-origin mirror emits response_item assistant messages when event_ms
   });
 
   const outbound = [];
+  let clockMs = Date.now();
+  let intervalTick;
   const controller = createRolloutLiveMirrorController({
     sendApplicationResponse(message) {
       outbound.push(JSON.parse(message));
     },
-    pollIntervalMs: 5,
-    idleTimeoutMs: 50,
+    now: () => clockMs,
+    setIntervalFn(callback) { intervalTick = callback; return 1; },
+    clearIntervalFn() {},
   });
   t.after(() => controller.stopAll());
 
@@ -1389,6 +1420,9 @@ test("desktop-origin mirror emits response_item assistant messages when event_ms
   }));
 
   await wait(30);
+  assert.equal(outbound.some((entry) => entry.method === "codex/event/agent_message"), false);
+  clockMs += 1_500;
+  intervalTick();
 
   const message = outbound.find((entry) => entry.method === "codex/event/agent_message");
   assert.ok(message);
@@ -3034,3 +3068,99 @@ function restoreCodexHome(previousCodexHome) {
   }
   process.env.CODEX_HOME = previousCodexHome;
 }
+
+test("live compaction spanning polls retracts only a timed-out summary and keeps final before completion", (t) => {
+  const { homeDir, rolloutPath } = createTemporaryRolloutHome({
+    threadId: "thread-late-compaction", originator: "Codex Desktop", source: "desktop",
+    lines: [taskStarted("root-turn"), userMessage("Continue")],
+  });
+  const previous = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = homeDir;
+  let clockMs = Date.now();
+  let tick;
+  const outbound = [];
+  const controller = createRolloutLiveMirrorController({
+    sendApplicationResponse: (raw) => outbound.push(JSON.parse(raw)),
+    now: () => clockMs,
+    setIntervalFn(callback) { tick = callback; return 1; }, clearIntervalFn() {},
+    setImmediateFn() { return 2; }, clearImmediateFn() {},
+  });
+  t.after(() => { controller.stopAll(); restoreCodexHome(previous); fs.rmSync(homeDir, { recursive: true, force: true }); });
+  controller.observeInbound(JSON.stringify({ method: "thread/resume", params: { threadId: "thread-late-compaction" } }));
+  tick();
+  appendRolloutLines(rolloutPath, [responseMessage("Internal handoff", "final_answer", "late-summary", "internal-turn")]);
+  tick();
+  assert.equal(outbound.some((e) => e.method === "codex/event/agent_message"), false);
+  clockMs += 1_500;
+  tick();
+  assert.equal(outbound.find((e) => e.method === "codex/event/agent_message").params.itemId, "late-summary");
+  appendRolloutLines(rolloutPath, [JSON.stringify({ type: "compacted", payload: { message: "Internal handoff" } })]);
+  tick();
+  const removal = outbound.find((e) => e.method === "remodex/compactionSummary/removed");
+  assert.equal(removal.params.threadId, "thread-late-compaction");
+  assert.deepEqual(removal.params.itemIds, ["late-summary"]);
+  appendRolloutLines(rolloutPath, [
+    responseMessage("Actual final", "final_answer", "real-final", "internal-turn"),
+    JSON.stringify({ type: "event_msg", payload: { type: "task_complete", turn_id: "root-turn" } }),
+  ]);
+  tick();
+  const finalIndex = outbound.findIndex((e) => e.params?.itemId === "real-final");
+  const completedIndex = outbound.findIndex((e) => e.method === "turn/completed");
+  assert.ok(finalIndex >= 0 && completedIndex > finalIndex);
+});
+
+test("log truncation releases an unconfirmed normal final before resetting the mirror", (t) => {
+  const { homeDir, rolloutPath } = createTemporaryRolloutHome({
+    threadId: "thread-truncated-final", originator: "Codex Desktop", source: "desktop",
+    lines: [taskStarted("root-turn"), userMessage("Continue"), responseMessage("Actual final", "final_answer", "real-final")],
+  });
+  const previous = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = homeDir;
+  let tick;
+  const outbound = [];
+  const controller = createRolloutLiveMirrorController({
+    sendApplicationResponse: (raw) => outbound.push(JSON.parse(raw)),
+    setIntervalFn(callback) { tick = callback; return 1; }, clearIntervalFn() {},
+    setImmediateFn() { return 2; }, clearImmediateFn() {},
+  });
+  t.after(() => { controller.stopAll(); restoreCodexHome(previous); fs.rmSync(homeDir, { recursive: true, force: true }); });
+  controller.observeInbound(JSON.stringify({ method: "thread/resume", params: { threadId: "thread-truncated-final" } }));
+  tick();
+  assert.equal(outbound.some((e) => e.params?.itemId === "real-final"), false);
+  fs.truncateSync(rolloutPath, 0);
+  tick();
+  assert.equal(outbound.filter((e) => e.params?.itemId === "real-final").length, 1);
+});
+
+test("dual event/response compaction cleans the exact synthetic event row in live and recovered history", (t) => {
+  const threadId = "thread-dual-compaction";
+  const { homeDir, rolloutPath } = createTemporaryRolloutHome({
+    threadId, originator: "Codex Desktop", source: "desktop",
+    lines: [taskStarted("root-turn"), userMessage("Continue"),
+      agentMessage("Internal handoff"),
+      responseMessage("Internal handoff", "final_answer", "summary-provider", "internal-turn"),
+      JSON.stringify({ type: "compacted", payload: { message: "Internal handoff" } }),
+      agentMessage("Real final", "commentary"),
+    ],
+  });
+  const previous = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = homeDir;
+  let tick;
+  const outbound = [];
+  const controller = createRolloutLiveMirrorController({
+    sendApplicationResponse: (raw) => outbound.push(JSON.parse(raw)),
+    setIntervalFn(callback) { tick = callback; return 1; }, clearIntervalFn() {},
+    setImmediateFn() { return 2; }, clearImmediateFn() {},
+  });
+  t.after(() => { controller.stopAll(); restoreCodexHome(previous); fs.rmSync(homeDir, { recursive: true, force: true }); });
+  controller.observeInbound(JSON.stringify({ method: "thread/resume", params: { threadId } }));
+  tick();
+  const leakedEvent = outbound.find((e) => e.params?.message === "Internal handoff");
+  const removal = outbound.find((e) => e.method === "remodex/compactionSummary/removed");
+  assert.deepEqual(removal.params.itemIds, [leakedEvent.params.itemId, "summary-provider"]);
+  const remaining = outbound.filter((e) => e.method === "codex/event/agent_message" && !removal.params.itemIds.includes(e.params.itemId));
+  assert.deepEqual(remaining.map((e) => e.params.message), ["Real final"]);
+  const { parseSessionJsonlHistory } = require("../src/session-jsonl-history");
+  const recovered = parseSessionJsonlHistory(fs.readFileSync(rolloutPath, "utf8"), { threadId });
+  assert.deepEqual(recovered.suppressedAssistantItemIds, removal.params.itemIds);
+});

@@ -130,6 +130,7 @@ test(`bridge transfers a dormant Desktop-origin task after local resume succeeds
   const relayServer = new WebSocket.Server({ port: 0 });
   const relayMessages = [];
   const ipcFrames = [];
+  const ipcSockets = new Set();
   let relaySocket = null;
   let bridge = null;
   let fakeCodex = null;
@@ -142,6 +143,8 @@ test(`bridge transfers a dormant Desktop-origin task after local resume succeeds
     });
   });
   const ipcServer = net.createServer((socket) => {
+    ipcSockets.add(socket);
+    socket.once("close", () => ipcSockets.delete(socket));
     attachFrameReader(socket, (frame) => {
       ipcFrames.push(frame);
       if (frame.method === "initialize") {
@@ -169,11 +172,17 @@ test(`bridge transfers a dormant Desktop-origin task after local resume succeeds
       return fakeCodex;
     },
   });
-  t.after(() => {
+  t.after(async () => {
+    // Live sync opens both follower and owner sockets. Close every test-side
+    // peer before stopping the bridge so Linux cannot deliver a late reset
+    // to an unowned socket after this test has completed.
+    for (const socket of ipcSockets) socket.destroy();
     bridge?.stop();
-    relaySocket?.close();
-    relayServer.close();
-    ipcServer.close();
+    relaySocket?.terminate();
+    await Promise.all([
+      new Promise((resolve, reject) => ipcServer.close((error) => error ? reject(error) : resolve())),
+      new Promise((resolve, reject) => relayServer.close((error) => error ? reject(error) : resolve())),
+    ]);
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
   bridge = startBridge({

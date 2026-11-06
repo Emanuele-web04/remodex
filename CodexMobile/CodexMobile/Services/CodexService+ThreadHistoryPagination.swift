@@ -134,6 +134,7 @@ struct ThreadTurnsHistoryPage {
     let turns: [JSONValue]
     let nextCursor: JSONValue
     let isProvisionalJsonlFallback: Bool
+    let suppressedAssistantItemIDs: Set<String>
 }
 
 extension CodexService {
@@ -178,7 +179,8 @@ extension CodexService {
         return ThreadTurnsHistoryPage(
             turns: turns,
             nextCursor: threadTurnsListCursor(from: resultObject),
-            isProvisionalJsonlFallback: resultObject["remodexJsonlFallback"]?.boolValue == true
+            isProvisionalJsonlFallback: resultObject["remodexJsonlFallback"]?.boolValue == true,
+            suppressedAssistantItemIDs: Self.suppressedAssistantItemIDs(from: resultObject)
         )
     }
 
@@ -249,6 +251,12 @@ extension CodexService {
                     cursor: pageCursor,
                     timeoutNanoseconds: ThreadHistoryHydrationPolicy.requestTimeoutNanoseconds
                 )
+                if !page.suppressedAssistantItemIDs.isEmpty {
+                    removeSuppressedAssistantItems(
+                        threadId: threadId,
+                        itemIDs: page.suppressedAssistantItemIDs
+                    )
+                }
                 let elapsedMs = Int(Date().timeIntervalSince(startedAt) * 1000)
                 let hasNextCursor = cursorHasValue(page.nextCursor)
                 debugSyncLog("thread/turns/list older thread=\(threadId) limit=\(ThreadHistoryHydrationPolicy.olderTurnPageSize) turns=\(page.turns.count) hasNextCursor=\(hasNextCursor) elapsedMs=\(elapsedMs)")
@@ -261,7 +269,10 @@ extension CodexService {
                     "id": .string(threadId),
                     "turns": .array(chronologicalTurnsFromDescendingPage(page.turns)),
                 ]
-                let decodedMessages = decodeMessagesFromThreadRead(threadId: threadId, threadObject: threadObject)
+                let decodedMessages = Self.removingSuppressedAssistantItems(
+                    decodeMessagesFromThreadRead(threadId: threadId, threadObject: threadObject),
+                    itemIDs: page.suppressedAssistantItemIDs
+                )
                 let olderMessages = Self.removingReplacedFileChanges(from: decodedMessages[...], using: decodedMessages)
                 registerSubagentThreads(from: olderMessages, parentThreadId: threadId)
 
@@ -338,6 +349,10 @@ extension CodexService {
                     runningThreadIDs: runningThreadIDs,
                     preferRecentWindow: false
                 )
+                merged = Self.removingSuppressedAssistantItems(
+                    merged,
+                    itemIDs: page.suppressedAssistantItemIDs
+                )
 
                 guard !Task.isCancelled,
                       isPerThreadRefreshCurrent(for: threadId, generation: refreshGeneration) else {
@@ -382,6 +397,10 @@ extension CodexService {
                             activeTurnIDs: Set(activeTurnIdByThread.values),
                             runningThreadIDs: runningThreadIDs,
                             preferRecentWindow: false
+                        )
+                        merged = Self.removingSuppressedAssistantItems(
+                            merged,
+                            itemIDs: page.suppressedAssistantItemIDs
                         )
                     }
                     guard !Task.isCancelled,

@@ -3,6 +3,7 @@
 // including desktop-local timestamp metadata for mobile history rendering.
 
 const fs = require("fs");
+const { createCompactionSummaryFilter, rolloutAgentMessageItemId } = require("./rollout-compaction-summary");
 const path = require("path");
 const { buildApplyPatchFileChangeItem } = require("./apply-patch-changes");
 const {
@@ -65,6 +66,7 @@ function readThreadTurnsListPageFromSessionJsonl(filePath, {
       ? JSONL_OLDER_HANDOFF_CURSOR
       : null,
     remodexJsonlFallback: true,
+    remodexSuppressedAssistantItemIds: recent.suppressedAssistantItemIds || [],
   };
 }
 
@@ -87,8 +89,8 @@ function readRecentSessionJsonlTurns(filePath, {
   // filesystem path, which must never stringify a multi-gigabyte rollout.
   if (!supportsBoundedSessionJsonlReads(fsModule)) {
     const content = fsModule.readFileSync(filePath, "utf8");
-    const turns = parseSessionJsonlTurns(content, { threadId });
-    return turns.length > 0 ? { turns, hasOlderTurns: false, bytesRead: Buffer.byteLength(content, "utf8") } : null;
+    const { turns, suppressedAssistantItemIds } = parseSessionJsonlHistory(content, { threadId });
+    return turns.length > 0 ? { turns, suppressedAssistantItemIds, hasOlderTurns: false, bytesRead: Buffer.byteLength(content, "utf8") } : null;
   }
 
   const stat = fsModule.statSync(filePath);
@@ -127,7 +129,7 @@ function readRecentSessionJsonlTurns(filePath, {
           aligned.buffer,
           aligned.sourceByteOffset
         );
-        const turns = parseSessionJsonlTurns(content, {
+        const { turns, suppressedAssistantItemIds } = parseSessionJsonlHistory(content, {
           threadId,
           initialMetadata,
           sourceByteOffset: aligned.sourceByteOffset,
@@ -150,6 +152,7 @@ function readRecentSessionJsonlTurns(filePath, {
           }
           return {
             turns: safeTurns,
+            suppressedAssistantItemIds,
             hasOlderTurns: rawStart > 0 || turns.length > safeTurns.length,
             bytesRead: metadataBuffer.length + tailBuffer.length,
           };
@@ -439,12 +442,18 @@ function parseSessionJsonlMetadata(content) {
   return { threadId, cwd, forkedFromId, threadSource };
 }
 
-function parseSessionJsonlTurns(content, {
+function parseSessionJsonlTurns(content, options = {}) {
+  return parseSessionJsonlHistory(content, options).turns;
+}
+
+function parseSessionJsonlHistory(content, {
   threadId = "",
   initialMetadata = null,
   sourceByteOffset = 0,
   sourceLineByteOffsets = null,
 } = {}) {
+  const compactionFilter = createCompactionSummaryFilter();
+  const suppressedAssistantItemIds = new Set();
   const turns = [];
   const turnsById = new Map();
   let activeTurnId = "";
@@ -488,6 +497,14 @@ function parseSessionJsonlTurns(content, {
     } catch {
       continue;
     }
+
+    const event = entry?.type === "event_msg" && entry.payload?.type === "agent_message" ? entry.payload : null;
+    const eventItemId = event ? rolloutAgentMessageItemId(
+      sessionThreadId, normalizeString(event.turn_id) || normalizeString(event.turnId) || activeTurnId,
+      entry, normalizeString(event.message) || normalizeString(event.text)
+    ) : "";
+    const compaction = compactionFilter.push(entry, { eventItemId });
+    for (const id of compaction.suppressedItemIds) suppressedAssistantItemIds.add(id);
 
     if (entry?.type === "session_meta") {
       const payload = objectValue(entry.payload);
@@ -697,7 +714,13 @@ function parseSessionJsonlTurns(content, {
     closeSyntheticHistoryTurn(turnsById, pendingSyntheticTerminal);
   }
 
-  return turns.filter((turn) => turn.items.length > 0);
+  for (const turn of turns) {
+    turn.items = turn.items.filter((item) => !(item.role === "assistant" && suppressedAssistantItemIds.has(item.id)));
+  }
+  return {
+    turns: turns.filter((turn) => turn.items.length > 0),
+    suppressedAssistantItemIds: [...suppressedAssistantItemIds],
+  };
 }
 
 // The apply_patch transcript uses unnumbered hunks and can spell paths
@@ -1630,6 +1653,7 @@ module.exports = {
   JSONL_OLDER_HANDOFF_CURSOR,
   parseSessionJsonlMetadata,
   parseSessionJsonlTurns,
+  parseSessionJsonlHistory,
   readRecentSessionJsonlCwd,
   readRecentSessionJsonlTurns,
   readSessionJsonlMetadataFromFile,

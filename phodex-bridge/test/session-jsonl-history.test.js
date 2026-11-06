@@ -12,6 +12,27 @@ const {
   readThreadTurnsListPageFromSessionJsonl,
 } = require("../src/session-jsonl-history");
 
+test("JSONL history excludes confirmed compaction summaries without deleting the real final", () => {
+  const summary = "Internal handoff summary";
+  const message = (id, text) => ({ type: "response_item", payload: {
+    id, type: "message", role: "assistant", phase: "final_answer",
+    internal_chat_message_metadata_passthrough: { turn_id: "internal-turn" },
+    content: [{ type: "output_text", text }],
+  } });
+  const turns = parseSessionJsonlTurns([
+    { type: "event_msg", payload: { type: "task_started", turn_id: "root-turn" } },
+    { type: "event_msg", payload: { type: "user_message", message: "Continue" } },
+    message("summary", summary),
+    { type: "token_usage_record", payload: {} },
+    { type: "event_msg", payload: { type: "token_count" } },
+    { type: "compacted", payload: { message: summary } },
+    message("real-final", "Completed successfully"),
+    { type: "event_msg", payload: { type: "task_complete", turn_id: "root-turn" } },
+  ].map(JSON.stringify).join("\n"), { threadId: "thread-compaction" });
+  const messages = turns.flatMap((turn) => turn.items).filter((item) => item.role === "assistant");
+  assert.deepEqual(messages.map((item) => item.id), ["real-final"]);
+});
+
 test("parseSessionJsonlMetadata reads desktop thread cwd", () => {
   const content = [
     JSON.stringify({

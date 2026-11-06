@@ -1396,6 +1396,11 @@ extension CodexService {
                         "id": .string(threadId),
                         "turns": .array(chronologicalTurnsFromDescendingPage(turnsPage.turns)),
                     ]
+                    if !turnsPage.suppressedAssistantItemIDs.isEmpty {
+                        threadObject["remodexSuppressedAssistantItemIds"] = .array(
+                            turnsPage.suppressedAssistantItemIDs.sorted().map(JSONValue.string)
+                        )
+                    }
                 } catch let error as CodexServiceError {
                     if shouldTreatAsEmptyUnmaterializedThreadHistory(
                         error,
@@ -1486,8 +1491,19 @@ extension CodexService {
                 }
             }
 
-            let historyMessages = decodeMessagesFromThreadRead(threadId: threadId, threadObject: threadObject)
-            let isSuspiciousEmptyHistory = historyMessages.isEmpty
+            let suppressedAssistantItemIDs = Self.suppressedAssistantItemIDs(from: threadObject)
+            if !suppressedAssistantItemIDs.isEmpty {
+                removeSuppressedAssistantItems(
+                    threadId: threadId,
+                    itemIDs: suppressedAssistantItemIDs
+                )
+            }
+            let decodedHistoryMessages = decodeMessagesFromThreadRead(threadId: threadId, threadObject: threadObject)
+            let historyMessages = Self.removingSuppressedAssistantItems(
+                decodedHistoryMessages,
+                itemIDs: suppressedAssistantItemIDs
+            )
+            let isSuspiciousEmptyHistory = decodedHistoryMessages.isEmpty
                 && shouldDeferEmptyThreadHistoryPage(
                     threadId: threadId,
                     loadedViaPagination: loadedViaPagination
@@ -1544,12 +1560,16 @@ extension CodexService {
                     _ cached: [CodexMessage],
                     shouldRepairMirroredCanonicalTail: Bool
                 ) -> [CodexMessage] {
-                    return shouldRepairMirroredCanonicalTail
+                    let prepared = shouldRepairMirroredCanonicalTail
                         ? Self.existingMessagesForCanonicalSourceReplacement(
                             cached,
                             history: historyMessages
                         )
                         : cached
+                    return Self.removingSuppressedAssistantItems(
+                        prepared,
+                        itemIDs: suppressedAssistantItemIDs
+                    )
                 }
                 var existingMessages = preparedExistingMessages(
                     cachedMessages,
@@ -1584,6 +1604,10 @@ extension CodexService {
                     runningThreadIDs: runningThreadIDs,
                     preferRecentWindow: usedRecentWindow
                 )
+                merged = Self.removingSuppressedAssistantItems(
+                    merged,
+                    itemIDs: suppressedAssistantItemIDs
+                )
                 guard !Task.isCancelled,
                       isPerThreadRefreshCurrent(for: threadId, generation: refreshGeneration) else {
                     throw CancellationError()
@@ -1614,6 +1638,10 @@ extension CodexService {
                         activeTurnIDs: Set(activeTurnIdByThread.values),
                         runningThreadIDs: runningThreadIDs,
                         preferRecentWindow: usedRecentWindow
+                    )
+                    merged = Self.removingSuppressedAssistantItems(
+                        merged,
+                        itemIDs: suppressedAssistantItemIDs
                     )
                     guard !Task.isCancelled,
                           isPerThreadRefreshCurrent(for: threadId, generation: refreshGeneration) else {
@@ -5059,6 +5087,56 @@ extension CodexService {
     private func removeAssistantStreamingLookups(messageId: String) {
         streamingAssistantFallbackMessageByTurnID = streamingAssistantFallbackMessageByTurnID.filter { $0.value != messageId }
         streamingAssistantMessageByItemKey = streamingAssistantMessageByItemKey.filter { $0.value != messageId }
+    }
+
+    @discardableResult
+    func removeSuppressedAssistantItems(
+        threadId: String,
+        itemIDs: Set<String>,
+        invalidateRefreshWork: Bool = false
+    ) -> Bool {
+        guard !itemIDs.isEmpty else {
+            return false
+        }
+        if invalidateRefreshWork {
+            cancelPerThreadRefreshWork(for: threadId)
+        }
+        discardPendingAssistantDeltas(threadId: threadId, itemIDs: itemIDs)
+        guard let existing = messagesByThread[threadId] else { return false }
+        let filtered = Self.removingSuppressedAssistantItems(existing, itemIDs: itemIDs)
+        guard filtered.count != existing.count else { return false }
+
+        let retainedMessageIDs = Set(filtered.map(\.id))
+        for removed in existing where !retainedMessageIDs.contains(removed.id) {
+            removeAssistantStreamingLookups(messageId: removed.id)
+        }
+        messagesByThread[threadId] = filtered
+        persistMessages()
+        updateCurrentOutput(for: threadId)
+        return true
+    }
+
+    private func discardPendingAssistantDeltas(threadId: String, itemIDs: Set<String>) {
+        let streamIDs: [String] = pendingAssistantDeltaContextByStreamID.compactMap { element -> String? in
+            let (streamID, context) = element
+            guard context.threadId == threadId,
+                  let itemID = context.itemId,
+                  itemIDs.contains(itemID) else {
+                return nil
+            }
+            return streamID
+        }
+        guard !streamIDs.isEmpty else { return }
+        let removedStreamIDs = Set(streamIDs)
+        for streamID in removedStreamIDs {
+            pendingAssistantDeltaByStreamID.removeValue(forKey: streamID)
+            pendingAssistantDeltaContextByStreamID.removeValue(forKey: streamID)
+        }
+        pendingAssistantDeltaStreamOrder.removeAll { removedStreamIDs.contains($0) }
+        if pendingAssistantDeltaByStreamID.isEmpty {
+            pendingAssistantDeltaFlushTask?.cancel()
+            pendingAssistantDeltaFlushTask = nil
+        }
     }
 
     // The live fast path removes a streaming assistant row as soon as its text turns

@@ -3591,6 +3591,80 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertEqual(snapshot.latestTurnID, "turn-31")
     }
 
+    func testCompactionSummaryRemovalDeletesOnlyMatchingAssistantItem() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let summaryItemID = "summary-item"
+        service.messagesByThread[threadID] = [
+            CodexMessage(
+                threadId: threadID,
+                role: .assistant,
+                text: "Internal handoff",
+                itemId: summaryItemID,
+                isStreaming: false
+            ),
+            CodexMessage(
+                threadId: threadID,
+                role: .assistant,
+                text: "Internal handoff",
+                itemId: "real-item",
+                isStreaming: false
+            ),
+            CodexMessage(
+                threadId: threadID,
+                role: .user,
+                text: "User text",
+                itemId: summaryItemID,
+                isStreaming: false
+            ),
+        ]
+        service.appendAssistantDelta(
+            threadId: threadID,
+            turnId: "summary-turn",
+            itemId: summaryItemID,
+            delta: " queued suffix"
+        )
+        let refreshGeneration = service.currentPerThreadRefreshGeneration(for: threadID)
+
+        service.handleNotification(
+            method: "remodex/compactionSummary/removed",
+            params: .object([
+                "threadId": .string(threadID),
+                "itemIds": .array([.string(summaryItemID)]),
+            ])
+        )
+        service.flushPendingAssistantDeltas(for: threadID)
+
+        let messages = service.messages(for: threadID)
+        XCTAssertEqual(messages.count, 2)
+        XCTAssertNotEqual(service.currentPerThreadRefreshGeneration(for: threadID), refreshGeneration)
+        XCTAssertTrue(messages.contains { $0.role == .assistant && $0.itemId == "real-item" })
+        XCTAssertTrue(messages.contains { $0.role == .user && $0.itemId == summaryItemID })
+    }
+
+    func testSuppressedAssistantHistoryMetadataFiltersOnlyExactProviderItemIDs() {
+        let threadID = "thread-\(UUID().uuidString)"
+        let messages = [
+            CodexMessage(threadId: threadID, role: .assistant, text: "Summary", itemId: "summary-item"),
+            CodexMessage(threadId: threadID, role: .assistant, text: "Final", itemId: "final-item"),
+            CodexMessage(threadId: threadID, role: .user, text: "Prompt", itemId: "summary-item"),
+        ]
+        let threadObject: RPCObject = [
+            "remodexSuppressedAssistantItemIds": .array([
+                .string("summary-item"),
+                .string("  "),
+            ]),
+        ]
+
+        let itemIDs = CodexService.suppressedAssistantItemIDs(from: threadObject)
+        let filtered = CodexService.removingSuppressedAssistantItems(messages, itemIDs: itemIDs)
+
+        XCTAssertEqual(itemIDs, ["summary-item"])
+        XCTAssertEqual(filtered.count, 2)
+        XCTAssertTrue(filtered.contains { $0.role == .assistant && $0.itemId == "final-item" })
+        XCTAssertTrue(filtered.contains { $0.role == .user && $0.itemId == "summary-item" })
+    }
+
     // A genuinely running turn after the marker must still be detected.
     func testTurnStateSnapshotStillDetectsRunningTurnPastCompactionMarker() {
         let service = makeService()
