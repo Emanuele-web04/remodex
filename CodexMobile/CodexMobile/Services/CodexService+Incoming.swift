@@ -396,6 +396,18 @@ extension CodexService {
         case "item/completed", "codex/event/item_completed", "codex/event/agent_message":
             appendCompletedAgentText(from: paramsObject)
 
+        case "remodex/compactionSummary/removed":
+            guard let paramsObject,
+                  let threadId = normalizedIdentifier(paramsObject["threadId"]?.stringValue) else {
+                break
+            }
+            let itemIDs = Self.suppressedAssistantItemIDs(from: paramsObject, key: "itemIds")
+            removeSuppressedAssistantItems(
+                threadId: threadId,
+                itemIDs: itemIDs,
+                invalidateRefreshWork: true
+            )
+
         case "item/started", "codex/event/item_started":
             handleItemStarted(paramsObject)
 

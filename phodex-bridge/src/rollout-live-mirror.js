@@ -5,7 +5,7 @@
 // Depends on: fs, crypto, path, ./rollout-watch, ./codex-home
 
 const fs = require("fs");
-const crypto = require("crypto");
+const { createCompactionSummaryFilter, rolloutAgentMessageItemId } = require("./rollout-compaction-summary");
 const path = require("path");
 const {
   findRecentRolloutFileForContextRead,
@@ -34,6 +34,7 @@ const {
 // Keep this interval comfortably above that settle window, or lower both
 // together, so consecutive ticks never merge into one batch.
 const DEFAULT_POLL_INTERVAL_MS = 250;
+const COMPACTION_CANDIDATE_GRACE_MS = 1_000;
 const DEFAULT_LOOKUP_TIMEOUT_MS = 5_000;
 const DEFAULT_IDLE_TIMEOUT_MS = 60_000;
 const DEFAULT_ACTIVITY_HEARTBEAT_MS = 5_000;
@@ -280,6 +281,13 @@ function createThreadRolloutLiveMirror({
       }
 
       if (fileSize < lastSize) {
+        // The rewritten file may no longer contain this final. Without positive
+        // compaction evidence, release it before discarding the old parser state.
+        if (!state.suppressLiveActivityUntilGrowth) {
+          for (const notification of flushCompactionCandidate(state, currentTime)) {
+            sendApplicationResponse(JSON.stringify(notification));
+          }
+        }
         // Rollout files can be rewritten/truncated by desktop recovery. The
         // rewritten contents are a different history, not live growth: reset the
         // cursor and re-run the bootstrap path (tagged catch-up / terminal
@@ -325,6 +333,13 @@ function createThreadRolloutLiveMirror({
         state.suppressLiveActivityUntilGrowth = false;
         processRolloutLines(lines, state, sendApplicationResponse, { nowMs: currentTime });
         return;
+      }
+
+      if (!state.suppressLiveActivityUntilGrowth && state.compactionCandidateSince != null
+          && currentTime - state.compactionCandidateSince >= COMPACTION_CANDIDATE_GRACE_MS) {
+        for (const notification of flushCompactionCandidate(state, currentTime)) {
+          sendApplicationResponse(JSON.stringify(notification));
+        }
       }
 
       const syntheticTerminalNotifications = finalizePendingSyntheticTerminalIfReady(
@@ -400,6 +415,15 @@ function createThreadRolloutLiveMirror({
         processRolloutLines([flushLine], state, sendApplicationResponse, { nowMs: now() });
       } catch (error) {
         console.warn(`${logPrefix} rollout live mirror final flush failed for ${threadId}: ${error.message}`);
+      }
+    }
+    if (!state.suppressLiveActivityUntilGrowth) {
+      try {
+        for (const notification of flushCompactionCandidate(state, now())) {
+          sendApplicationResponse(JSON.stringify(notification));
+        }
+      } catch (error) {
+        console.warn(`${logPrefix} rollout final answer flush failed: ${error.message}`);
       }
     }
     onStop();
@@ -591,7 +615,7 @@ function bootstrapFromExistingRollout({
     activeRunLines.length > 0
     && isRolloutFileStale(rolloutPath, fsModule, nowMs, staleActiveRunMaxAgeMs)
   ) {
-    processRolloutLines(activeRunLines, state, () => {});
+    processRolloutLines(activeRunLines, state, () => {}, { nowMs });
     // task_started resets per-run state while hydrating. Apply the stale-run
     // suppression afterwards so it survives until real file growth proves the
     // desktop process is alive again.
@@ -604,6 +628,7 @@ function bootstrapFromExistingRollout({
   // the run still reads as active without waiting for the next heartbeat.
   processRolloutLines(activeRunLines, state, sendApplicationResponse, {
     tagBootstrapReplay: true,
+    nowMs,
   });
   if (activeRunLines.length > 0 && state.activeTurnId) {
     sendApplicationResponse(JSON.stringify(createNotification("turn/activity", {
@@ -936,6 +961,36 @@ function processRolloutLines(lines, state, sendApplicationResponse, {
 }
 
 function synthesizeNotificationsFromRolloutEntry(entry, state, { nowMs = Date.now() } = {}) {
+  const event = entry?.type === "event_msg" && entry.payload?.type === "agent_message" ? entry.payload : null;
+  const eventItemId = event ? buildAgentMessageItemId(
+    state.threadId, readString(event.turn_id) || readString(event.turnId) || state.activeTurnId,
+    entry, readString(event.message) || readString(event.text)
+  ) : "";
+  const filtered = state.compactionFilter.push(entry, { eventItemId });
+  if ((entry?.type === "response_item" || event) && entry.payload?.phase === "final_answer") {
+    state.compactionCandidateSince = nowMs;
+  }
+  const notifications = filtered.entries.flatMap((item) => (
+    synthesizeVisibleRolloutEntry(item, state, { nowMs })
+  ));
+  if (filtered.suppressedItemIds.length > 0) {
+    state.compactionCandidateSince = null;
+    notifications.push(createNotification("remodex/compactionSummary/removed", {
+      threadId: state.threadId,
+      itemIds: filtered.suppressedItemIds,
+    }));
+  }
+  return notifications;
+}
+
+function flushCompactionCandidate(state, nowMs) {
+  state.compactionCandidateSince = null;
+  return state.compactionFilter.flush().flatMap((entry) => (
+    synthesizeVisibleRolloutEntry(entry, state, { nowMs })
+  ));
+}
+
+function synthesizeVisibleRolloutEntry(entry, state, { nowMs = Date.now() } = {}) {
   if (entry?.type === "session_meta") {
     populateSessionMetaState(state, entry.payload);
     if (!isDesktopRolloutOrigin(state.sessionMeta)) {
@@ -1875,6 +1930,8 @@ function ensureThinkingNotifications(state) {
 function createMirrorState(threadId) {
   return {
     threadId,
+    compactionFilter: createCompactionSummaryFilter(),
+    compactionCandidateSince: null,
     sessionMeta: null,
     isDesktopOrigin: null,
     activeTurnId: null,
@@ -2172,18 +2229,7 @@ function promoteSyntheticTurnId(state, explicitTurnId) {
 }
 
 function buildAgentMessageItemId(threadId, turnId, entry, message) {
-  const timestamp = readString(entry?.timestamp) || "untimed";
-  const messageHash = crypto
-    .createHash("sha256")
-    .update(readString(message))
-    .digest("hex")
-    .slice(0, 12);
-  return buildSyntheticItemId(
-    "agent-message",
-    threadId,
-    turnId || "turnless",
-    `${timestamp}:${messageHash}`
-  );
+  return rolloutAgentMessageItemId(threadId, turnId, entry, message);
 }
 
 // Keyed on turn + text only: the same assistant text often arrives twice per
@@ -2210,6 +2256,8 @@ function normalizeRolloutItemType(value) {
 }
 
 function resetRunState(state) {
+  state.compactionFilter = createCompactionSummaryFilter();
+  state.compactionCandidateSince = null;
   state.activeTurnId = null;
   state.reasoningItemId = null;
   state.hasThinking = false;

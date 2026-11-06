@@ -4152,3 +4152,34 @@ test("sanitizeThreadHistoryImagesForRelay truncates the newest oversized text it
   assert.equal(item.text.startsWith("…\n"), true);
   assert.equal(item.text.includes("header"), false);
 });
+
+test("compaction suppression IDs survive thread read and paginated history even with internal turn IDs", (t) => {
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-compaction-history-"));
+  const previous = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = codexHome;
+  t.after(() => {
+    if (previous == null) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previous;
+    fs.rmSync(codexHome, { recursive: true, force: true });
+  });
+  const threadId = "thread-compaction-cleanup";
+  const dir = path.join(codexHome, "sessions", "2026", "11", "06");
+  fs.mkdirSync(dir, { recursive: true });
+  const summary = { id: "summary-id", type: "message", role: "assistant", phase: "final_answer", content: [{ type: "output_text", text: "Internal summary" }], internal_chat_message_metadata_passthrough: { turn_id: "internal-turn" } };
+  fs.writeFileSync(path.join(dir, `rollout-2026-11-06T00-00-00-${threadId}.jsonl`), [
+    { type: "session_meta", payload: { id: threadId, cwd: "/repo" } },
+    { type: "event_msg", payload: { type: "task_started", turn_id: "root-turn" } },
+    { type: "event_msg", payload: { type: "user_message", message: "Continue" } },
+    { type: "response_item", payload: summary },
+    { type: "compacted", payload: { message: "Internal summary" } },
+  ].map(JSON.stringify).join("\n"));
+  const turns = [{ id: "root-turn", items: [summary, { id: "real-final", type: "agentMessage", text: "Done" }] }];
+  for (const method of ["thread/read", "thread/resume", "thread/turns/list"]) {
+    const result = method === "thread/turns/list" ? { data: turns, threadId } : { thread: { id: threadId, turns } };
+    const response = JSON.parse(sanitizeThreadHistoryImagesForRelay(JSON.stringify({ id: 1, result }), method, { threadId }));
+    const envelope = response.result.thread || response.result;
+    assert.deepEqual(envelope.remodexSuppressedAssistantItemIds, ["summary-id"]);
+    const items = (envelope.turns || envelope.data).flatMap((turn) => turn.items);
+    assert.equal(items.some((item) => item.id === "summary-id"), false);
+    assert.equal(items.some((item) => item.id === "real-final"), true);
+  }
+});

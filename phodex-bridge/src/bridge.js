@@ -90,7 +90,7 @@ const {
 const { createShortPairingCode, SHORT_PAIRING_CODE_LENGTH } = require("./qr");
 const {
   JSONL_OLDER_HANDOFF_CURSOR,
-  parseSessionJsonlTurns,
+  parseSessionJsonlHistory,
   readRecentSessionJsonlCwd,
   readRecentSessionJsonlTurns,
   readSessionJsonlMetadataFromFile,
@@ -3764,7 +3764,7 @@ function sanitizeThreadHistoryImagesForRelay(rawMessage, requestMethod, requestC
   const { thread: threadWithJsonlMetadata, didAugment: didAugmentThreadMetadata } = preserveCwd
     ? { thread: workingThread, didAugment: false }
     : augmentRelayThreadWithJsonlMetadata(workingThread, threadId);
-  const { turns: augmentedTurns, didAugment } = augmentRelayHistoryTurnsWithJsonlArtifacts(
+  const { turns: augmentedTurns, didAugment, suppressedAssistantItemIds = [] } = augmentRelayHistoryTurnsWithJsonlArtifacts(
     sanitizedTurns,
     threadId,
     { includeHistoryItems: true }
@@ -3782,6 +3782,7 @@ function sanitizeThreadHistoryImagesForRelay(rawMessage, requestMethod, requestC
       thread: {
         ...threadWithJsonlMetadata,
         turns: augmentedTurns,
+        ...(suppressedAssistantItemIds.length > 0 ? { remodexSuppressedAssistantItemIds: suppressedAssistantItemIds } : {}),
       },
     },
   });
@@ -3810,7 +3811,7 @@ function sanitizeThreadTurnsListForRelay(rawMessage, requestContext = {}) {
     || inferThreadIdFromTurns(result[turnsKey]);
   const { turns: sanitizedTurns, didSanitize } = sanitizeRelayHistoryTurns(result[turnsKey], threadId);
   const shouldAugmentJsonlArtifacts = requestContext?.skipJsonlArtifactAugmentation !== true;
-  const { turns: augmentedTurns, didAugment } = shouldAugmentJsonlArtifacts
+  const { turns: augmentedTurns, didAugment, suppressedAssistantItemIds = [] } = shouldAugmentJsonlArtifacts
     ? augmentRelayHistoryTurnsWithJsonlArtifacts(sanitizedTurns, threadId)
     : { turns: sanitizedTurns, didAugment: false };
   const didChange = didSanitize || didAugment;
@@ -3820,6 +3821,7 @@ function sanitizeThreadTurnsListForRelay(rawMessage, requestContext = {}) {
       result: {
         ...result,
         [turnsKey]: augmentedTurns,
+        ...(suppressedAssistantItemIds.length > 0 ? { remodexSuppressedAssistantItemIds: suppressedAssistantItemIds } : {}),
       },
     }
     : parsed;
@@ -3988,13 +3990,14 @@ function augmentRelayHistoryTurnsWithJsonlArtifacts(turns, threadId = "", {
       || normalizeNonEmptyString(turn?.turnId)
       || normalizeNonEmptyString(turn?.turn_id)
   )).filter(Boolean));
-  const jsonlArtifactsByTurnId = readJsonlArtifactItemsByTurnId(
+  const { artifactsByTurnId: jsonlArtifactsByTurnId, suppressedAssistantItemIds } = readJsonlArtifactItemsByTurnId(
     normalizedThreadId,
     requestedTurnIds
   );
-  if (jsonlArtifactsByTurnId.size === 0) {
+  if (jsonlArtifactsByTurnId.size === 0 && suppressedAssistantItemIds.length === 0) {
     return { turns, didAugment: false };
   }
+  const suppressedIds = new Set(suppressedAssistantItemIds);
 
   let didAugment = false;
   const augmentedTurns = turns.map((turn) => {
@@ -4002,14 +4005,17 @@ function augmentRelayHistoryTurnsWithJsonlArtifacts(turns, threadId = "", {
       || normalizeNonEmptyString(turn?.turnId)
       || normalizeNonEmptyString(turn?.turn_id);
     const artifacts = turnId ? jsonlArtifactsByTurnId.get(turnId) : null;
-    if (!artifacts || !turn || typeof turn !== "object") {
+    if (!turn || typeof turn !== "object") {
       return turn;
     }
 
-    const items = Array.isArray(turn.items) ? turn.items : [];
+    const originalItems = Array.isArray(turn.items) ? turn.items : [];
+    const items = suppressedIds.size > 0
+      ? originalItems.filter((item) => !(isRelayAssistantHistoryItem(item) && suppressedIds.has(item.id)))
+      : originalItems;
     const merged = mergeRelayHistoryItemsWithJsonlItems(
       items,
-      artifacts.timelineItems,
+      artifacts?.timelineItems || [],
       normalizedThreadId,
       {
         includeJsonlItem: includeHistoryItems
@@ -4019,7 +4025,7 @@ function augmentRelayHistoryTurnsWithJsonlArtifacts(turns, threadId = "", {
     );
     const nextItems = merged.items;
 
-    if (nextItems === items) {
+    if (nextItems === originalItems) {
       return turn;
     }
 
@@ -4030,11 +4036,15 @@ function augmentRelayHistoryTurnsWithJsonlArtifacts(turns, threadId = "", {
     };
   });
 
-  return { turns: didAugment ? augmentedTurns : turns, didAugment };
+  return {
+    turns: didAugment ? augmentedTurns : turns,
+    didAugment: didAugment || suppressedAssistantItemIds.length > 0,
+    suppressedAssistantItemIds,
+  };
 }
 
 function readJsonlArtifactItemsByTurnId(threadId, requestedTurnIds = new Set()) {
-  const emptyArtifactsByTurnId = new Map();
+  const emptyArtifactsByTurnId = { artifactsByTurnId: new Map(), suppressedAssistantItemIds: [] };
   const normalizedThreadId = normalizeNonEmptyString(threadId);
   if (!normalizedThreadId) {
     return emptyArtifactsByTurnId;
@@ -4116,7 +4126,7 @@ function readCachedJsonlArtifactItems(cacheKey, threadId, requestedTurnIds = new
     return null;
   }
   if (now - cached.checkedAt <= RELAY_JSONL_ARTIFACT_CACHE_TTL_MS) {
-    return cached.artifactsByTurnId;
+    return { artifactsByTurnId: cached.artifactsByTurnId, suppressedAssistantItemIds: cached.suppressedAssistantItemIds };
   }
 
   cached.checkedAt = now;
@@ -4132,6 +4142,7 @@ function readAndCacheJsonlArtifactItems(
 ) {
   const rolloutStat = stat || fs.statSync(rolloutPath);
   const artifactsByTurnId = new Map();
+  let suppressedAssistantItemIds = [];
   let coveredTurnIds = new Set();
   let coversEntireRollout = false;
   try {
@@ -4140,6 +4151,7 @@ function readAndCacheJsonlArtifactItems(
       limit: RELAY_TURNS_LIST_SAFE_RETRY_LIMIT,
     });
     let turns = recent?.turns || [];
+    suppressedAssistantItemIds = recent?.suppressedAssistantItemIds || [];
     coversEntireRollout = recent ? !recent.hasOlderTurns : false;
     coveredTurnIds = new Set(turns.map((turn) => normalizeNonEmptyString(turn?.id)).filter(Boolean));
     const missesRequestedTurn = [...requestedTurnIds].some((turnId) => !coveredTurnIds.has(turnId));
@@ -4150,7 +4162,9 @@ function readAndCacheJsonlArtifactItems(
     if (!coversEntireRollout
         && missesRequestedTurn
         && rolloutStat.size <= RELAY_JSONL_FULL_ARTIFACT_FALLBACK_MAX_BYTES) {
-      turns = parseSessionJsonlTurns(fs.readFileSync(rolloutPath, "utf8"), { threadId });
+      const history = parseSessionJsonlHistory(fs.readFileSync(rolloutPath, "utf8"), { threadId });
+      turns = history.turns;
+      suppressedAssistantItemIds = history.suppressedAssistantItemIds;
       coversEntireRollout = true;
       coveredTurnIds = new Set(turns.map((turn) => normalizeNonEmptyString(turn?.id)).filter(Boolean));
     }
@@ -4177,10 +4191,11 @@ function readAndCacheJsonlArtifactItems(
     size: rolloutStat.size,
     checkedAt: Date.now(),
     artifactsByTurnId,
+    suppressedAssistantItemIds,
     coveredTurnIds,
     coversEntireRollout,
   });
-  return artifactsByTurnId;
+  return { artifactsByTurnId, suppressedAssistantItemIds };
 }
 
 function statJsonlRollout(rolloutPath) {

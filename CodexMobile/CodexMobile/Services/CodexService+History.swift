@@ -43,6 +43,32 @@ fileprivate struct CanonicalAssistantTurnTextKey: Hashable {
 }
 
 extension CodexService {
+    nonisolated static func suppressedAssistantItemIDs(
+        from object: RPCObject,
+        key: String = "remodexSuppressedAssistantItemIds"
+    ) -> Set<String> {
+        Set((object[key]?.arrayValue ?? []).compactMap { value in
+            guard let itemID = value.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !itemID.isEmpty else {
+                return nil
+            }
+            return itemID
+        })
+    }
+
+    nonisolated static func removingSuppressedAssistantItems(
+        _ messages: [CodexMessage],
+        itemIDs: Set<String>
+    ) -> [CodexMessage] {
+        guard !itemIDs.isEmpty else { return messages }
+        return messages.filter { message in
+            guard message.role == .assistant, let itemID = message.itemId else {
+                return true
+            }
+            return !itemIDs.contains(itemID)
+        }
+    }
+
     nonisolated static func shouldPreferRecentHistoryWindow(
         existingCount: Int,
         historyCount: Int,
